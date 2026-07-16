@@ -1,0 +1,309 @@
+package com.local.comfyuimobile.bridge
+
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import com.local.comfyuimobile.model.GeneratedPrompt
+import com.local.comfyuimobile.model.ParameterField
+import com.local.comfyuimobile.model.ParameterSection
+import com.local.comfyuimobile.data.WorkflowPolicy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.Base64
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+class ComfyBridge(private val activity: Activity) {
+    val webView: WebView = WebView(activity)
+    @Volatile private var allowedOrigin: String = ""
+
+    @SuppressLint("SetJavaScriptEnabled")
+    fun configure() {
+        webView.settings.javaScriptEnabled = true
+        webView.settings.domStorageEnabled = true
+        webView.settings.databaseEnabled = true
+        webView.settings.mediaPlaybackRequiresUserGesture = false
+        webView.settings.allowFileAccess = false
+        webView.settings.allowContentAccess = false
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                val target = request.url.toString()
+                if (target.startsWith(allowedOrigin)) return false
+                runCatching { activity.startActivity(Intent(Intent.ACTION_VIEW, request.url)) }
+                return true
+            }
+        }
+    }
+
+    suspend fun loadServer(baseUrl: String) = withContext(Dispatchers.Main.immediate) {
+        allowedOrigin = baseUrl.trimEnd('/')
+        if (!webView.url.orEmpty().startsWith(allowedOrigin)) webView.loadUrl("$allowedOrigin/")
+    }
+
+    suspend fun awaitReady(timeoutMillis: Long = 35_000L) {
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        var lastError = "ComfyUI 前端尚未初始化"
+        while (System.currentTimeMillis() < deadline) {
+            val response = runCatching { evaluate(READY_SCRIPT) }.getOrElse { it.message.orEmpty() }
+            val json = runCatching { JSONObject(response) }.getOrNull()
+            if (json?.optBoolean("ok") == true) return
+            lastError = json?.optString("error").takeUnless { it.isNullOrBlank() } ?: lastError
+            delay(500)
+        }
+        throw IllegalStateException("前端桥接超时：$lastError")
+    }
+
+    suspend fun loadWorkflow(rawJson: String): List<ParameterField> {
+        awaitReady()
+        val encoded = Base64.getEncoder().encodeToString(rawJson.toByteArray(Charsets.UTF_8))
+        val response = evaluate(workflowManifestScript(encoded))
+        val root = JSONObject(response)
+        if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "工作流解析失败"))
+        val layout = parseLayout(rawJson)
+        val fieldsJson = root.optJSONArray("fields") ?: JSONArray()
+        return buildList {
+            repeat(fieldsJson.length()) { index ->
+                val item = fieldsJson.getJSONObject(index)
+                val key = item.getString("key")
+                val optionsJson = item.optJSONArray("values") ?: JSONArray()
+                val options = List(optionsJson.length()) { optionsJson.optString(it) }
+                val value = item.opt("value")
+                val nodeType = item.optString("nodeType")
+                val name = item.optString("name")
+                val widgetType = item.optString("widgetType")
+                val kind = ParameterClassifier.kind(nodeType, name, widgetType, value, options)
+                val stored = layout.optJSONObject(key)
+                val label = stored?.optString("label").takeUnless { it.isNullOrBlank() }
+                    ?: ParameterClassifier.label(item.optString("nodeTitle"), name, item.optString("label", name))
+                val section = when (stored?.optString("section")) {
+                    "primary" -> ParameterSection.PRIMARY
+                    "more" -> ParameterSection.MORE
+                    else -> ParameterClassifier.section(nodeType, name, kind)
+                }
+                val valueJson = when (value) {
+                    null, JSONObject.NULL -> "null"
+                    is String -> JSONObject.quote(value)
+                    else -> value.toString()
+                }
+                add(
+                    ParameterField(
+                        key = key,
+                        nodeId = item.optString("nodeId"),
+                        nodeTitle = item.optString("nodeTitle"),
+                        nodeType = nodeType,
+                        name = name,
+                        label = label,
+                        widgetType = widgetType,
+                        kind = kind,
+                        valueJson = valueJson,
+                        displayValue = when (value) {
+                            null, JSONObject.NULL -> ""
+                            else -> value.toString()
+                        },
+                        options = options,
+                        minimum = item.optNullableDouble("min"),
+                        maximum = item.optNullableDouble("max"),
+                        step = item.optNullableDouble("step"),
+                        linked = item.optBoolean("linked"),
+                        visible = stored?.optBoolean("visible", true) ?: true,
+                        section = section,
+                        order = stored?.optInt("order", index) ?: index,
+                        warning = if (kind.name == "UNSUPPORTED") "此控件需在高级编辑中修改" else null,
+                    ),
+                )
+            }
+        }.sortedWith(compareBy<ParameterField> { it.section.ordinal }.thenBy { it.order })
+    }
+
+    suspend fun buildPrompt(fields: List<ParameterField>): GeneratedPrompt {
+        awaitReady()
+        val updates = JSONArray().apply {
+            fields.forEach { field ->
+                put(JSONObject().put("key", field.key).put("value", parseJsonValue(field.valueJson)))
+            }
+        }
+        val encoded = Base64.getEncoder().encodeToString(updates.toString().toByteArray(Charsets.UTF_8))
+        val response = evaluate(promptScript(encoded))
+        val root = JSONObject(response)
+        if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "生成 Prompt 失败"))
+        val prompt = root.getJSONObject("prompt")
+        val workflow = root.getJSONObject("workflow")
+        WorkflowPolicy.writeMobileLayout(workflow, fields)
+        return GeneratedPrompt(prompt.toString(), workflow.toString())
+    }
+
+    suspend fun exportCurrentWorkflow(): String {
+        awaitReady()
+        val response = evaluate(EXPORT_SCRIPT)
+        val root = JSONObject(response)
+        if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "高级编辑同步失败"))
+        return root.getJSONObject("workflow").toString()
+    }
+
+    fun destroy() {
+        webView.stopLoading()
+        webView.destroy()
+    }
+
+    private suspend fun evaluate(script: String): String = withContext(Dispatchers.Main.immediate) {
+        suspendCancellableCoroutine { continuation ->
+            webView.evaluateJavascript(script) { encodedResult ->
+                if (!continuation.isActive) return@evaluateJavascript
+                runCatching { decodeJavascriptResult(encodedResult) }
+                    .onSuccess(continuation::resume)
+                    .onFailure(continuation::resumeWithException)
+            }
+        }
+    }
+
+    private fun decodeJavascriptResult(value: String): String {
+        if (value == "null" || value.isBlank()) return "{}"
+        return JSONArray("[$value]").getString(0)
+    }
+
+    private fun parseLayout(rawJson: String): JSONObject = runCatching {
+        JSONObject(rawJson).optJSONObject("extra")
+            ?.optJSONObject("comfyMobile")
+            ?.optJSONObject("fields") ?: JSONObject()
+    }.getOrDefault(JSONObject())
+
+    private fun parseJsonValue(raw: String): Any = runCatching {
+        JSONObject("{\"v\":$raw}").get("v")
+    }.getOrElse { raw }
+
+    private fun JSONObject.optNullableDouble(name: String): Double? =
+        if (has(name) && !isNull(name)) optDouble(name) else null
+
+    private fun workflowManifestScript(encodedWorkflow: String) = """
+        (async () => {
+          try {
+            const app = window.__comfyMobileApp || (await import('/scripts/app.js')).app;
+            const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedWorkflow'), c => c.charCodeAt(0)));
+            const workflow = JSON.parse(text);
+            await app.loadGraphData(workflow, true, false);
+            const rootGraph = app.rootGraph || app.graph;
+            const loadedIds = new Set((rootGraph?._nodes || []).map(node => String(node.id)));
+            const missing = (workflow.nodes || []).filter(node => !loadedIds.has(String(node.id))).map(node => node.type);
+            if (missing.length) return JSON.stringify({ok:false, error:'缺失节点：' + [...new Set(missing)].join(', ')});
+            const fields = [];
+            const visit = (graph, prefix = '') => {
+                for (const node of (graph?._nodes || [])) {
+                const nodeKey = prefix + String(node.id);
+                for (const widget of (node.widgets || [])) {
+                  if (!widget?.name || widget.type === 'button' || widget.options?.serialize === false) continue;
+                  const input = (node.inputs || []).find(i => i.widget?.name === widget.name || i.name === widget.name);
+                  const values = Array.isArray(widget.options?.values) ? widget.options.values.map(String) : [];
+                  let value = widget.value;
+                  if (typeof value === 'undefined' || typeof value === 'function') value = null;
+                  fields.push({
+                    key: nodeKey + '/' + widget.name,
+                    nodeId: nodeKey,
+                    nodeTitle: node.title || node.type || '',
+                    nodeType: node.comfyClass || node.type || '',
+                    name: widget.name,
+                    label: widget.label || input?.label || widget.name,
+                    widgetType: String(widget.type || typeof value),
+                    value,
+                    values,
+                    min: Number.isFinite(widget.options?.min) ? widget.options.min : null,
+                    max: Number.isFinite(widget.options?.max) ? widget.options.max : null,
+                    step: Number.isFinite(widget.options?.step) ? widget.options.step : null,
+                    linked: input?.link != null,
+                  });
+                }
+                  if (node.subgraph) visit(node.subgraph, nodeKey + ':');
+                }
+                for (const [id, subgraph] of (graph?.subgraphs?.entries?.() || [])) {
+                  visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
+                }
+            };
+            visit(rootGraph);
+            return JSON.stringify({ok:true, fields});
+          } catch (error) {
+            return JSON.stringify({ok:false, error:String(error?.stack || error)});
+          }
+        })()
+    """.trimIndent()
+
+    private fun promptScript(encodedUpdates: String) = """
+        (async () => {
+          try {
+            const app = window.__comfyMobileApp || (await import('/scripts/app.js')).app;
+            const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedUpdates'), c => c.charCodeAt(0)));
+            const updates = JSON.parse(text);
+            const nodeMap = new Map();
+            const visit = (graph, prefix = '') => {
+              for (const node of (graph?._nodes || [])) {
+                const nodeKey = prefix + String(node.id);
+                nodeMap.set(nodeKey, node);
+                if (node.subgraph) visit(node.subgraph, nodeKey + ':');
+              }
+              for (const [id, subgraph] of (graph?.subgraphs?.entries?.() || [])) {
+                visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
+              }
+            };
+            visit(app.rootGraph || app.graph);
+            for (const update of updates) {
+              const cut = update.key.lastIndexOf('/');
+              const node = nodeMap.get(update.key.slice(0, cut));
+              const widget = node?.widgets?.find(w => w.name === update.key.slice(cut + 1));
+              if (!widget) continue;
+              widget.value = update.value;
+              try { widget.callback?.(update.value, app.canvas, node); } catch (_) {}
+            }
+            for (const node of nodeMap.values()) {
+              for (const widget of (node.widgets || [])) {
+                await widget.beforeQueued?.({isPartialExecution:false});
+              }
+            }
+            const result = await app.graphToPrompt();
+            return JSON.stringify({ok:true, prompt:result.output, workflow:result.workflow});
+          } catch (error) {
+            return JSON.stringify({ok:false, error:String(error?.stack || error)});
+          }
+        })()
+    """.trimIndent()
+
+    companion object {
+        private val READY_SCRIPT = """
+            (async () => {
+              try {
+                const mod = await import('/scripts/app.js');
+                if (!(mod.app?.rootGraph || mod.app?.graph)) return JSON.stringify({ok:false,error:'graph not ready'});
+                const settings = mod.app?.ui?.settings;
+                const locale = settings?.getSettingValue?.('Comfy.Locale');
+                if (locale !== 'zh') {
+                  if (typeof settings.setSettingValueAsync === 'function') await settings.setSettingValueAsync('Comfy.Locale', 'zh');
+                  else settings.setSettingValue?.('Comfy.Locale', 'zh');
+                  await new Promise(resolve => setTimeout(resolve, 300));
+                }
+                window.__comfyMobileApp = mod.app;
+                return JSON.stringify({ok:true});
+              } catch (error) {
+                return JSON.stringify({ok:false,error:String(error)});
+              }
+            })()
+        """.trimIndent()
+
+        private val EXPORT_SCRIPT = """
+            (() => {
+              try {
+                const app = window.__comfyMobileApp;
+                const graph = app?.rootGraph || app?.graph;
+                if (!graph) return JSON.stringify({ok:false,error:'graph not ready'});
+                return JSON.stringify({ok:true, workflow:graph.serialize()});
+              } catch (error) {
+                return JSON.stringify({ok:false,error:String(error?.stack || error)});
+              }
+            })()
+        """.trimIndent()
+    }
+}

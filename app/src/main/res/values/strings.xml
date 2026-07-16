@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">ComfyUI Mobile</string>
+    <string name="monitor_channel">ComfyUI 生成任务</string>
+    <string name="update_channel">软件更新</string>
+</resources>
