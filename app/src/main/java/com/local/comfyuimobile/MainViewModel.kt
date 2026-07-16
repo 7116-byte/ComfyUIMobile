@@ -15,7 +15,6 @@ import androidx.lifecycle.viewModelScope
 import com.local.comfyuimobile.bridge.ComfyBridge
 import com.local.comfyuimobile.bridge.WorkflowImageReader
 import com.local.comfyuimobile.data.AppPreferences
-import com.local.comfyuimobile.data.CachePolicy
 import com.local.comfyuimobile.data.LocalResultCache
 import com.local.comfyuimobile.data.PromptHistory
 import com.local.comfyuimobile.data.WorkflowPolicy
@@ -54,8 +53,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -74,7 +71,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var bridge: ComfyBridge? = null
     private var reconnectJob: Job? = null
     private var parameterRefreshJob: Job? = null
-    private val resultCacheMutex = Mutex()
     @Volatile private var lastUpdateCheck: Long = 0L
 
     init {
@@ -513,6 +509,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshTasks() = viewModelScope.launch { refreshTasksInternal() }
     fun refreshResults() = viewModelScope.launch { refreshResultsInternal() }
+    fun refreshLocalResults() = viewModelScope.launch {
+        val local = localResultCache.load()
+        _state.update { it.copy(localResults = local) }
+    }
+
+    fun onLocalResultsSaved(count: Int, failed: Boolean) = viewModelScope.launch {
+        val local = localResultCache.load()
+        _state.update {
+            it.copy(
+                localResults = local,
+                generationMessage = if (failed) "生成完成，但部分本地作品保存失败" else "生成完成，本地已保存 $count 项",
+                notice = if (failed) "部分本地作品保存失败，可保持连接后重新生成" else "本地已完整保存 $count 项",
+            )
+        }
+    }
 
     fun cancelJob(job: JobSummary) {
         viewModelScope.launch {
@@ -802,7 +813,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             else -> it.copy(currentNode = null, state = JobState.SUCCESS, progress = 1f)
                         }
                     }
-                    if (node.isNotBlank()) updateMonitor(id, -1, node) else stopMonitor(id)
+                    if (node.isNotBlank()) updateMonitor(id, -1, node) else updateMonitor(id, 100, null)
                     if (id in _state.value.submittedJobIds) {
                         if (node.isBlank()) {
                             if (!wasFailed) {
@@ -811,7 +822,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                         activeJobId = id,
                                         currentExecutingNodeId = null,
                                         generationProgress = 1f,
-                                        generationMessage = "生成完成，结果已经刷新",
+                                        generationMessage = "生成完成，正在后台保存本地作品",
                                         notice = "生成完成：${id.take(8)}",
                                     )
                                 }
@@ -837,19 +848,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
-            "executed" -> viewModelScope.launch { refreshResultsInternal() }
+            "executed" -> Unit
             "execution_success" -> {
                 val id = data.optTextOrEmpty("prompt_id")
                 if (id.isNotBlank()) {
                     updateJob(id) { it.copy(state = JobState.SUCCESS, progress = 1f, currentNode = null) }
-                    stopMonitor(id)
                     if (id in _state.value.submittedJobIds) {
                         _state.update {
                             it.copy(
                                 activeJobId = id,
                                 currentExecutingNodeId = null,
                                 generationProgress = 1f,
-                                generationMessage = "生成完成，结果已经刷新",
+                                generationMessage = "生成完成，正在后台保存本地作品",
                                 notice = "生成完成：${id.take(8)}",
                             )
                         }
@@ -868,7 +878,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val detail = data.optTextOrEmpty("exception_message").ifBlank { if (type == "execution_interrupted") "任务已中断" else "服务器执行失败" }
                 if (id.isNotBlank()) {
                     updateJob(id) { it.copy(state = if (type == "execution_interrupted") JobState.CANCELLED else JobState.ERROR, currentNode = nodeId.ifBlank { null }, message = detail) }
-                    stopMonitor(id)
                     if (id in _state.value.submittedJobIds) {
                         _state.update {
                             it.copy(
@@ -921,34 +930,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ResultParser.parse(client.serverUrl(), history)
         }.onSuccess { results ->
             _state.update { it.copy(results = results) }
-            cacheWhitelistedResults(results)
-        }
-    }
-
-    private suspend fun cacheWhitelistedResults(results: List<ResultMedia>) = resultCacheMutex.withLock {
-        val ui = _state.value
-        val eligible = results.filter { media ->
-            CachePolicy.shouldCache(media, ui.submittedJobIds, ui.cacheOutputRules, client.serverUrl(), ui.cacheClearedAt)
-        }
-        var failed = 0
-        for (media in eligible) {
-            if (localResultCache.contains(media)) continue
-            val destination = localResultCache.destination(media)
-            try {
-                destination.parentFile?.mkdirs()
-                client.downloadTo(media.url, destination.outputStream())
-                localResultCache.add(media, destination)
-            } catch (error: Throwable) {
-                failed += 1
-                destination.delete()
-            }
-        }
-        val local = localResultCache.load()
-        _state.update {
-            it.copy(
-                localResults = local,
-                notice = if (failed > 0) "有 $failed 项本地保存失败，刷新结果可重试" else it.notice,
-            )
         }
     }
 

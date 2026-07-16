@@ -17,6 +17,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.local.comfyuimobile.bridge.ComfyBridge
+import com.local.comfyuimobile.service.JobMonitorService
 import com.local.comfyuimobile.ui.ComfyMobileApp
 import com.local.comfyuimobile.ui.ComfyMobileTheme
 import com.local.comfyuimobile.update.UpdateManager
@@ -26,6 +27,7 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     private lateinit var bridge: ComfyBridge
     private var receiverRegistered = false
+    private var localResultsReceiverRegistered = false
 
     private val downloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -38,12 +40,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val localResultsReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            viewModel.onLocalResultsSaved(
+                count = intent.getIntExtra(JobMonitorService.EXTRA_SAVED_COUNT, 0),
+                failed = intent.getBooleanExtra(JobMonitorService.EXTRA_SAVE_FAILED, false),
+            )
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         bridge = ComfyBridge(this).also { it.configure() }
         viewModel.attachBridge(bridge)
         requestRuntimePermissions()
         registerDownloadReceiver()
+        registerLocalResultsReceiver()
         setContent {
             ComfyMobileTheme {
                 ComfyMobileApp(viewModel, bridge)
@@ -54,6 +66,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         if (receiverRegistered) unregisterReceiver(downloadReceiver)
+        if (localResultsReceiverRegistered) unregisterReceiver(localResultsReceiver)
         bridge.destroy()
         super.onDestroy()
     }
@@ -62,6 +75,12 @@ class MainActivity : ComponentActivity() {
         val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
         ContextCompat.registerReceiver(this, downloadReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         receiverRegistered = true
+    }
+
+    private fun registerLocalResultsReceiver() {
+        val filter = IntentFilter(JobMonitorService.ACTION_LOCAL_RESULTS_UPDATED)
+        ContextCompat.registerReceiver(this, localResultsReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        localResultsReceiverRegistered = true
     }
 
     private fun requestRuntimePermissions() {

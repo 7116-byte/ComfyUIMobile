@@ -16,7 +16,6 @@ import java.io.File
 class LocalResultCache(context: Context) {
     private val root = File(context.filesDir, "result_cache")
     private val indexFile = File(root, "index.json")
-    private val mutex = Mutex()
 
     suspend fun load(): List<ResultMedia> = withContext(Dispatchers.IO) {
         mutex.withLock { readIndex().mapNotNull(::decodeRecord).sortedByDescending { it.createdAt } }
@@ -110,4 +109,8 @@ class LocalResultCache(context: Context) {
         listOf(media.jobId, media.nodeId, media.type, media.subfolder, media.filename).joinToString("/")
 
     private fun safe(value: String): String = value.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80).ifBlank { "item" }
+
+    companion object {
+        private val mutex = Mutex()
+    }
 }

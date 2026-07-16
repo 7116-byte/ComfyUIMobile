@@ -45,4 +45,14 @@ class CachePolicyTest {
         assertFalse(CachePolicy.shouldCache(old, setOf("app-job"), listOf(rule), rule.serverUrl, cacheClearedAt = 2_000L))
         assertTrue(CachePolicy.shouldCache(new, setOf("new-job"), listOf(rule), rule.serverUrl, cacheClearedAt = 2_000L))
     }
+
+    @Test fun keepsEveryEligibleImageFromOneBatch() {
+        val batch = (1..4).map { index -> media.copy(filename = "batch_$index.png", createdAt = 3_000L) }
+
+        val eligible = batch.filter {
+            CachePolicy.shouldCache(it, setOf("app-job"), listOf(rule), rule.serverUrl, cacheClearedAt = 2_000L)
+        }
+
+        assertTrue(eligible.size == 4)
+    }
 }
