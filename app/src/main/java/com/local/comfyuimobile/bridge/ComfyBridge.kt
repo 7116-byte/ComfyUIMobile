@@ -311,6 +311,16 @@ class ComfyBridge(private val activity: Activity) {
         return root.getJSONObject("workflow").toString()
     }
 
+    suspend fun invokeWidgetButton(nodeId: String, actionToken: String): String {
+        awaitReady()
+        val payload = JSONObject().put("nodeId", nodeId).put("actionToken", actionToken)
+        val encoded = Base64.getEncoder().encodeToString(payload.toString().toByteArray(Charsets.UTF_8))
+        val response = evaluate(widgetButtonScript(encoded))
+        val root = JSONObject(response)
+        if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "网页按钮操作失败"))
+        return root.getJSONObject("workflow").toString()
+    }
+
     fun destroy() {
         webView.stopLoading()
         webView.destroy()
@@ -763,6 +773,30 @@ class ComfyBridge(private val activity: Activity) {
                 return JSON.stringify({ok:true, workflow:graph.serialize()});
               } catch (error) {
                 return JSON.stringify({ok:false,error:'高级编辑同步错误：' + String(error?.stack || error)});
+              }
+            })()
+        """.trimIndent()
+
+        private fun widgetButtonScript(encodedPayload: String) = """
+            (async () => {
+              try {
+                const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob('$encodedPayload'), c => c.charCodeAt(0))));
+                const app = window.__comfyMobileApp;
+                const graph = app?.rootGraph || app?.graph;
+                if (!graph) return JSON.stringify({ok:false,error:'工作流画布尚未就绪'});
+                const node = (graph._nodes || []).find(item => String(item.id) === String(payload.nodeId));
+                if (!node) return JSON.stringify({ok:false,error:'找不到种子部件 ' + payload.nodeId});
+                const widget = (node.widgets || []).find(item => item?.type === 'button' && String(item.name || '').includes(payload.actionToken));
+                if (!widget) return JSON.stringify({ok:false,error:'网页中没有此种子操作'});
+                if (widget.disabled) return JSON.stringify({ok:false,error:'当前还没有可使用的上次排队种子'});
+                const action = widget.callback || widget.onClick;
+                if (typeof action !== 'function') return JSON.stringify({ok:false,error:'种子按钮没有可执行回调'});
+                const result = action.call(widget);
+                if (result && typeof result.then === 'function') await result;
+                await new Promise(resolve => setTimeout(resolve, 50));
+                return JSON.stringify({ok:true, workflow:graph.serialize()});
+              } catch (error) {
+                return JSON.stringify({ok:false,error:'种子操作错误：' + String(error?.stack || error)});
               }
             })()
         """.trimIndent()

@@ -88,6 +88,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         submittedJobIds = stored.submittedJobs,
                         autoSaveResults = stored.autoSaveResults,
                         cacheOutputRules = stored.cacheOutputRules,
+                        cacheClearedAt = stored.cacheClearedAt,
                         serverInput = it.activeServer?.baseUrl
                             ?: stored.activeServerUrl.ifBlank { it.serverInput },
                     )
@@ -291,8 +292,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun finishAdvancedEditor() {
         val document = _state.value.selectedWorkflow
+        _state.update { it.copy(advancedEditor = false) }
         if (document == null) {
-            setAdvancedEditor(false)
             return
         }
         viewModelScope.launch {
@@ -304,8 +305,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         selectedWorkflow = document.copy(rawJson = raw, fields = manifest.fields, nodes = manifest.nodes),
                         fields = manifest.fields,
-                        advancedEditor = false,
                         nodeProblems = emptyMap(),
+                        notice = "已关闭 ComfyUI 网页并刷新工作流参数",
+                    )
+                }
+            }
+        }
+    }
+
+    fun invokeSeedAction(nodeId: String, actionToken: String, successMessage: String) {
+        val document = _state.value.selectedWorkflow ?: return
+        viewModelScope.launch {
+            runOperation("种子操作失败") {
+                val activeBridge = bridge ?: error("前端桥接不可用")
+                val raw = activeBridge.invokeWidgetButton(nodeId, actionToken)
+                val manifest = activeBridge.loadWorkflow(raw)
+                _state.update {
+                    it.copy(
+                        selectedWorkflow = document.copy(rawJson = raw, fields = manifest.fields, nodes = manifest.nodes),
+                        fields = manifest.fields,
+                        nodeProblems = emptyMap(),
+                        notice = successMessage,
                     )
                 }
             }
@@ -572,7 +592,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update {
                 it.copy(
                     cacheOutputRules = updated,
-                    notice = if (existing == null) "已将 ${node.title} 加入本地缓存白名单" else "已将 ${node.title} 移出本地缓存白名单",
+                    notice = if (existing == null) "已将 ${node.title} 加入本地保存白名单" else "已将 ${node.title} 移出本地保存白名单",
                 )
             }
         }
@@ -596,9 +616,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearLocalCache() {
         viewModelScope.launch {
-            runOperation("清空本地缓存失败") {
+            runOperation("删除本地作品失败") {
+                val clearedAt = System.currentTimeMillis()
+                preferences.setCacheClearedAt(clearedAt)
                 localResultCache.clear()
-                _state.update { it.copy(localResults = emptyList(), notice = "本地生成缓存已清空") }
+                _state.update {
+                    it.copy(
+                        localResults = emptyList(),
+                        cacheClearedAt = clearedAt,
+                        notice = "本地作品已删除，旧任务不会重新下载",
+                    )
+                }
             }
         }
     }
@@ -900,7 +928,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun cacheWhitelistedResults(results: List<ResultMedia>) = resultCacheMutex.withLock {
         val ui = _state.value
         val eligible = results.filter { media ->
-            CachePolicy.shouldCache(media, ui.submittedJobIds, ui.cacheOutputRules, client.serverUrl())
+            CachePolicy.shouldCache(media, ui.submittedJobIds, ui.cacheOutputRules, client.serverUrl(), ui.cacheClearedAt)
         }
         var failed = 0
         for (media in eligible) {
@@ -919,7 +947,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update {
             it.copy(
                 localResults = local,
-                notice = if (failed > 0) "有 $failed 项本地缓存失败，刷新结果可重试" else it.notice,
+                notice = if (failed > 0) "有 $failed 项本地保存失败，刷新结果可重试" else it.notice,
             )
         }
     }

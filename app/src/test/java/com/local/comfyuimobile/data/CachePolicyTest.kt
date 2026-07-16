@@ -37,4 +37,12 @@ class CachePolicyTest {
         assertFalse(CachePolicy.shouldCache(media.copy(workflowPath = "workflows/b.json"), setOf("app-job"), listOf(rule), rule.serverUrl))
         assertFalse(CachePolicy.shouldCache(media, setOf("app-job"), listOf(rule), "http://192.168.10.110:8188"))
     }
+
+    @Test fun clearedCacheDoesNotDownloadOldHistoryAgain() {
+        val old = media.copy(createdAt = 1_000L)
+        val new = media.copy(jobId = "new-job", createdAt = 3_000L)
+
+        assertFalse(CachePolicy.shouldCache(old, setOf("app-job"), listOf(rule), rule.serverUrl, cacheClearedAt = 2_000L))
+        assertTrue(CachePolicy.shouldCache(new, setOf("new-job"), listOf(rule), rule.serverUrl, cacheClearedAt = 2_000L))
+    }
 }

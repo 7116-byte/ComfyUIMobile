@@ -47,4 +47,19 @@ class ResultParserTest {
         assertEquals(4, result.size)
         assertEquals(setOf("batch_00001.png", "batch_00002.png", "batch_00003.png", "batch_00004.png"), result.map { it.filename }.toSet())
     }
+
+    @Test fun sameCloudFileAddressFromDifferentJobsHasDistinctUiKeys() {
+        val history = JSONObject(
+            """{
+              "job-a":{"outputs":{"350":{"images":[{"filename":"ComfyUI_temp_00001_.png","type":"temp"}]}}},
+              "job-b":{"outputs":{"350":{"images":[{"filename":"ComfyUI_temp_00001_.png","type":"temp"}]}}}
+            }""",
+        )
+
+        val result = ResultParser.parse("http://192.168.10.109:8188", history)
+
+        assertEquals(2, result.size)
+        assertEquals(2, result.map { it.stableKey() }.toSet().size)
+        assertEquals(1, result.map { it.url }.toSet().size)
+    }
 }

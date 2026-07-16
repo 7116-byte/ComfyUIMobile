@@ -3,6 +3,7 @@ package com.local.comfyuimobile.ui
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -173,27 +174,45 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
-        if (!state.advancedEditor) {
-            if (state.activeServer == null) {
-                ConnectionPage(state, viewModel, snackbar)
-            } else {
-                ConnectedApp(state, viewModel, snackbar)
+    BackHandler(enabled = state.advancedEditor) { viewModel.finishAdvancedEditor() }
+    Column(Modifier.fillMaxSize()) {
+        if (state.advancedEditor) {
+            Surface(tonalElevation = 4.dp) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("ComfyUI 网页编辑", style = MaterialTheme.typography.titleMedium)
+                        Text(state.activeServer?.baseUrl.orEmpty(), style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                    }
+                    TextButton(onClick = viewModel::finishAdvancedEditor) {
+                        Icon(Icons.Default.Close, null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("关闭并刷新参数")
+                    }
+                }
             }
         }
-        AndroidView(
-            factory = { bridge.webView },
-            modifier = if (state.advancedEditor) Modifier.fillMaxSize() else Modifier.size(1.dp).alpha(0f),
-        )
-        if (state.advancedEditor) {
-            FilledTonalButton(
-                onClick = viewModel::finishAdvancedEditor,
-                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
-            ) {
-                Icon(Icons.Default.Close, null)
-                Spacer(Modifier.width(6.dp))
-                Text("完成并返回参数页")
+        Box(Modifier.fillMaxWidth().weight(1f)) {
+            if (!state.advancedEditor) {
+                if (state.activeServer == null) {
+                    ConnectionPage(state, viewModel, snackbar)
+                } else {
+                    ConnectedApp(state, viewModel, snackbar)
+                }
             }
+            AndroidView(
+                factory = { bridge.webView },
+                update = { view ->
+                    if (state.advancedEditor) {
+                        view.onResume()
+                        view.requestLayout()
+                        view.invalidate()
+                    }
+                },
+                modifier = if (state.advancedEditor) Modifier.fillMaxSize() else Modifier.size(1.dp).alpha(0f),
+            )
         }
     }
 }
@@ -554,9 +573,9 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         uploadField = null
     }
     val visibleFields = state.fields.filter { it.visible }.groupBy { it.nodeId }
-    val nodes = workflow.nodes.sortedBy { it.order }.mapNotNull { node ->
+    val nodes = workflow.nodes.sortedBy { it.order }.map { node ->
         val fields = visibleFields[node.id].orEmpty().sortedBy { it.order }
-        if (fields.isNotEmpty() || node.isOutput) node to fields else null
+        node to fields
     }
     val localProblems = FieldValidator.detailedProblems(state.fields)
     val localProblemsByNode = localProblems.groupBy { it.nodeId }.mapValues { (_, items) -> items.map { it.message } }
@@ -647,7 +666,7 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
             it.serverUrl == state.activeServer?.baseUrl && it.workflowPath == workflow.entry.path && it.nodeId == node.id
         }
         ConfirmDialog(
-            title = if (cached) "移出本地缓存白名单" else "加入本地缓存白名单",
+            title = if (cached) "移出本地保存白名单" else "加入本地保存白名单",
             message = if (cached) {
                 "以后不再自动缓存“${node.title}”的输出，已经缓存的文件不会删除。"
             } else {
@@ -706,8 +725,8 @@ private fun NodeParameterCard(
                         },
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    if (cached) Text("本地缓存白名单", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
-                    if (node.isOutput) Text("长按管理本地缓存", style = MaterialTheme.typography.labelSmall)
+                    if (cached) Text("本地保存白名单", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
+                    if (node.isOutput) Text("长按管理本地保存", style = MaterialTheme.typography.labelSmall)
                     if (active) Text("正在执行", color = Color(0xFF35C46A), style = MaterialTheme.typography.labelMedium)
                 }
                 Spacer(Modifier.width(6.dp))
@@ -719,10 +738,27 @@ private fun NodeParameterCard(
                 HorizontalDivider()
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     problems.forEach { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-                    if (fields.isEmpty()) Text("此输出部件没有可调整参数。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (fields.isEmpty() && !node.type.contains("Seed (rgthree)", ignoreCase = true)) {
+                        Text("此部件没有可调整参数。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     fields.forEachIndexed { index, field ->
                         ParameterEditor(field, viewModel, onHistory = { onHistory(field) }, onUpload = { onUpload(field) })
                         if (index < fields.lastIndex) HorizontalDivider()
+                    }
+                    if (node.type.contains("Seed (rgthree)", ignoreCase = true)) {
+                        Text("种子快捷操作", style = MaterialTheme.typography.titleSmall)
+                        FilledTonalButton(
+                            onClick = { viewModel.invokeSeedAction(node.id, "Randomize Each Time", "已设为每次生成随机") },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("每次生成随机") }
+                        FilledTonalButton(
+                            onClick = { viewModel.invokeSeedAction(node.id, "New Fixed Random", "已生成新的固定种子") },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("生成新的固定种子") }
+                        OutlinedButton(
+                            onClick = { viewModel.invokeSeedAction(node.id, "Use Last Queued Seed", "已使用上次排队种子") },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("使用上次排队种子") }
                     }
                 }
             }
@@ -762,7 +798,7 @@ private fun ParameterEditor(field: ParameterField, viewModel: MainViewModel, onH
             ParameterKind.COMBO -> ComboField(field, viewModel)
             ParameterKind.INTEGER, ParameterKind.DECIMAL -> {
                 NumberField(field, viewModel)
-                if (field.name.contains("seed", ignoreCase = true)) {
+                if (field.name.contains("seed", ignoreCase = true) && !field.nodeType.contains("Seed (rgthree)", ignoreCase = true)) {
                     FilledTonalButton(onClick = {
                         val upper = field.maximum?.toLong()?.coerceAtMost(Long.MAX_VALUE - 1) ?: Long.MAX_VALUE - 1
                         viewModel.updateField(field.key, Random.nextLong(0, upper.coerceAtLeast(1) + 1).toString())
@@ -926,7 +962,7 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
                 TextButton(onClick = { selectedAlbumId = null }) { Text("‹ 返回相册") }
             } else {
                 Text(
-                    if (source == ResultSource.LOCAL) "仅显示本 App 白名单缓存" else "ComfyUI 服务器媒体资产",
+                    if (source == ResultSource.LOCAL) "手机独立保存的白名单作品" else "ComfyUI 服务器媒体资产",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.weight(1f),
                 )
@@ -943,7 +979,7 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
             }
             media.isEmpty() -> EmptyState(
                 Icons.Default.Image,
-                if (source == ResultSource.LOCAL) "暂无本地缓存\n请在参数页长按输出部件加入白名单" else "云端暂无图片或视频",
+                if (source == ResultSource.LOCAL) "暂无本地作品\n请在参数页长按输出部件加入本地保存白名单" else "云端暂无图片或视频",
             )
             layout == ResultLayout.ALL -> ResultMediaGrid(media) { openMedia(it, media) }
             else -> LazyVerticalGrid(
@@ -1001,7 +1037,7 @@ private fun ResultMediaGrid(media: List<ResultMedia>, onOpen: (ResultMedia) -> U
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        gridItems(media, key = { it.localPath ?: it.url }) { item ->
+        gridItems(media, key = { it.stableKey() }) { item ->
             Card(Modifier.fillMaxWidth().clickable { onOpen(item) }) {
                 MediaCover(item, Modifier.fillMaxWidth().aspectRatio(1f))
                 Text(item.filename, Modifier.padding(6.dp), maxLines = 1, style = MaterialTheme.typography.labelSmall)
@@ -1215,6 +1251,19 @@ private fun JobCard(job: JobSummary, viewModel: MainViewModel) {
 
 @Composable
 private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismiss: () -> Unit) {
+    var confirmDeleteLocal by remember { mutableStateOf(false) }
+    if (confirmDeleteLocal) {
+        ConfirmDialog(
+            title = "删除全部本地作品",
+            message = "只删除手机中现有的 ${state.localResults.size} 项本地作品，不会删除电脑端云端资产。白名单仍会生效，之后新生成的结果仍会保存到手机；已经保存的本地作品不会因云端以后删除而消失。",
+            onDismiss = { confirmDeleteLocal = false },
+            onConfirm = {
+                viewModel.clearLocalCache()
+                confirmDeleteLocal = false
+            },
+        )
+        return
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("设置") },
@@ -1228,9 +1277,9 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
                     stats.devices.forEach { Text("${it.name}\n显存 ${formatSize(it.vramFree)} / ${formatSize(it.vramTotal)} 可用") }
                 }
                 HorizontalDivider()
-                Text("本地缓存白名单", style = MaterialTheme.typography.titleSmall)
+                Text("本地作品保存白名单", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "只缓存本 App 提交任务中指定输出部件的结果；电脑浏览器提交的任务不会进入本地。可在参数页长按输出部件添加。",
+                    "把本 App 提交任务中指定输出部件的结果独立保存到手机；电脑浏览器提交的任务不会进入本地。保存后即使云端删除，本地作品仍然保留。",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (state.cacheOutputRules.isEmpty()) {
@@ -1250,8 +1299,8 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
                         }
                     }
                 }
-                OutlinedButton(onClick = viewModel::clearLocalCache, enabled = state.localResults.isNotEmpty()) {
-                    Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("清空本地缓存（${state.localResults.size} 项）")
+                OutlinedButton(onClick = { confirmDeleteLocal = true }, enabled = state.localResults.isNotEmpty()) {
+                    Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("删除全部本地作品（${state.localResults.size} 项）")
                 }
                 HorizontalDivider()
                 Text("软件更新", style = MaterialTheme.typography.titleSmall)

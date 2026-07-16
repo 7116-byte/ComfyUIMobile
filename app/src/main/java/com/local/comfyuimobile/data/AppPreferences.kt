@@ -24,6 +24,7 @@ data class StoredSettings(
     val lastUpdateCheck: Long = 0L,
     val recentWorkflow: String = "",
     val cacheOutputRules: List<CacheOutputRule> = emptyList(),
+    val cacheClearedAt: Long = 0L,
 )
 
 class AppPreferences(private val context: Context) {
@@ -36,6 +37,7 @@ class AppPreferences(private val context: Context) {
         val lastUpdateCheck = longPreferencesKey("last_update_check")
         val recentWorkflow = stringPreferencesKey("recent_workflow")
         val cacheOutputRules = stringPreferencesKey("cache_output_rules")
+        val cacheClearedAt = longPreferencesKey("cache_cleared_at")
     }
 
     val settings: Flow<StoredSettings> = context.dataStore.data.map { preferences ->
@@ -48,6 +50,7 @@ class AppPreferences(private val context: Context) {
             lastUpdateCheck = preferences[Keys.lastUpdateCheck] ?: 0L,
             recentWorkflow = preferences[Keys.recentWorkflow].orEmpty(),
             cacheOutputRules = decodeCacheOutputRules(preferences[Keys.cacheOutputRules].orEmpty()),
+            cacheClearedAt = preferences[Keys.cacheClearedAt] ?: 0L,
         )
     }
 
@@ -105,6 +108,10 @@ class AppPreferences(private val context: Context) {
                 }
             }.toString()
         }
+    }
+
+    suspend fun setCacheClearedAt(timestamp: Long) {
+        context.dataStore.edit { it[Keys.cacheClearedAt] = timestamp }
     }
 
     private fun decodeProfiles(raw: String): List<ServerProfile> = runCatching {

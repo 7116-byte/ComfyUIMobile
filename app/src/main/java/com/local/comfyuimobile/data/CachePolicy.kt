@@ -9,7 +9,8 @@ object CachePolicy {
         submittedJobIds: Set<String>,
         rules: List<CacheOutputRule>,
         serverUrl: String,
-    ): Boolean = media.jobId in submittedJobIds && media.workflowPath.isNotBlank() && rules.any { rule ->
+        cacheClearedAt: Long = 0L,
+    ): Boolean = media.jobId in submittedJobIds && media.createdAt >= cacheClearedAt && media.workflowPath.isNotBlank() && rules.any { rule ->
         rule.enabled &&
             rule.serverUrl == serverUrl &&
             rule.workflowPath == media.workflowPath &&

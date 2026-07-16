@@ -117,7 +117,9 @@ data class ResultMedia(
     val workflowName: String = "",
     val source: ResultSource = ResultSource.CLOUD,
     val localPath: String? = null,
-)
+) {
+    fun stableKey(): String = listOf(jobId, nodeId, type, subfolder, filename).joinToString("/")
+}
 
 data class CacheOutputRule(
     val serverUrl: String,
@@ -161,6 +163,7 @@ data class AppUiState(
     val results: List<ResultMedia> = emptyList(),
     val localResults: List<ResultMedia> = emptyList(),
     val cacheOutputRules: List<CacheOutputRule> = emptyList(),
+    val cacheClearedAt: Long = 0L,
     val nodeProblems: Map<String, List<String>> = emptyMap(),
     val activeJobId: String? = null,
     val currentExecutingNodeId: String? = null,
