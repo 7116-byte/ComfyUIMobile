@@ -55,12 +55,28 @@ data class ParameterField(
     val warning: String? = null,
     val widgetIndex: Int = -1,
     val refreshesWorkflow: Boolean = false,
+    val nodeOrder: Int = 0,
+)
+
+data class WorkflowNode(
+    val id: String,
+    val title: String,
+    val type: String,
+    val order: Int,
+    val isController: Boolean = false,
+    val isOutput: Boolean = false,
+)
+
+data class WorkflowManifest(
+    val fields: List<ParameterField>,
+    val nodes: List<WorkflowNode>,
 )
 
 data class WorkflowDocument(
     val entry: WorkflowEntry,
     val rawJson: String,
     val fields: List<ParameterField>,
+    val nodes: List<WorkflowNode> = emptyList(),
 )
 
 enum class JobState { RUNNING, PENDING, SUCCESS, ERROR, CANCELLED, UNKNOWN }
@@ -76,6 +92,7 @@ data class JobSummary(
 )
 
 enum class MediaKind { IMAGE, VIDEO }
+enum class ResultSource { LOCAL, CLOUD }
 
 data class ResultMedia(
     val jobId: String,
@@ -85,7 +102,25 @@ data class ResultMedia(
     val type: String,
     val kind: MediaKind,
     val url: String,
+    val createdAt: Long = 0L,
+    val taskNumber: Long = 0L,
+    val workflowPath: String = "",
+    val workflowName: String = "",
+    val source: ResultSource = ResultSource.CLOUD,
+    val localPath: String? = null,
 )
+
+data class CacheOutputRule(
+    val serverUrl: String,
+    val workflowPath: String,
+    val workflowName: String,
+    val nodeId: String,
+    val nodeTitle: String,
+    val nodeType: String,
+    val enabled: Boolean = true,
+)
+
+data class FieldProblem(val fieldKey: String, val nodeId: String, val message: String)
 
 data class GeneratedPrompt(
     val promptJson: String,
@@ -115,6 +150,9 @@ data class AppUiState(
     val fields: List<ParameterField> = emptyList(),
     val jobs: List<JobSummary> = emptyList(),
     val results: List<ResultMedia> = emptyList(),
+    val localResults: List<ResultMedia> = emptyList(),
+    val cacheOutputRules: List<CacheOutputRule> = emptyList(),
+    val nodeProblems: Map<String, List<String>> = emptyMap(),
     val promptHistory: List<String> = emptyList(),
     val submittedJobIds: Set<String> = emptySet(),
     val autoSaveResults: Boolean = false,

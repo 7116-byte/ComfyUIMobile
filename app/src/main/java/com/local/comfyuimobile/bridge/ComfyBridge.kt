@@ -12,6 +12,8 @@ import android.webkit.WebViewClient
 import com.local.comfyuimobile.model.GeneratedPrompt
 import com.local.comfyuimobile.model.ParameterField
 import com.local.comfyuimobile.model.ParameterSection
+import com.local.comfyuimobile.model.WorkflowManifest
+import com.local.comfyuimobile.model.WorkflowNode
 import com.local.comfyuimobile.data.WorkflowPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -130,7 +132,7 @@ class ComfyBridge(private val activity: Activity) {
         throw IllegalStateException("前端桥接超时：$lastError")
     }
 
-    suspend fun loadWorkflow(rawJson: String): List<ParameterField> {
+    suspend fun loadWorkflow(rawJson: String): WorkflowManifest {
         awaitReady()
         val encoded = Base64.getEncoder().encodeToString(rawJson.toByteArray(Charsets.UTF_8))
         val response = evaluate(workflowManifestScript(encoded))
@@ -138,7 +140,7 @@ class ComfyBridge(private val activity: Activity) {
         if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "工作流解析失败"))
         val layout = parseLayout(rawJson)
         val fieldsJson = root.optJSONArray("fields") ?: JSONArray()
-        return buildList {
+        val fields = buildList {
             repeat(fieldsJson.length()) { index ->
                 val item = fieldsJson.getJSONObject(index)
                 val key = item.getString("key")
@@ -192,10 +194,28 @@ class ComfyBridge(private val activity: Activity) {
                         warning = if (kind.name == "UNSUPPORTED") "此控件需在高级编辑中修改" else null,
                         widgetIndex = item.optInt("widgetIndex", -1),
                         refreshesWorkflow = item.optBoolean("refreshesWorkflow"),
+                        nodeOrder = item.optInt("nodeOrder"),
                     ),
                 )
             }
-        }.sortedWith(compareBy<ParameterField> { it.section.ordinal }.thenBy { it.order })
+        }.sortedWith(compareBy<ParameterField> { it.nodeOrder }.thenBy { it.order })
+        val nodesJson = root.optJSONArray("nodes") ?: JSONArray()
+        val nodes = buildList {
+            repeat(nodesJson.length()) { index ->
+                val item = nodesJson.getJSONObject(index)
+                add(
+                    WorkflowNode(
+                        id = item.getString("id"),
+                        title = item.optString("title").ifBlank { item.optString("type", "未命名节点") },
+                        type = item.optString("type"),
+                        order = item.optInt("order", index),
+                        isController = item.optBoolean("isController"),
+                        isOutput = item.optBoolean("isOutput"),
+                    ),
+                )
+            }
+        }.sortedBy { it.order }
+        return WorkflowManifest(fields, nodes)
     }
 
     suspend fun extractWorkflowFromImage(uri: Uri, mimeType: String?, filename: String): String {
@@ -398,12 +418,64 @@ class ComfyBridge(private val activity: Activity) {
             const loadedIds = new Set((rootGraph?._nodes || []).map(node => String(node.id)));
             const missing = (workflow.nodes || []).filter(node => !loadedIds.has(String(node.id))).map(node => node.type);
             if (missing.length) return JSON.stringify({ok:false, error:'缺失节点：' + [...new Set(missing)].join(', ')});
+            const activeNodes = (rootGraph?._nodes || []).filter(node => ![2, 4].includes(Number(node.mode ?? 0)));
+            const nodeById = new Map(activeNodes.map(node => [String(node.id), node]));
+            const getLink = (id) => rootGraph?.links?.get?.(id) ?? rootGraph?.links?.[id];
+            const parentIds = (node) => (node.inputs || []).map(input => {
+              const link = input.link == null ? null : getLink(input.link);
+              return link == null ? null : String(link.origin_id ?? link.originId ?? link[1]);
+            }).filter(id => id && nodeById.has(id));
+            const isOutputNode = (node) => {
+              const data = node.constructor?.nodeData || node.nodeData || {};
+              return data.output_node === true || data.outputNode === true || /(?:Save|Preview|Output)/i.test(String(node.comfyClass || node.type || ''));
+            };
+            const outputNodes = activeNodes.filter(node => isOutputNode(node) && (node.inputs || []).some(input => input.link != null));
+            if (!outputNodes.length) return JSON.stringify({ok:false, error:'当前工作流没有已连线的输出节点'});
+            const executionIds = new Set();
+            const includeAncestors = (node) => {
+              const id = String(node.id);
+              if (executionIds.has(id)) return;
+              executionIds.add(id);
+              for (const parentId of parentIds(node)) includeAncestors(nodeById.get(parentId));
+            };
+            outputNodes.forEach(includeAncestors);
+            const isController = (node) => /Fast Groups (?:Bypasser|Muter)/i.test(String(node.comfyClass || node.type || ''));
+            const controllers = activeNodes.filter(isController);
+            const depthCache = new Map();
+            const depthOf = (node, visiting = new Set()) => {
+              const id = String(node.id);
+              if (depthCache.has(id)) return depthCache.get(id);
+              if (visiting.has(id)) return 0;
+              const next = new Set(visiting); next.add(id);
+              const parents = parentIds(node).filter(parent => executionIds.has(parent));
+              const depth = parents.length ? 1 + Math.max(...parents.map(parent => depthOf(nodeById.get(parent), next))) : 0;
+              depthCache.set(id, depth);
+              return depth;
+            };
+            const displayNodes = [...activeNodes.filter(node => executionIds.has(String(node.id))), ...controllers.filter(node => !executionIds.has(String(node.id)))];
+            displayNodes.sort((a, b) => {
+              const controllerOrder = Number(isController(b)) - Number(isController(a));
+              if (controllerOrder) return controllerOrder;
+              const depthOrder = depthOf(a) - depthOf(b);
+              if (depthOrder) return depthOrder;
+              const xOrder = Number(a.pos?.[0] || 0) - Number(b.pos?.[0] || 0);
+              if (xOrder) return xOrder;
+              return Number(a.order || 0) - Number(b.order || 0);
+            });
+            window.__comfyMobileRelevantNodeIds = new Set(executionIds);
             const fields = [];
-            const visit = (graph, prefix = '') => {
-                for (const node of (graph?._nodes || [])) {
-                const nodeKey = prefix + String(node.id);
-                const mode = Number(node.mode ?? 0);
-                if (mode === 2 || mode === 4) continue;
+            const nodes = [];
+            for (const [nodeOrder, node] of displayNodes.entries()) {
+                const nodeKey = String(node.id);
+                const controller = isController(node);
+                nodes.push({
+                  id: nodeKey,
+                  title: node.title || node.type || '',
+                  type: node.comfyClass || node.type || '',
+                  order: nodeOrder,
+                  isController: controller,
+                  isOutput: isOutputNode(node),
+                });
                 const widgets = node.widgets || [];
                 const nameCounts = new Map();
                 for (const widget of widgets) nameCounts.set(widget?.name, (nameCounts.get(widget?.name) || 0) + 1);
@@ -426,6 +498,7 @@ class ComfyBridge(private val activity: Activity) {
                     nodeId: nodeKey,
                     nodeTitle: node.title || node.type || '',
                     nodeType: node.comfyClass || node.type || '',
+                    nodeOrder,
                     name: widget.name,
                     label: groupToggle && rawLabel.startsWith('Enable ') ? '启用：' + rawLabel.slice(7) : rawLabel,
                     widgetType: groupToggle ? 'toggle' : String(widget.type || typeof value),
@@ -439,14 +512,8 @@ class ComfyBridge(private val activity: Activity) {
                     linked: input?.link != null,
                   });
                 }
-                  if (node.subgraph) visit(node.subgraph, nodeKey + ':');
-                }
-                for (const [id, subgraph] of (graph?.subgraphs?.entries?.() || [])) {
-                  visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
-                }
-            };
-            visit(rootGraph);
-            return JSON.stringify({ok:true, fields});
+            }
+            return JSON.stringify({ok:true, fields, nodes});
           } catch (error) {
             return JSON.stringify({ok:false, error:'工作流解析错误：' + String(error?.stack || error)});
           }
@@ -491,12 +558,20 @@ class ComfyBridge(private val activity: Activity) {
                 try { widget.callback?.(update.value, app.canvas, node); } catch (_) {}
               }
             }
-            for (const node of nodeMap.values()) {
+            const relevantIds = window.__comfyMobileRelevantNodeIds || new Set();
+            for (const [nodeId, node] of nodeMap.entries()) {
+              if (!relevantIds.has(String(nodeId))) continue;
               for (const widget of (node.widgets || [])) {
                 await widget.beforeQueued?.({isPartialExecution:false});
               }
             }
             const result = await app.graphToPrompt();
+            for (const nodeId of Object.keys(result.output || {})) {
+              if (!relevantIds.has(String(nodeId))) delete result.output[nodeId];
+            }
+            if (!Object.keys(result.output || {}).length) {
+              return JSON.stringify({ok:false, error:'当前工作流没有可执行的输出链'});
+            }
             return JSON.stringify({ok:true, prompt:result.output, workflow:result.workflow});
           } catch (error) {
             return JSON.stringify({ok:false, error:'生成参数转换错误：' + String(error?.stack || error)});

@@ -13,11 +13,15 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.local.comfyuimobile.bridge.ComfyBridge
+import com.local.comfyuimobile.bridge.WorkflowImageReader
 import com.local.comfyuimobile.data.AppPreferences
+import com.local.comfyuimobile.data.CachePolicy
+import com.local.comfyuimobile.data.LocalResultCache
 import com.local.comfyuimobile.data.PromptHistory
 import com.local.comfyuimobile.data.WorkflowPolicy
 import com.local.comfyuimobile.data.WorkflowPath
 import com.local.comfyuimobile.model.AppUiState
+import com.local.comfyuimobile.model.CacheOutputRule
 import com.local.comfyuimobile.model.ConnectionStatus
 import com.local.comfyuimobile.model.JobState
 import com.local.comfyuimobile.model.JobSummary
@@ -28,10 +32,12 @@ import com.local.comfyuimobile.model.ParameterSection
 import com.local.comfyuimobile.model.ResultMedia
 import com.local.comfyuimobile.model.WorkflowDocument
 import com.local.comfyuimobile.model.WorkflowEntry
+import com.local.comfyuimobile.model.WorkflowNode
 import com.local.comfyuimobile.network.ComfyClient
 import com.local.comfyuimobile.network.LanAddress
 import com.local.comfyuimobile.network.LanScanner
 import com.local.comfyuimobile.network.ResultParser
+import com.local.comfyuimobile.network.PromptSubmissionException
 import com.local.comfyuimobile.service.JobMonitorService
 import com.local.comfyuimobile.update.UpdateManager
 import kotlinx.coroutines.Dispatchers
@@ -55,6 +61,7 @@ import java.util.UUID
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application
     private val preferences = AppPreferences(application)
+    private val localResultCache = LocalResultCache(application)
     private val client = ComfyClient()
     private val scanner = LanScanner(application, client)
     private val updates = UpdateManager(application)
@@ -64,7 +71,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var bridge: ComfyBridge? = null
     private var reconnectJob: Job? = null
     private var parameterRefreshJob: Job? = null
-    private val autoSavedUrls = mutableSetOf<String>()
     @Volatile private var lastUpdateCheck: Long = 0L
 
     init {
@@ -77,11 +83,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         promptHistory = stored.promptHistory,
                         submittedJobIds = stored.submittedJobs,
                         autoSaveResults = stored.autoSaveResults,
+                        cacheOutputRules = stored.cacheOutputRules,
                         serverInput = it.activeServer?.baseUrl
                             ?: stored.activeServerUrl.ifBlank { it.serverInput },
                     )
                 }
             }
+        }
+        viewModelScope.launch {
+            val cached = localResultCache.load()
+            _state.update { it.copy(localResults = cached) }
         }
     }
 
@@ -159,6 +170,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fields = emptyList(),
                 jobs = emptyList(),
                 results = emptyList(),
+                nodeProblems = emptyMap(),
                 bridgeReady = false,
             )
         }
@@ -196,23 +208,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runOperation("工作流加载失败") {
                 _state.update { it.copy(loading = true, error = null, selectedWorkflow = null, fields = emptyList()) }
                 val raw = client.readWorkflow(entry.path)
-                val fields = (bridge ?: error("前端桥接不可用")).loadWorkflow(raw)
-                val document = WorkflowDocument(entry, raw, fields)
-                _state.update { it.copy(selectedWorkflow = document, fields = fields, loading = false, notice = "已加载 ${entry.name}") }
+                val manifest = (bridge ?: error("前端桥接不可用")).loadWorkflow(raw)
+                val document = WorkflowDocument(entry, raw, manifest.fields, manifest.nodes)
+                _state.update {
+                    it.copy(
+                        selectedWorkflow = document,
+                        fields = manifest.fields,
+                        loading = false,
+                        nodeProblems = emptyMap(),
+                        notice = "已加载 ${entry.name}",
+                    )
+                }
                 preferences.setRecentWorkflow(entry.path)
             }
         }
     }
 
     fun updateField(key: String, value: String) {
-        val refreshesWorkflow = _state.value.fields.firstOrNull { it.key == key }?.refreshesWorkflow == true
+        val changedField = _state.value.fields.firstOrNull { it.key == key }
+        val refreshesWorkflow = changedField?.refreshesWorkflow == true
         _state.update { ui ->
-            ui.copy(fields = ui.fields.map { field ->
-                if (field.key != key) field else field.copy(
-                    displayValue = value,
-                    valueJson = valueJson(field.kind, value),
-                )
-            })
+            ui.copy(
+                fields = ui.fields.map { field ->
+                    if (field.key != key) field else field.copy(
+                        displayValue = value,
+                        valueJson = valueJson(field.kind, value),
+                    )
+                },
+                nodeProblems = changedField?.nodeId?.let { ui.nodeProblems - it } ?: ui.nodeProblems,
+            )
         }
         if (refreshesWorkflow) refreshParametersAfterWorkflowSwitch()
     }
@@ -267,8 +291,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runOperation("高级编辑同步失败") {
                 val activeBridge = bridge ?: error("前端桥接不可用")
                 val raw = activeBridge.exportCurrentWorkflow()
-                val fields = activeBridge.loadWorkflow(raw)
-                _state.update { it.copy(selectedWorkflow = document.copy(rawJson = raw, fields = fields), fields = fields, advancedEditor = false) }
+                val manifest = activeBridge.loadWorkflow(raw)
+                _state.update {
+                    it.copy(
+                        selectedWorkflow = document.copy(rawJson = raw, fields = manifest.fields, nodes = manifest.nodes),
+                        fields = manifest.fields,
+                        advancedEditor = false,
+                        nodeProblems = emptyMap(),
+                    )
+                }
             }
         }
     }
@@ -283,7 +314,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runOperation("提交生成失败") {
                 _state.update { it.copy(generating = true, error = null) }
                 val generated = (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
-                val response = client.queuePrompt(generated.promptJson, generated.workflowJson, clientId)
+                val response = try {
+                    client.queuePrompt(
+                        generated.promptJson,
+                        generated.workflowJson,
+                        clientId,
+                        workflow.entry.path,
+                        workflow.entry.name,
+                    )
+                } catch (error: PromptSubmissionException) {
+                    _state.update { it.copy(nodeProblems = error.nodeProblems) }
+                    throw error
+                }
                 val submitted = _state.value.submittedJobIds + response.promptId
                 preferences.saveSubmittedJobs(submitted)
                 var history = _state.value.promptHistory
@@ -296,6 +338,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         submittedJobIds = submitted,
                         promptHistory = history,
                         generating = false,
+                        nodeProblems = emptyMap(),
                         notice = "已加入队列：${response.promptId.take(8)}",
                     )
                 }
@@ -382,7 +425,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val extension = filename.substringAfterLast('.', "").lowercase()
                 val isImage = mimeType.orEmpty().startsWith("image/") || extension in setOf("png", "webp", "avif")
                 val raw = if (isImage) {
-                    (bridge ?: error("前端桥接不可用")).extractWorkflowFromImage(uri, mimeType, filename)
+                    if (extension == "png" || mimeType.equals("image/png", ignoreCase = true)) {
+                        withContext(Dispatchers.IO) {
+                            app.contentResolver.openInputStream(uri)?.use { WorkflowImageReader.readPngWorkflow(it) }
+                                ?: error("无法读取所选图片")
+                        }
+                    } else {
+                        (bridge ?: error("前端桥接不可用")).extractWorkflowFromImage(uri, mimeType, filename)
+                    }
                 } else {
                     withContext(Dispatchers.IO) {
                         app.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
@@ -391,12 +441,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val json = JSONObject(raw)
                 require(json.optJSONArray("nodes") != null) { "不是 ComfyUI 画布工作流 JSON" }
+                val manifest = (bridge ?: error("前端桥接不可用")).loadWorkflow(json.toString())
                 val sourceName = filename.substringAfterLast('/').substringAfterLast('\\')
                 val targetName = if (isImage) sourceName.substringBeforeLast('.', sourceName) else sourceName
                 val safeName = WorkflowPath.fileName(targetName)
-                client.writeWorkflow("workflows/$safeName", json.toString(), overwrite = false)
+                val existingPaths = client.listWorkflows().mapTo(mutableSetOf()) { it.path }
+                val baseName = safeName.substringBeforeLast(".json", safeName)
+                var candidateName = safeName
+                var copyNumber = 2
+                while ("workflows/$candidateName" in existingPaths) {
+                    candidateName = "$baseName-$copyNumber.json"
+                    copyNumber += 1
+                }
+                val entry = client.writeWorkflow("workflows/$candidateName", json.toString(), overwrite = false)
                 refreshWorkflowsInternal()
-                _state.update { it.copy(loading = false, notice = "已从${if (isImage) "图片" else "文件"}导入 $safeName") }
+                _state.update {
+                    it.copy(
+                        selectedWorkflow = WorkflowDocument(entry, json.toString(), manifest.fields, manifest.nodes),
+                        fields = manifest.fields,
+                        loading = false,
+                        nodeProblems = emptyMap(),
+                        notice = "已从${if (isImage) "图片" else "文件"}导入 $candidateName",
+                    )
+                }
+                preferences.setRecentWorkflow(entry.path)
             }
         }
     }
@@ -448,6 +516,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun toggleCacheOutput(node: WorkflowNode) {
+        if (!node.isOutput) return
+        val workflow = _state.value.selectedWorkflow ?: return
+        viewModelScope.launch {
+            val serverUrl = client.serverUrl()
+            val current = _state.value.cacheOutputRules
+            val existing = current.firstOrNull {
+                it.serverUrl == serverUrl && it.workflowPath == workflow.entry.path && it.nodeId == node.id
+            }
+            val updated = if (existing == null) {
+                current + CacheOutputRule(
+                    serverUrl = serverUrl,
+                    workflowPath = workflow.entry.path,
+                    workflowName = workflow.entry.name,
+                    nodeId = node.id,
+                    nodeTitle = node.title,
+                    nodeType = node.type,
+                )
+            } else {
+                current - existing
+            }
+            preferences.saveCacheOutputRules(updated)
+            _state.update {
+                it.copy(
+                    cacheOutputRules = updated,
+                    notice = if (existing == null) "已将 ${node.title} 加入本地缓存白名单" else "已将 ${node.title} 移出本地缓存白名单",
+                )
+            }
+        }
+    }
+
+    fun setCacheRuleEnabled(rule: CacheOutputRule, enabled: Boolean) {
+        viewModelScope.launch {
+            val updated = _state.value.cacheOutputRules.map { if (it == rule) it.copy(enabled = enabled) else it }
+            preferences.saveCacheOutputRules(updated)
+            _state.update { it.copy(cacheOutputRules = updated) }
+        }
+    }
+
+    fun removeCacheRule(rule: CacheOutputRule) {
+        viewModelScope.launch {
+            val updated = _state.value.cacheOutputRules - rule
+            preferences.saveCacheOutputRules(updated)
+            _state.update { it.copy(cacheOutputRules = updated) }
+        }
+    }
+
+    fun clearLocalCache() {
+        viewModelScope.launch {
+            runOperation("清空本地缓存失败") {
+                localResultCache.clear()
+                _state.update { it.copy(localResults = emptyList(), notice = "本地生成缓存已清空") }
+            }
+        }
+    }
+
     fun saveResult(media: ResultMedia) {
         viewModelScope.launch {
             runOperation("保存结果失败") {
@@ -460,9 +584,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun shareResult(media: ResultMedia) {
         viewModelScope.launch {
             runOperation("分享结果失败") {
-                val dir = File(app.cacheDir, "shared").apply { mkdirs() }
-                val file = File(dir, media.filename)
-                client.downloadTo(media.url, file.outputStream())
+                val file = media.localPath?.let(::File)?.takeIf { it.isFile } ?: run {
+                    val dir = File(app.cacheDir, "shared").apply { mkdirs() }
+                    File(dir, media.filename).also { client.downloadTo(media.url, it.outputStream()) }
+                }
                 val uri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", file)
                 val intent = Intent(Intent.ACTION_SEND).apply {
                     type = mimeType(media)
@@ -475,9 +600,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openResult(media: ResultMedia) {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(media.url)).apply {
-            setDataAndType(Uri.parse(media.url), mimeType(media))
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val localFile = media.localPath?.let(::File)?.takeIf { it.isFile }
+        val uri = localFile?.let { FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", it) }
+            ?: Uri.parse(media.url)
+        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+            setDataAndType(uri, mimeType(media))
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         runCatching { app.startActivity(intent) }
             .onFailure { _state.update { state -> state.copy(error = "无法打开原文件：${it.message}") } }
@@ -602,12 +730,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ResultParser.parse(client.serverUrl(), history)
         }.onSuccess { results ->
             _state.update { it.copy(results = results) }
-            if (_state.value.autoSaveResults) {
-                results.filter { autoSavedUrls.add(it.url) }.forEach { media ->
-                    viewModelScope.launch { runCatching { saveToMediaStore(media) } }
-                }
+            cacheWhitelistedResults(results)
+        }
+    }
+
+    private suspend fun cacheWhitelistedResults(results: List<ResultMedia>) {
+        val ui = _state.value
+        val eligible = results.filter { media ->
+            CachePolicy.shouldCache(media, ui.submittedJobIds, ui.cacheOutputRules, client.serverUrl())
+        }
+        var local = ui.localResults
+        for (media in eligible) {
+            if (localResultCache.contains(media)) continue
+            val destination = localResultCache.destination(media)
+            try {
+                destination.parentFile?.mkdirs()
+                client.downloadTo(media.url, destination.outputStream())
+                local = listOf(localResultCache.add(media, destination)) + local
+            } catch (error: Throwable) {
+                destination.delete()
             }
         }
+        _state.update { it.copy(localResults = local.distinctBy { item -> "${item.jobId}/${item.nodeId}/${item.filename}" }.sortedByDescending { item -> item.createdAt }) }
     }
 
     private suspend fun saveToMediaStore(media: ResultMedia): Uri = withContext(Dispatchers.IO) {
@@ -625,7 +769,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val uri = resolver.insert(collection, values) ?: error("无法创建媒体文件")
         try {
             val output = resolver.openOutputStream(uri) ?: error("无法写入媒体文件")
-            client.downloadTo(media.url, output)
+            val localFile = media.localPath?.let(::File)?.takeIf { it.isFile }
+            if (localFile != null) {
+                output.use { target -> localFile.inputStream().use { source -> source.copyTo(target) } }
+            } else {
+                client.downloadTo(media.url, output)
+            }
             if (Build.VERSION.SDK_INT >= 29) {
                 values.clear()
                 values.put(MediaStore.MediaColumns.IS_PENDING, 0)
@@ -677,14 +826,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val snapshot = _state.value.fields
                 _state.update { it.copy(loading = true, error = null) }
                 val raw = activeBridge.syncWorkflow(snapshot)
-                val refreshedFields = activeBridge.loadWorkflow(raw)
+                val manifest = activeBridge.loadWorkflow(raw)
                 _state.update { ui ->
                     if (ui.selectedWorkflow?.entry?.path != document.entry.path) {
                         ui.copy(loading = false)
                     } else {
                         ui.copy(
-                            selectedWorkflow = document.copy(rawJson = raw, fields = refreshedFields),
-                            fields = refreshedFields,
+                            selectedWorkflow = document.copy(rawJson = raw, fields = manifest.fields, nodes = manifest.nodes),
+                            fields = manifest.fields,
                             loading = false,
                             notice = "已切换工作流程并刷新可设置节点",
                         )

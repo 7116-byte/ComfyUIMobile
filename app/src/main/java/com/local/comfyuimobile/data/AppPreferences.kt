@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.local.comfyuimobile.model.ServerProfile
+import com.local.comfyuimobile.model.CacheOutputRule
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
@@ -22,6 +23,7 @@ data class StoredSettings(
     val autoSaveResults: Boolean = false,
     val lastUpdateCheck: Long = 0L,
     val recentWorkflow: String = "",
+    val cacheOutputRules: List<CacheOutputRule> = emptyList(),
 )
 
 class AppPreferences(private val context: Context) {
@@ -33,6 +35,7 @@ class AppPreferences(private val context: Context) {
         val autoSaveResults = booleanPreferencesKey("auto_save_results")
         val lastUpdateCheck = longPreferencesKey("last_update_check")
         val recentWorkflow = stringPreferencesKey("recent_workflow")
+        val cacheOutputRules = stringPreferencesKey("cache_output_rules")
     }
 
     val settings: Flow<StoredSettings> = context.dataStore.data.map { preferences ->
@@ -44,6 +47,7 @@ class AppPreferences(private val context: Context) {
             autoSaveResults = preferences[Keys.autoSaveResults] ?: false,
             lastUpdateCheck = preferences[Keys.lastUpdateCheck] ?: 0L,
             recentWorkflow = preferences[Keys.recentWorkflow].orEmpty(),
+            cacheOutputRules = decodeCacheOutputRules(preferences[Keys.cacheOutputRules].orEmpty()),
         )
     }
 
@@ -84,6 +88,25 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit { it[Keys.recentWorkflow] = path }
     }
 
+    suspend fun saveCacheOutputRules(rules: List<CacheOutputRule>) {
+        context.dataStore.edit { preferences ->
+            preferences[Keys.cacheOutputRules] = JSONArray().apply {
+                rules.forEach { rule ->
+                    put(
+                        JSONObject()
+                            .put("serverUrl", rule.serverUrl)
+                            .put("workflowPath", rule.workflowPath)
+                            .put("workflowName", rule.workflowName)
+                            .put("nodeId", rule.nodeId)
+                            .put("nodeTitle", rule.nodeTitle)
+                            .put("nodeType", rule.nodeType)
+                            .put("enabled", rule.enabled),
+                    )
+                }
+            }.toString()
+        }
+    }
+
     private fun decodeProfiles(raw: String): List<ServerProfile> = runCatching {
         val array = JSONArray(raw.ifBlank { "[]" })
         buildList {
@@ -121,4 +144,21 @@ class AppPreferences(private val context: Context) {
     }.getOrDefault(emptyList())
 
     private fun encodeStrings(values: Collection<String>): String = JSONArray(values).toString()
+
+    private fun decodeCacheOutputRules(raw: String): List<CacheOutputRule> = runCatching {
+        val array = JSONArray(raw.ifBlank { "[]" })
+        List(array.length()) { index ->
+            array.getJSONObject(index).let { item ->
+                CacheOutputRule(
+                    serverUrl = item.optString("serverUrl"),
+                    workflowPath = item.optString("workflowPath"),
+                    workflowName = item.optString("workflowName"),
+                    nodeId = item.optString("nodeId"),
+                    nodeTitle = item.optString("nodeTitle"),
+                    nodeType = item.optString("nodeType"),
+                    enabled = item.optBoolean("enabled", true),
+                )
+            }
+        }.filter { it.serverUrl.isNotBlank() && it.workflowPath.isNotBlank() && it.nodeId.isNotBlank() }
+    }.getOrDefault(emptyList())
 }

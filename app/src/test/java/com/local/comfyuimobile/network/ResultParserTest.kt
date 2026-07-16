@@ -18,4 +18,17 @@ class ResultParserTest {
         assertTrue(image.url.contains("%E6%B5%8B%E8%AF%95%20%E5%9B%BE.png"))
         assertTrue(image.url.contains("subfolder=%E6%97%A5%E6%9C%9F%201"))
     }
+
+    @Test fun sortsNewestTasksFirstAndReadsMobileWorkflowMetadata() {
+        val history = JSONObject(
+            """{
+              "old":{"prompt":[1,"old",{}, {"create_time":100,"comfy_mobile":{"workflow_path":"workflows/a.json","workflow_name":"A"}}],"outputs":{"9":{"images":[{"filename":"old.png"}]}}},
+              "new":{"prompt":[2,"new",{}, {"create_time":200,"comfy_mobile":{"workflow_path":"workflows/b.json","workflow_name":"B"}}],"outputs":{"8":{"images":[{"filename":"new.png"}]}}}
+            }""",
+        )
+        val result = ResultParser.parse("http://192.168.1.2:8188", history)
+        assertEquals("new.png", result.first().filename)
+        assertEquals("workflows/b.json", result.first().workflowPath)
+        assertEquals("B", result.first().workflowName)
+    }
 }

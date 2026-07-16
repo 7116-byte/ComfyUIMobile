@@ -29,6 +29,10 @@ import okio.source
 
 data class QueueResponse(val promptId: String, val number: Int, val nodeErrors: JSONObject?)
 data class UploadResponse(val name: String, val subfolder: String, val type: String)
+class PromptSubmissionException(
+    message: String,
+    val nodeProblems: Map<String, List<String>>,
+) : IllegalStateException(message)
 
 class ComfyClient {
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
@@ -158,22 +162,49 @@ class ComfyClient {
         }
     }
 
-    suspend fun queuePrompt(promptJson: String, workflowJson: String, clientId: String): QueueResponse = withContext(Dispatchers.IO) {
+    suspend fun queuePrompt(
+        promptJson: String,
+        workflowJson: String,
+        clientId: String,
+        workflowPath: String,
+        workflowName: String,
+    ): QueueResponse = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("client_id", clientId)
             .put("prompt", JSONObject(promptJson))
             .put(
                 "extra_data",
-                JSONObject().put("extra_pnginfo", JSONObject().put("workflow", JSONObject(workflowJson))),
+                JSONObject()
+                    .put("extra_pnginfo", JSONObject().put("workflow", JSONObject(workflowJson)))
+                    .put(
+                        "comfy_mobile",
+                        JSONObject()
+                            .put("workflow_path", workflowPath)
+                            .put("workflow_name", workflowName),
+                    ),
             )
-        val response = executeJson(
-            Request.Builder().url("$baseUrl/prompt").post(body.toString().toRequestBody(jsonMedia)).build(),
-        )
-        QueueResponse(
-            promptId = response.getString("prompt_id"),
-            number = response.optInt("number"),
-            nodeErrors = response.optJSONObject("node_errors"),
-        )
+        val request = Request.Builder().url("$baseUrl/prompt").post(body.toString().toRequestBody(jsonMedia)).build()
+        client.newCall(request).execute().use { httpResponse ->
+            val responseBody = httpResponse.body?.string().orEmpty()
+            val response = runCatching { JSONObject(responseBody) }.getOrElse { JSONObject() }
+            if (!httpResponse.isSuccessful) {
+                val error = response.optJSONObject("error")
+                val message = when (error?.optString("type")) {
+                    "prompt_outputs_failed_validation" -> "部分部件参数校验失败，请查看标红的部件"
+                    "prompt_no_outputs" -> "当前工作流没有可执行的输出节点"
+                    "invalid_prompt" -> "生成参数格式无效"
+                    else -> error?.optString("message").takeUnless { it.isNullOrBlank() }
+                        ?.let { "服务器校验失败：$it" }
+                        ?: "服务器拒绝了生成参数（HTTP ${httpResponse.code}）"
+                }
+                throw PromptSubmissionException(message, parseNodeProblems(response.optJSONObject("node_errors")))
+            }
+            QueueResponse(
+                promptId = response.getString("prompt_id"),
+                number = response.optInt("number"),
+                nodeErrors = response.optJSONObject("node_errors"),
+            )
+        }
     }
 
     suspend fun upload(
@@ -290,6 +321,32 @@ class ComfyClient {
                 val item = array.optJSONArray(index) ?: return@repeat
                 val id = item.optString(1)
                 if (id.isNotBlank()) add(JobSummary(id = id, state = state))
+            }
+        }
+    }
+
+    private fun parseNodeProblems(nodeErrors: JSONObject?): Map<String, List<String>> {
+        if (nodeErrors == null) return emptyMap()
+        return buildMap {
+            nodeErrors.keys().forEach { nodeId ->
+                val errors = nodeErrors.optJSONObject(nodeId)?.optJSONArray("errors") ?: return@forEach
+                val messages = buildList {
+                    repeat(errors.length()) { index ->
+                        val item = errors.optJSONObject(index) ?: return@repeat
+                        val input = item.optJSONObject("extra_info")?.optString("input_name").orEmpty()
+                        val message = when (item.optString("type")) {
+                            "required_input_missing" -> "缺少必填输入"
+                            "value_not_in_list" -> "所选值不在可用列表中"
+                            "value_smaller_than_min" -> "数值低于允许的最小值"
+                            "value_bigger_than_max" -> "数值超过允许的最大值"
+                            "invalid_input_type" -> "输入类型不正确"
+                            "prompt_no_outputs" -> "没有可执行的输出节点"
+                            else -> item.optString("message").ifBlank { item.optString("details", "参数校验失败") }
+                        }
+                        add(if (input.isBlank()) message else "$input：$message")
+                    }
+                }
+                if (messages.isNotEmpty()) put(nodeId, messages.distinct())
             }
         }
     }

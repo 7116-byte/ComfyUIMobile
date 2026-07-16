@@ -6,7 +6,10 @@ import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,11 +19,15 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -114,8 +121,10 @@ import com.local.comfyuimobile.model.ParameterField
 import com.local.comfyuimobile.model.ParameterKind
 import com.local.comfyuimobile.model.ParameterSection
 import com.local.comfyuimobile.model.ResultMedia
+import com.local.comfyuimobile.model.ResultSource
 import com.local.comfyuimobile.model.ServerProfile
 import com.local.comfyuimobile.model.WorkflowEntry
+import com.local.comfyuimobile.model.WorkflowNode
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -127,6 +136,9 @@ private enum class MainPage(val label: String, val icon: ImageVector) {
     RESULTS("结果", Icons.Default.Image),
     TASKS("任务", Icons.AutoMirrored.Filled.List),
 }
+
+private enum class ResultLayout { ALL, ALBUMS }
+private data class ResultAlbum(val jobId: String, val media: List<ResultMedia>)
 
 @Composable
 fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
@@ -296,6 +308,9 @@ private fun ServerCard(profile: ServerProfile, onClick: () -> Unit, onDelete: ((
 private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState) {
     var page by remember { mutableStateOf(MainPage.WORKFLOWS) }
     var settings by remember { mutableStateOf(false) }
+    LaunchedEffect(state.selectedWorkflow?.entry?.path) {
+        if (state.selectedWorkflow != null && page == MainPage.WORKFLOWS) page = MainPage.PARAMETERS
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -383,9 +398,9 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
         )
         Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilledTonalButton(onClick = {
-                importLauncher.launch(arrayOf("application/json", "text/plain", "image/png", "image/webp", "image/avif"))
+                importLauncher.launch(arrayOf("application/json", "text/plain", "image/*"))
             }) {
-                Icon(Icons.Default.UploadFile, null); Spacer(Modifier.width(4.dp)); Text("导入")
+                Icon(Icons.Default.UploadFile, null); Spacer(Modifier.width(4.dp)); Text("打开工作流文件")
             }
             state.selectedWorkflow?.let {
                 FilledTonalButton(onClick = { dialogText = it.entry.name.substringBeforeLast('.'); duplicateDialog = true }) {
@@ -449,28 +464,32 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         EmptyState(Icons.Default.Tune, "请先在工作流页选择一个工作流")
         return
     }
-    var showMore by remember { mutableStateOf(false) }
     var expandedNodeIds by remember(workflow.entry.path) { mutableStateOf(emptySet<String>()) }
     var layoutDialog by remember { mutableStateOf(false) }
     var historyField by remember { mutableStateOf<ParameterField?>(null) }
     var uploadField by remember { mutableStateOf<ParameterField?>(null) }
+    var cacheNode by remember { mutableStateOf<WorkflowNode?>(null) }
     val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val field = uploadField
         if (uri != null && field != null) viewModel.uploadField(field, uri)
         uploadField = null
     }
-    val nodeGroups = state.fields
-        .filter { it.visible }
-        .groupBy { it.nodeId }
-        .values
-        .map { fields -> fields.sortedBy { it.order } }
-    val primaryNodes = nodeGroups.filter { fields -> fields.any { it.section == ParameterSection.PRIMARY } }
-    val moreNodes = nodeGroups.filterNot { fields -> fields.any { it.section == ParameterSection.PRIMARY } }
+    val visibleFields = state.fields.filter { it.visible }.groupBy { it.nodeId }
+    val nodes = workflow.nodes.sortedBy { it.order }.mapNotNull { node ->
+        val fields = visibleFields[node.id].orEmpty().sortedBy { it.order }
+        if (fields.isNotEmpty() || node.isOutput) node to fields else null
+    }
+    val localProblems = FieldValidator.detailedProblems(state.fields)
+    val localProblemsByNode = localProblems.groupBy { it.nodeId }.mapValues { (_, items) -> items.map { it.message } }
+    val problemNodeIds = localProblemsByNode.keys + state.nodeProblems.keys
+    LaunchedEffect(problemNodeIds) {
+        if (problemNodeIds.isNotEmpty()) expandedNodeIds = expandedNodeIds + problemNodeIds
+    }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(workflow.entry.name, style = MaterialTheme.typography.titleMedium)
-                Text("${nodeGroups.size} 个可设置节点 · ${state.fields.count { it.visible }} 个参数", style = MaterialTheme.typography.bodySmall)
+                Text("${nodes.size} 个流程部件 · ${state.fields.count { it.visible }} 个参数", style = MaterialTheme.typography.bodySmall)
             }
             IconButton(onClick = { layoutDialog = true }) { Icon(Icons.Default.Tune, "表单布局") }
             IconButton(onClick = { viewModel.saveWorkflow() }) { Icon(Icons.Default.Save, "保存默认值") }
@@ -480,14 +499,21 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            items(primaryNodes, key = { it.first().nodeId }) { fields ->
-                val nodeId = fields.first().nodeId
+            items(nodes, key = { it.first.id }) { (node, fields) ->
+                val nodeId = node.id
                 NodeParameterCard(
+                    node = node,
                     fields = fields,
                     expanded = nodeId in expandedNodeIds,
+                    problems = localProblemsByNode[nodeId].orEmpty() + state.nodeProblems[nodeId].orEmpty(),
+                    cached = state.cacheOutputRules.any {
+                        it.enabled && it.serverUrl == state.activeServer?.baseUrl &&
+                            it.workflowPath == workflow.entry.path && it.nodeId == nodeId
+                    },
                     onToggle = {
                         expandedNodeIds = if (nodeId in expandedNodeIds) expandedNodeIds - nodeId else expandedNodeIds + nodeId
                     },
+                    onLongPress = if (node.isOutput) ({ cacheNode = node }) else null,
                     viewModel = viewModel,
                     onHistory = { historyField = it },
                     onUpload = { field ->
@@ -496,77 +522,89 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                     },
                 )
             }
-            if (moreNodes.isNotEmpty()) {
-                item {
-                    OutlinedButton(onClick = { showMore = !showMore }, Modifier.fillMaxWidth()) {
-                        Text(if (showMore) "收起更多节点" else "更多节点（${moreNodes.size}）")
-                    }
-                }
-                if (showMore) items(moreNodes, key = { it.first().nodeId }) { fields ->
-                    val nodeId = fields.first().nodeId
-                    NodeParameterCard(
-                        fields = fields,
-                        expanded = nodeId in expandedNodeIds,
-                        onToggle = {
-                            expandedNodeIds = if (nodeId in expandedNodeIds) expandedNodeIds - nodeId else expandedNodeIds + nodeId
-                        },
-                        viewModel = viewModel,
-                        onHistory = { historyField = it },
-                        onUpload = { field ->
-                            uploadField = field
-                            uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
-                        },
-                    )
-                }
-            }
         }
         Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            val problems = FieldValidator.problems(state.fields)
             OutlinedButton(onClick = { viewModel.setAdvancedEditor(true) }, Modifier.weight(1f)) { Text("高级编辑") }
-            Button(onClick = viewModel::generate, enabled = !state.generating && state.bridgeReady && problems.isEmpty(), modifier = Modifier.weight(1f)) {
+            Button(onClick = viewModel::generate, enabled = !state.generating && state.bridgeReady && localProblems.isEmpty(), modifier = Modifier.weight(1f)) {
                 Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("生成")
             }
         }
-        FieldValidator.problems(state.fields).firstOrNull()?.let { problem ->
-            Text(problem, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+        val firstProblem = localProblems.firstOrNull()?.let { problem ->
+            val title = workflow.nodes.firstOrNull { it.id == problem.nodeId }?.title ?: "节点 ${problem.nodeId}"
+            "$title：${problem.message}"
+        } ?: state.nodeProblems.entries.firstOrNull()?.let { (nodeId, messages) ->
+            val title = workflow.nodes.firstOrNull { it.id == nodeId }?.title ?: "节点 $nodeId"
+            "$title：${messages.firstOrNull().orEmpty()}"
+        }
+        if (firstProblem != null) {
+            Text(firstProblem, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         }
     }
     if (historyField != null) PromptHistoryDialog(historyField!!, state, viewModel) { historyField = null }
     if (layoutDialog) LayoutDialog(state.fields, viewModel) { layoutDialog = false }
+    cacheNode?.let { node ->
+        val cached = state.cacheOutputRules.any {
+            it.serverUrl == state.activeServer?.baseUrl && it.workflowPath == workflow.entry.path && it.nodeId == node.id
+        }
+        ConfirmDialog(
+            title = if (cached) "移出本地缓存白名单" else "加入本地缓存白名单",
+            message = if (cached) {
+                "以后不再自动缓存“${node.title}”的输出，已经缓存的文件不会删除。"
+            } else {
+                "以后仅对本 App 提交的任务，自动缓存“${node.title}”的输出。电脑浏览器提交的任务不会缓存。"
+            },
+            onDismiss = { cacheNode = null },
+            onConfirm = { viewModel.toggleCacheOutput(node); cacheNode = null },
+        )
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NodeParameterCard(
+    node: WorkflowNode,
     fields: List<ParameterField>,
     expanded: Boolean,
+    problems: List<String>,
+    cached: Boolean,
     onToggle: () -> Unit,
+    onLongPress: (() -> Unit)?,
     viewModel: MainViewModel,
     onHistory: (ParameterField) -> Unit,
     onUpload: (ParameterField) -> Unit,
 ) {
-    val first = fields.first()
-    val title = first.nodeTitle.ifBlank { first.nodeType.ifBlank { "未命名节点" } }
-    OutlinedCard(Modifier.fillMaxWidth()) {
+    val title = node.title.ifBlank { node.type.ifBlank { "未命名节点" } }
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth(),
+        border = BorderStroke(
+            if (problems.isEmpty()) 1.dp else 2.dp,
+            if (problems.isEmpty()) MaterialTheme.colorScheme.outlineVariant else MaterialTheme.colorScheme.error,
+        ),
+    ) {
         Column {
             Row(
-                Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 14.dp, vertical = 12.dp),
+                Modifier.fillMaxWidth().combinedClickable(onClick = onToggle, onLongClick = onLongPress).padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(title, style = MaterialTheme.typography.titleMedium)
                     Text(
                         buildString {
-                            if (first.nodeType.isNotBlank() && first.nodeType != title) append(first.nodeType).append(" · ")
+                            if (node.type.isNotBlank() && node.type != title) append(node.type).append(" · ")
                             append(fields.size).append(" 个设置")
                         },
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    if (cached) Text("本地缓存白名单", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
+                    if (node.isOutput) Text("长按管理本地缓存", style = MaterialTheme.typography.labelSmall)
                 }
                 Icon(if (expanded) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward, if (expanded) "收起" else "展开")
             }
             if (expanded) {
                 HorizontalDivider()
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    problems.forEach { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                    if (fields.isEmpty()) Text("此输出部件没有可调整参数。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     fields.forEachIndexed { index, field ->
                         ParameterEditor(field, viewModel, onHistory = { onHistory(field) }, onUpload = { onUpload(field) })
                         if (index < fields.lastIndex) HorizontalDivider()
@@ -722,41 +760,148 @@ private fun LayoutDialog(fields: List<ParameterField>, viewModel: MainViewModel,
 
 @Composable
 private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
-    var fullImage by remember { mutableStateOf<ResultMedia?>(null) }
+    var source by remember { mutableStateOf(ResultSource.LOCAL) }
+    var layout by remember { mutableStateOf(ResultLayout.ALBUMS) }
+    var selectedAlbumId by remember { mutableStateOf<String?>(null) }
+    var selectedMedia by remember { mutableStateOf<ResultMedia?>(null) }
+    val media = (if (source == ResultSource.LOCAL) state.localResults else state.results)
+        .sortedWith(compareByDescending<ResultMedia> { it.createdAt }.thenByDescending { it.taskNumber })
+    val albums = media.groupBy { it.jobId }
+        .map { (jobId, items) -> ResultAlbum(jobId, items) }
+        .sortedWith(compareByDescending<ResultAlbum> { it.media.maxOfOrNull(ResultMedia::createdAt) ?: 0L }
+            .thenByDescending { it.media.maxOfOrNull(ResultMedia::taskNumber) ?: 0L })
+    val selectedAlbum = albums.firstOrNull { it.jobId == selectedAlbumId }
+    LaunchedEffect(source) { selectedAlbumId = null }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("生成结果", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            Text("${state.results.size} 项", style = MaterialTheme.typography.labelMedium)
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (source == ResultSource.LOCAL) FilledTonalButton({ source = ResultSource.LOCAL }, Modifier.weight(1f)) { Text("本地") }
+            else OutlinedButton({ source = ResultSource.LOCAL }, Modifier.weight(1f)) { Text("本地") }
+            if (source == ResultSource.CLOUD) FilledTonalButton({ source = ResultSource.CLOUD }, Modifier.weight(1f)) { Text("云端") }
+            else OutlinedButton({ source = ResultSource.CLOUD }, Modifier.weight(1f)) { Text("云端") }
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (selectedAlbum != null) {
+                TextButton(onClick = { selectedAlbumId = null }) { Text("‹ 返回相册") }
+            } else {
+                Text(
+                    if (source == ResultSource.LOCAL) "仅显示本 App 白名单缓存" else "ComfyUI 服务器媒体资产",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { layout = if (layout == ResultLayout.ALL) ResultLayout.ALBUMS else ResultLayout.ALL }) {
+                    Text(if (layout == ResultLayout.ALL) "任务相册" else "全部平铺")
+                }
+            }
             IconButton(onClick = viewModel::refreshResults) { Icon(Icons.Default.Refresh, "刷新") }
         }
-        if (state.results.isEmpty()) EmptyState(Icons.Default.Image, "暂无图片或视频结果")
-        else LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(state.results, key = { it.url }) { media ->
-                OutlinedCard(Modifier.fillMaxWidth()) {
-                    if (media.kind == MediaKind.IMAGE) {
-                        AsyncImage(
-                            model = previewUrl(media),
-                            contentDescription = media.filename,
-                            modifier = Modifier.fillMaxWidth().height(260.dp).clickable { fullImage = media },
-                            contentScale = ContentScale.Fit,
-                        )
-                    } else VideoPlayer(media.url)
-                    Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(media.filename, Modifier.weight(1f), maxLines = 2)
-                        IconButton(onClick = { viewModel.saveResult(media) }) { Icon(Icons.Default.Download, "保存") }
-                        IconButton(onClick = { viewModel.shareResult(media) }) { Icon(Icons.Default.Share, "分享") }
-                        IconButton(onClick = { viewModel.openResult(media) }) { Icon(Icons.Default.FileOpen, "打开原文件") }
-                    }
+        when {
+            selectedAlbum != null -> {
+                Text(albumTitle(selectedAlbum), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+                ResultMediaGrid(selectedAlbum.media) { selectedMedia = it }
+            }
+            media.isEmpty() -> EmptyState(
+                Icons.Default.Image,
+                if (source == ResultSource.LOCAL) "暂无本地缓存\n请在参数页长按输出部件加入白名单" else "云端暂无图片或视频",
+            )
+            layout == ResultLayout.ALL -> ResultMediaGrid(media) { selectedMedia = it }
+            else -> LazyVerticalGrid(
+                columns = GridCells.Adaptive(150.dp),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                gridItems(albums, key = { it.jobId }) { album ->
+                    AlbumTile(album) { selectedAlbumId = album.jobId }
                 }
             }
         }
     }
-    fullImage?.let { media ->
+    selectedMedia?.let { item ->
         AlertDialog(
-            onDismissRequest = { fullImage = null },
-            text = { AsyncImage(media.url, media.filename, Modifier.fillMaxWidth().fillMaxHeight(0.8f), contentScale = ContentScale.Fit) },
-            confirmButton = { TextButton(onClick = { fullImage = null }) { Text("关闭") } },
+            onDismissRequest = { selectedMedia = null },
+            title = { Text(item.filename, maxLines = 2) },
+            text = {
+                if (item.kind == MediaKind.IMAGE) {
+                    AsyncImage(item.url, item.filename, Modifier.fillMaxWidth().fillMaxHeight(0.72f), contentScale = ContentScale.Fit)
+                } else {
+                    VideoPlayer(item.url)
+                }
+            },
+            confirmButton = { TextButton(onClick = { selectedMedia = null }) { Text("关闭") } },
+            dismissButton = {
+                Row {
+                    IconButton(onClick = { viewModel.saveResult(item) }) { Icon(Icons.Default.Download, "保存到系统相册") }
+                    IconButton(onClick = { viewModel.shareResult(item) }) { Icon(Icons.Default.Share, "分享") }
+                    IconButton(onClick = { viewModel.openResult(item) }) { Icon(Icons.Default.FileOpen, "打开原文件") }
+                }
+            },
         )
+    }
+}
+
+@Composable
+private fun ResultMediaGrid(media: List<ResultMedia>, onOpen: (ResultMedia) -> Unit) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(105.dp),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        gridItems(media, key = { it.localPath ?: it.url }) { item ->
+            Card(Modifier.fillMaxWidth().clickable { onOpen(item) }) {
+                MediaCover(item, Modifier.fillMaxWidth().aspectRatio(1f))
+                Text(item.filename, Modifier.padding(6.dp), maxLines = 1, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AlbumTile(album: ResultAlbum, onClick: () -> Unit) {
+    val cover = album.media.firstOrNull { it.kind == MediaKind.IMAGE } ?: album.media.first()
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Box {
+            MediaCover(cover, Modifier.fillMaxWidth().aspectRatio(1.15f))
+            Text(
+                "${album.media.size}",
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).background(
+                    MaterialTheme.colorScheme.scrim.copy(alpha = 0.72f), RoundedCornerShape(12.dp),
+                ).padding(horizontal = 7.dp, vertical = 2.dp),
+                color = MaterialTheme.colorScheme.inverseOnSurface,
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
+        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(albumTitle(album), maxLines = 1, style = MaterialTheme.typography.titleSmall)
+            album.media.maxOfOrNull(ResultMedia::createdAt)?.takeIf { it > 0L }?.let {
+                Text(formatTime(it), maxLines = 1, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaCover(media: ResultMedia, modifier: Modifier = Modifier) {
+    if (media.kind == MediaKind.IMAGE) {
+        AsyncImage(
+            model = previewUrl(media),
+            contentDescription = media.filename,
+            modifier = modifier,
+            contentScale = ContentScale.Crop,
+        )
+    } else {
+        Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.VideoFile, "视频", Modifier.size(42.dp), tint = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+private fun albumTitle(album: ResultAlbum): String {
+    val first = album.media.first()
+    return first.workflowName.ifBlank {
+        if (first.taskNumber > 0L) "任务 #${first.taskNumber}" else "任务 ${album.jobId.take(8)}"
     }
 }
 
@@ -835,9 +980,30 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
                     stats.devices.forEach { Text("${it.name}\n显存 ${formatSize(it.vramFree)} / ${formatSize(it.vramTotal)} 可用") }
                 }
                 HorizontalDivider()
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) { Text("自动保存结果"); Text("图片和视频写入系统相册", style = MaterialTheme.typography.bodySmall) }
-                    Switch(state.autoSaveResults, viewModel::setAutoSaveResults)
+                Text("本地缓存白名单", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "只缓存本 App 提交任务中指定输出部件的结果；电脑浏览器提交的任务不会进入本地。可在参数页长按输出部件添加。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (state.cacheOutputRules.isEmpty()) {
+                    Text("尚未添加输出部件", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    state.cacheOutputRules.forEach { rule ->
+                        OutlinedCard(Modifier.fillMaxWidth()) {
+                            Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(rule.nodeTitle.ifBlank { rule.nodeType }, style = MaterialTheme.typography.titleSmall)
+                                    Text(rule.workflowName, maxLines = 1, style = MaterialTheme.typography.bodySmall)
+                                    Text(rule.serverUrl, maxLines = 1, style = MaterialTheme.typography.labelSmall)
+                                }
+                                Switch(rule.enabled, { viewModel.setCacheRuleEnabled(rule, it) })
+                                IconButton(onClick = { viewModel.removeCacheRule(rule) }) { Icon(Icons.Default.Delete, "删除白名单") }
+                            }
+                        }
+                    }
+                }
+                OutlinedButton(onClick = viewModel::clearLocalCache, enabled = state.localResults.isNotEmpty()) {
+                    Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("清空本地缓存（${state.localResults.size} 项）")
                 }
                 HorizontalDivider()
                 Text("软件更新", style = MaterialTheme.typography.titleSmall)
@@ -903,4 +1069,4 @@ private fun formatTime(value: Long): String =
     SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(value))
 
 private fun previewUrl(media: ResultMedia): String =
-    if (media.kind == MediaKind.IMAGE) "${media.url}&preview=webp;90" else media.url
+    if (media.kind == MediaKind.IMAGE && media.source == ResultSource.CLOUD) "${media.url}&preview=webp;90" else media.url
