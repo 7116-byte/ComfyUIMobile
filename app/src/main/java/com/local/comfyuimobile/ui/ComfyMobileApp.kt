@@ -208,6 +208,25 @@ private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar
                 Text("扫描结果", style = MaterialTheme.typography.titleMedium)
                 state.discoveredServers.forEach { profile -> ServerCard(profile, onClick = { viewModel.setServerInput(profile.baseUrl); viewModel.connect(profile.baseUrl) }) }
             }
+            HorizontalDivider()
+            Text("软件更新", style = MaterialTheme.typography.titleMedium)
+            state.updateInfo?.let { info ->
+                OutlinedCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("发现新版本 ${info.tag}")
+                        Button(onClick = viewModel::downloadUpdate) {
+                            Icon(Icons.Default.Download, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("下载并安装")
+                        }
+                    }
+                }
+            } ?: OutlinedButton(onClick = { viewModel.checkUpdate() }) {
+                Icon(Icons.Default.Refresh, null)
+                Spacer(Modifier.width(6.dp))
+                Text("检查更新")
+            }
+            Text("不需要先连接 ComfyUI，也可以在这里检查和安装新版。", style = MaterialTheme.typography.bodySmall)
             Text("电脑端需要使用 --listen 0.0.0.0 启动，并允许 Windows 防火墙放行 8188 端口。", style = MaterialTheme.typography.bodySmall)
         }
     }

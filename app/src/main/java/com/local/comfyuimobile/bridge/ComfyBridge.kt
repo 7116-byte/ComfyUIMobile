@@ -18,6 +18,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Base64
+import java.util.UUID
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -52,7 +53,13 @@ class ComfyBridge(private val activity: Activity) {
         val deadline = System.currentTimeMillis() + timeoutMillis
         var lastError = "ComfyUI 前端尚未初始化"
         while (System.currentTimeMillis() < deadline) {
-            val response = runCatching { evaluate(READY_SCRIPT) }.getOrElse { it.message.orEmpty() }
+            val remaining = deadline - System.currentTimeMillis()
+            val response = runCatching {
+                evaluate(READY_SCRIPT, timeoutMillis = remaining.coerceIn(1_000L, 5_000L))
+            }.getOrElse {
+                lastError = it.message.takeUnless(String?::isNullOrBlank) ?: lastError
+                ""
+            }
             val json = runCatching { JSONObject(response) }.getOrNull()
             if (json?.optBoolean("ok") == true) return
             lastError = json?.optString("error").takeUnless { it.isNullOrBlank() } ?: lastError
@@ -153,7 +160,59 @@ class ComfyBridge(private val activity: Activity) {
         webView.destroy()
     }
 
-    private suspend fun evaluate(script: String): String = withContext(Dispatchers.Main.immediate) {
+    private suspend fun evaluate(script: String, timeoutMillis: Long = 120_000L): String = withContext(Dispatchers.Main.immediate) {
+        val token = UUID.randomUUID().toString()
+        val quotedToken = JSONObject.quote(token)
+        val kickoff = """
+            (() => {
+              window.__comfyMobileResults = window.__comfyMobileResults || Object.create(null);
+              (async () => {
+                try {
+                  const value = await ($script);
+                  window.__comfyMobileResults[$quotedToken] = {
+                    value: typeof value === 'string' ? value : JSON.stringify(value ?? null)
+                  };
+                } catch (error) {
+                  window.__comfyMobileResults[$quotedToken] = {
+                    error: String(error?.stack || error)
+                  };
+                }
+              })();
+              return 'started';
+            })()
+        """.trimIndent()
+        val started = evaluateImmediate(kickoff)
+        if (started != "started") throw IllegalStateException("ComfyUI 页面正在加载")
+
+        val poll = """
+            (() => {
+              const store = window.__comfyMobileResults;
+              const result = store?.[$quotedToken];
+              if (!result) return '';
+              delete store[$quotedToken];
+              return JSON.stringify(result);
+            })()
+        """.trimIndent()
+        val cleanup = "delete window.__comfyMobileResults?.[$quotedToken]"
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                val raw = evaluateImmediate(poll)
+                if (raw.isNotEmpty()) {
+                    val result = JSONObject(raw)
+                    val error = result.optString("error")
+                    if (error.isNotBlank()) throw IllegalStateException(error)
+                    return@withContext result.optString("value")
+                }
+                delay(50)
+            }
+            throw IllegalStateException("前端脚本执行超时")
+        } finally {
+            runCatching { webView.evaluateJavascript(cleanup, null) }
+        }
+    }
+
+    private suspend fun evaluateImmediate(script: String): String =
         suspendCancellableCoroutine { continuation ->
             webView.evaluateJavascript(script) { encodedResult ->
                 if (!continuation.isActive) return@evaluateJavascript
@@ -162,7 +221,6 @@ class ComfyBridge(private val activity: Activity) {
                     .onFailure(continuation::resumeWithException)
             }
         }
-    }
 
     private fun decodeJavascriptResult(value: String): String {
         if (value == "null" || value.isBlank()) return "{}"
@@ -228,7 +286,7 @@ class ComfyBridge(private val activity: Activity) {
             visit(rootGraph);
             return JSON.stringify({ok:true, fields});
           } catch (error) {
-            return JSON.stringify({ok:false, error:String(error?.stack || error)});
+            return JSON.stringify({ok:false, error:'工作流解析错误：' + String(error?.stack || error)});
           }
         })()
     """.trimIndent()
@@ -267,7 +325,7 @@ class ComfyBridge(private val activity: Activity) {
             const result = await app.graphToPrompt();
             return JSON.stringify({ok:true, prompt:result.output, workflow:result.workflow});
           } catch (error) {
-            return JSON.stringify({ok:false, error:String(error?.stack || error)});
+            return JSON.stringify({ok:false, error:'生成参数转换错误：' + String(error?.stack || error)});
           }
         })()
     """.trimIndent()
@@ -277,18 +335,18 @@ class ComfyBridge(private val activity: Activity) {
             (async () => {
               try {
                 const mod = await import('/scripts/app.js');
-                if (!(mod.app?.rootGraph || mod.app?.graph)) return JSON.stringify({ok:false,error:'graph not ready'});
+                if (!(mod.app?.rootGraph || mod.app?.graph)) return JSON.stringify({ok:false,error:'工作流画布尚未就绪'});
                 const settings = mod.app?.ui?.settings;
                 const locale = settings?.getSettingValue?.('Comfy.Locale');
-                if (locale !== 'zh') {
-                  if (typeof settings.setSettingValueAsync === 'function') await settings.setSettingValueAsync('Comfy.Locale', 'zh');
-                  else settings.setSettingValue?.('Comfy.Locale', 'zh');
+                if (settings && locale !== 'zh') {
+                  if (typeof settings?.setSettingValueAsync === 'function') await settings.setSettingValueAsync('Comfy.Locale', 'zh');
+                  else settings?.setSettingValue?.('Comfy.Locale', 'zh');
                   await new Promise(resolve => setTimeout(resolve, 300));
                 }
                 window.__comfyMobileApp = mod.app;
                 return JSON.stringify({ok:true});
               } catch (error) {
-                return JSON.stringify({ok:false,error:String(error)});
+                return JSON.stringify({ok:false,error:'前端初始化错误：' + String(error)});
               }
             })()
         """.trimIndent()
@@ -298,10 +356,10 @@ class ComfyBridge(private val activity: Activity) {
               try {
                 const app = window.__comfyMobileApp;
                 const graph = app?.rootGraph || app?.graph;
-                if (!graph) return JSON.stringify({ok:false,error:'graph not ready'});
+                if (!graph) return JSON.stringify({ok:false,error:'工作流画布尚未就绪'});
                 return JSON.stringify({ok:true, workflow:graph.serialize()});
               } catch (error) {
-                return JSON.stringify({ok:false,error:String(error?.stack || error)});
+                return JSON.stringify({ok:false,error:'高级编辑同步错误：' + String(error?.stack || error)});
               }
             })()
         """.trimIndent()
