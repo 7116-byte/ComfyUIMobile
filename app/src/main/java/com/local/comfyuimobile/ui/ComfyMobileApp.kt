@@ -51,6 +51,8 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
@@ -709,7 +711,7 @@ private fun NodeParameterCard(
                     if (active) Text("正在执行", color = Color(0xFF35C46A), style = MaterialTheme.typography.labelMedium)
                 }
                 Spacer(Modifier.width(6.dp))
-                Icon(if (expanded) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward, if (expanded) "收起" else "展开")
+                Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (expanded) "收起" else "展开")
                 if (node.outputMarkers.isNotEmpty()) Spacer(Modifier.width(8.dp))
                 ConnectionMarkers(node.outputMarkers, input = false)
             }

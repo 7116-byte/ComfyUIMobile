@@ -530,8 +530,8 @@ class ComfyBridge(private val activity: Activity) {
               if (!map.has(nodeId)) map.set(nodeId, []);
               map.get(nodeId).push(marker);
             };
-            sortedLinkGroups.forEach(([, links], groupIndex) => {
-              const number = String(groupIndex + 1);
+            const nextNumberByColor = new Map();
+            sortedLinkGroups.forEach(([, links]) => {
               links.sort((a, b) => {
                 const aTarget = String(linkValue(a, 'target_id', 3));
                 const bTarget = String(linkValue(b, 'target_id', 3));
@@ -543,10 +543,14 @@ class ComfyBridge(private val activity: Activity) {
               const originId = String(linkValue(first, 'origin_id', 1));
               const originSlot = Number(linkValue(first, 'origin_slot', 2) ?? 0);
               const type = String(linkValue(first, 'type', 5) || nodeById.get(originId)?.outputs?.[originSlot]?.type || '');
+              const color = connectionColor(type);
+              const colorKey = color.toLowerCase();
+              const number = String((nextNumberByColor.get(colorKey) || 0) + 1);
+              nextNumberByColor.set(colorKey, Number(number));
               addMarker(outputMarkersByNode, originId, {
                 label:number,
                 type,
-                color:connectionColor(type),
+                color,
                 portName:String(nodeById.get(originId)?.outputs?.[originSlot]?.name || type)
               });
               links.forEach((link, branchIndex) => {
@@ -556,7 +560,7 @@ class ComfyBridge(private val activity: Activity) {
                 addMarker(inputMarkersByNode, targetId, {
                   label:links.length > 1 ? number + branchSuffix(branchIndex) : number,
                   type:inputType,
-                  color:connectionColor(inputType),
+                  color,
                   portName:String(nodeById.get(targetId)?.inputs?.[targetSlot]?.name || inputType)
                 });
               });

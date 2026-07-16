@@ -762,17 +762,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             "executing" -> {
-                val id = data.optString("prompt_id")
-                val node = data.optString("display_node").ifBlank { data.optString("node") }
+                val id = data.optTextOrEmpty("prompt_id")
+                val node = data.optTextOrEmpty("display_node").ifBlank { data.optTextOrEmpty("node") }
                 if (id.isNotBlank()) {
                     val previousState = _state.value.jobs.firstOrNull { it.id == id }?.state
                     val wasFailed = previousState in setOf(JobState.ERROR, JobState.CANCELLED)
-                    val wasTerminal = previousState in setOf(JobState.SUCCESS, JobState.ERROR, JobState.CANCELLED)
                     updateJob(id) {
-                        if (node.isBlank() && wasTerminal) it.copy(currentNode = null)
-                        else it.copy(currentNode = node.ifBlank { null }, state = JobState.RUNNING)
+                        when {
+                            node.isNotBlank() -> it.copy(currentNode = node, state = JobState.RUNNING)
+                            wasFailed -> it.copy(currentNode = null)
+                            else -> it.copy(currentNode = null, state = JobState.SUCCESS, progress = 1f)
+                        }
                     }
-                    updateMonitor(id, -1, node)
+                    if (node.isNotBlank()) updateMonitor(id, -1, node) else stopMonitor(id)
                     if (id in _state.value.submittedJobIds) {
                         if (node.isBlank()) {
                             if (!wasFailed) {
@@ -785,8 +787,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                         notice = "生成完成：${id.take(8)}",
                                     )
                                 }
-                                stopMonitor(id)
-                                viewModelScope.launch { refreshTasksInternal(); refreshResultsInternal() }
                             }
                         } else {
                             val title = _state.value.selectedWorkflow?.nodes?.firstOrNull { it.id == node }?.title
@@ -799,11 +799,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                     }
+                    if (node.isBlank()) {
+                        // ComfyUI 在最终 node=null 之前才把历史写入磁盘；稍后刷新才能取得完整输出。
+                        viewModelScope.launch {
+                            delay(250)
+                            refreshTasksInternal()
+                            refreshResultsInternal()
+                        }
+                    }
                 }
             }
             "executed" -> viewModelScope.launch { refreshResultsInternal() }
             "execution_success" -> {
-                val id = data.optString("prompt_id")
+                val id = data.optTextOrEmpty("prompt_id")
                 if (id.isNotBlank()) {
                     updateJob(id) { it.copy(state = JobState.SUCCESS, progress = 1f, currentNode = null) }
                     stopMonitor(id)
@@ -819,19 +827,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 }
-                viewModelScope.launch { refreshTasksInternal(); refreshResultsInternal() }
+                // 某些版本的 execution_success 早于历史落盘，保留延迟刷新作为兼容兜底。
+                viewModelScope.launch {
+                    delay(250)
+                    refreshTasksInternal()
+                    refreshResultsInternal()
+                }
             }
             "execution_error", "execution_interrupted" -> {
-                val id = data.optString("prompt_id")
-                val detail = data.optString("exception_message").ifBlank { if (type == "execution_interrupted") "任务已中断" else "服务器执行失败" }
+                val id = data.optTextOrEmpty("prompt_id")
+                val nodeId = data.optTextOrEmpty("node_id")
+                val detail = data.optTextOrEmpty("exception_message").ifBlank { if (type == "execution_interrupted") "任务已中断" else "服务器执行失败" }
                 if (id.isNotBlank()) {
-                    updateJob(id) { it.copy(state = if (type == "execution_interrupted") JobState.CANCELLED else JobState.ERROR, currentNode = data.optString("node_id").ifBlank { null }, message = detail) }
+                    updateJob(id) { it.copy(state = if (type == "execution_interrupted") JobState.CANCELLED else JobState.ERROR, currentNode = nodeId.ifBlank { null }, message = detail) }
                     stopMonitor(id)
                     if (id in _state.value.submittedJobIds) {
                         _state.update {
                             it.copy(
                                 activeJobId = id,
-                                currentExecutingNodeId = data.optString("node_id").ifBlank { null },
+                                currentExecutingNodeId = nodeId.ifBlank { null },
                                 generationProgress = null,
                                 generationMessage = "生成失败：$detail",
                                 error = "生成失败：$detail",
@@ -1004,6 +1018,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val current = ui.jobs.firstOrNull { it.id == id } ?: JobSummary(id, JobState.RUNNING, submittedByApp = id in ui.submittedJobIds)
             ui.copy(jobs = listOf(transform(current)) + ui.jobs.filterNot { it.id == id })
         }
+    }
+
+    private fun JSONObject.optTextOrEmpty(name: String): String {
+        val value = opt(name)
+        return if (value == null || value === JSONObject.NULL || value.toString().equals("null", ignoreCase = true)) "" else value.toString()
     }
 
     private fun valueJson(kind: ParameterKind, value: String): String = when (kind) {
