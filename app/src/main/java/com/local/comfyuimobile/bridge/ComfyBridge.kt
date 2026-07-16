@@ -13,6 +13,7 @@ import com.local.comfyuimobile.model.GeneratedPrompt
 import com.local.comfyuimobile.model.ParameterField
 import com.local.comfyuimobile.model.ParameterSection
 import com.local.comfyuimobile.model.WorkflowManifest
+import com.local.comfyuimobile.model.WorkflowConnectionMarker
 import com.local.comfyuimobile.model.WorkflowNode
 import com.local.comfyuimobile.data.WorkflowPolicy
 import kotlinx.coroutines.Dispatchers
@@ -211,11 +212,26 @@ class ComfyBridge(private val activity: Activity) {
                         order = item.optInt("order", index),
                         isController = item.optBoolean("isController"),
                         isOutput = item.optBoolean("isOutput"),
+                        inputMarkers = parseConnectionMarkers(item.optJSONArray("inputMarkers")),
+                        outputMarkers = parseConnectionMarkers(item.optJSONArray("outputMarkers")),
                     ),
                 )
             }
         }.sortedBy { it.order }
         return WorkflowManifest(fields, nodes)
+    }
+
+    private fun parseConnectionMarkers(array: JSONArray?): List<WorkflowConnectionMarker> {
+        if (array == null) return emptyList()
+        return List(array.length()) { index ->
+            val item = array.getJSONObject(index)
+            WorkflowConnectionMarker(
+                label = item.optString("label"),
+                type = item.optString("type"),
+                color = item.optString("color"),
+                portName = item.optString("portName"),
+            )
+        }
     }
 
     suspend fun extractWorkflowFromImage(uri: Uri, mimeType: String?, filename: String): String {
@@ -462,6 +478,89 @@ class ComfyBridge(private val activity: Activity) {
               if (xOrder) return xOrder;
               return Number(a.order || 0) - Number(b.order || 0);
             });
+            const displayOrderById = new Map(displayNodes.map((node, index) => [String(node.id), index]));
+            const inputMarkersByNode = new Map();
+            const outputMarkersByNode = new Map();
+            const rawLinks = rootGraph?.links;
+            const allLinks = rawLinks instanceof Map ? [...rawLinks.values()] : Object.values(rawLinks || {});
+            const linkValue = (link, property, fallbackIndex) => link?.[property] ?? link?.[fallbackIndex];
+            const relevantLinks = allLinks.filter(link => {
+              const originId = String(linkValue(link, 'origin_id', 1));
+              const targetId = String(linkValue(link, 'target_id', 3));
+              return executionIds.has(originId) && executionIds.has(targetId);
+            });
+            const linkGroups = new Map();
+            for (const link of relevantLinks) {
+              const originId = String(linkValue(link, 'origin_id', 1));
+              const originSlot = Number(linkValue(link, 'origin_slot', 2) ?? 0);
+              const key = originId + ':' + originSlot;
+              if (!linkGroups.has(key)) linkGroups.set(key, []);
+              linkGroups.get(key).push(link);
+            }
+            const sortedLinkGroups = [...linkGroups.entries()].sort(([, a], [, b]) => {
+              const aOrigin = String(linkValue(a[0], 'origin_id', 1));
+              const bOrigin = String(linkValue(b[0], 'origin_id', 1));
+              const nodeOrder = (displayOrderById.get(aOrigin) ?? 999999) - (displayOrderById.get(bOrigin) ?? 999999);
+              if (nodeOrder) return nodeOrder;
+              return Number(linkValue(a[0], 'origin_slot', 2) ?? 0) - Number(linkValue(b[0], 'origin_slot', 2) ?? 0);
+            });
+            const fallbackColors = {
+              MODEL:'#B39DDB', CLIP:'#FFD54F', VAE:'#EF9A9A', CONDITIONING:'#FFB74D',
+              LATENT:'#CE93D8', IMAGE:'#64B5F6', MASK:'#81C784', INT:'#90CAF9',
+              FLOAT:'#80CBC4', STRING:'#A5D6A7', BOOLEAN:'#FFCC80'
+            };
+            const connectionColor = (type) => {
+              const maps = [app.canvas?.default_connection_color_byType, globalThis.LGraphCanvas?.link_type_colors];
+              for (const map of maps) {
+                const value = map?.[type];
+                if (typeof value === 'string' && value) return value;
+              }
+              return fallbackColors[String(type || '').toUpperCase()] || '#9E9E9E';
+            };
+            const branchSuffix = (index) => {
+              let value = index;
+              let suffix = '';
+              do {
+                suffix = String.fromCharCode(97 + (value % 26)) + suffix;
+                value = Math.floor(value / 26) - 1;
+              } while (value >= 0);
+              return suffix;
+            };
+            const addMarker = (map, nodeId, marker) => {
+              if (!map.has(nodeId)) map.set(nodeId, []);
+              map.get(nodeId).push(marker);
+            };
+            sortedLinkGroups.forEach(([, links], groupIndex) => {
+              const number = String(groupIndex + 1);
+              links.sort((a, b) => {
+                const aTarget = String(linkValue(a, 'target_id', 3));
+                const bTarget = String(linkValue(b, 'target_id', 3));
+                const nodeOrder = (displayOrderById.get(aTarget) ?? 999999) - (displayOrderById.get(bTarget) ?? 999999);
+                if (nodeOrder) return nodeOrder;
+                return Number(linkValue(a, 'target_slot', 4) ?? 0) - Number(linkValue(b, 'target_slot', 4) ?? 0);
+              });
+              const first = links[0];
+              const originId = String(linkValue(first, 'origin_id', 1));
+              const originSlot = Number(linkValue(first, 'origin_slot', 2) ?? 0);
+              const type = String(linkValue(first, 'type', 5) || nodeById.get(originId)?.outputs?.[originSlot]?.type || '');
+              addMarker(outputMarkersByNode, originId, {
+                label:number,
+                type,
+                color:connectionColor(type),
+                portName:String(nodeById.get(originId)?.outputs?.[originSlot]?.name || type)
+              });
+              links.forEach((link, branchIndex) => {
+                const targetId = String(linkValue(link, 'target_id', 3));
+                const targetSlot = Number(linkValue(link, 'target_slot', 4) ?? 0);
+                const inputType = String(linkValue(link, 'type', 5) || nodeById.get(targetId)?.inputs?.[targetSlot]?.type || type);
+                addMarker(inputMarkersByNode, targetId, {
+                  label:links.length > 1 ? number + branchSuffix(branchIndex) : number,
+                  type:inputType,
+                  color:connectionColor(inputType),
+                  portName:String(nodeById.get(targetId)?.inputs?.[targetSlot]?.name || inputType)
+                });
+              });
+            });
             window.__comfyMobileRelevantNodeIds = new Set(executionIds);
             const fields = [];
             const nodes = [];
@@ -475,6 +574,8 @@ class ComfyBridge(private val activity: Activity) {
                   order: nodeOrder,
                   isController: controller,
                   isOutput: isOutputNode(node),
+                  inputMarkers: inputMarkersByNode.get(nodeKey) || [],
+                  outputMarkers: outputMarkersByNode.get(nodeKey) || [],
                 });
                 const widgets = node.widgets || [];
                 const nameCounts = new Map();

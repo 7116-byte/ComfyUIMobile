@@ -65,6 +65,15 @@ data class WorkflowNode(
     val order: Int,
     val isController: Boolean = false,
     val isOutput: Boolean = false,
+    val inputMarkers: List<WorkflowConnectionMarker> = emptyList(),
+    val outputMarkers: List<WorkflowConnectionMarker> = emptyList(),
+)
+
+data class WorkflowConnectionMarker(
+    val label: String,
+    val type: String,
+    val color: String,
+    val portName: String,
 )
 
 data class WorkflowManifest(
@@ -153,6 +162,10 @@ data class AppUiState(
     val localResults: List<ResultMedia> = emptyList(),
     val cacheOutputRules: List<CacheOutputRule> = emptyList(),
     val nodeProblems: Map<String, List<String>> = emptyMap(),
+    val activeJobId: String? = null,
+    val currentExecutingNodeId: String? = null,
+    val generationProgress: Float? = null,
+    val generationMessage: String = "",
     val promptHistory: List<String> = emptyList(),
     val submittedJobIds: Set<String> = emptySet(),
     val autoSaveResults: Boolean = false,

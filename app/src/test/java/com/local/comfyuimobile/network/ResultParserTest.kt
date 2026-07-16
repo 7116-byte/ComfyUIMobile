@@ -31,4 +31,20 @@ class ResultParserTest {
         assertEquals("workflows/b.json", result.first().workflowPath)
         assertEquals("B", result.first().workflowName)
     }
+
+    @Test fun keepsEveryImageFromOneBatchAndOneOutputNode() {
+        val history = JSONObject(
+            """{"batch-job":{"prompt":[3,"batch-job",{}, {"create_time":300,"comfy_mobile":{"workflow_path":"workflows/a.json"}}],"outputs":{"305":{"images":[
+              {"filename":"batch_00001.png","type":"output"},
+              {"filename":"batch_00002.png","type":"output"},
+              {"filename":"batch_00003.png","type":"output"},
+              {"filename":"batch_00004.png","type":"output"}
+            ]}}}}""",
+        )
+
+        val result = ResultParser.parse("http://192.168.10.109:8188", history)
+
+        assertEquals(4, result.size)
+        assertEquals(setOf("batch_00001.png", "batch_00002.png", "batch_00003.png", "batch_00004.png"), result.map { it.filename }.toSet())
+    }
 }

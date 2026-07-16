@@ -10,6 +10,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,11 +29,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
@@ -85,6 +93,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -93,17 +102,26 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
@@ -124,6 +142,7 @@ import com.local.comfyuimobile.model.ResultMedia
 import com.local.comfyuimobile.model.ResultSource
 import com.local.comfyuimobile.model.ServerProfile
 import com.local.comfyuimobile.model.WorkflowEntry
+import com.local.comfyuimobile.model.WorkflowConnectionMarker
 import com.local.comfyuimobile.model.WorkflowNode
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -308,9 +327,6 @@ private fun ServerCard(profile: ServerProfile, onClick: () -> Unit, onDelete: ((
 private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState) {
     var page by remember { mutableStateOf(MainPage.WORKFLOWS) }
     var settings by remember { mutableStateOf(false) }
-    LaunchedEffect(state.selectedWorkflow?.entry?.path) {
-        if (state.selectedWorkflow != null && page == MainPage.WORKFLOWS) page = MainPage.PARAMETERS
-    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -318,7 +334,11 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
                     Column {
                         Text(state.activeServer?.name.orEmpty(), style = MaterialTheme.typography.titleMedium)
                         Text(
-                            when (state.status) {
+                            if (state.activeJobId != null && state.generationProgress != 1f &&
+                                state.generationMessage.isNotBlank() && !state.generationMessage.startsWith("生成失败")
+                            ) {
+                                state.generationMessage
+                            } else when (state.status) {
                                 ConnectionStatus.CONNECTED -> "在线 · 队列 ${state.queueRemaining} · ${state.systemStats?.comfyVersion.orEmpty()}"
                                 ConnectionStatus.RECONNECTING -> "正在重连"
                                 else -> state.connectionMessage
@@ -376,6 +396,20 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
     var forceDialog by remember { mutableStateOf(false) }
     var dialogText by remember { mutableStateOf("") }
     var exportRaw by remember { mutableStateOf<String?>(null) }
+    var openAfterLoadPath by remember { mutableStateOf<String?>(null) }
+    var saveAfterLoadPath by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(state.selectedWorkflow?.entry?.path, openAfterLoadPath) {
+        if (openAfterLoadPath != null && state.selectedWorkflow?.entry?.path == openAfterLoadPath) {
+            openAfterLoadPath = null
+            onOpenParameters()
+        }
+    }
+    LaunchedEffect(state.selectedWorkflow?.entry?.path, saveAfterLoadPath) {
+        if (saveAfterLoadPath != null && state.selectedWorkflow?.entry?.path == saveAfterLoadPath) {
+            saveAfterLoadPath = null
+            viewModel.saveWorkflow()
+        }
+    }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val name = displayName(context, uri) ?: "imported.json"
@@ -409,6 +443,12 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
                 OutlinedButton(onClick = onOpenParameters) { Icon(Icons.Default.Tune, null); Spacer(Modifier.width(4.dp)); Text("参数") }
             }
         }
+        Text(
+            "单击选择 · 双击进入参数 · 长按保存工作流",
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         if (state.selectedWorkflow != null) {
             Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 IconButton(onClick = { viewModel.saveWorkflow() }) { Icon(Icons.Default.Save, "保存") }
@@ -426,9 +466,35 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
         }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(filtered, key = { it.path }) { entry ->
-                WorkflowRow(entry, selected = state.selectedWorkflow?.entry?.path == entry.path) {
-                    if (!entry.isDirectory) viewModel.selectWorkflow(entry)
-                }
+                WorkflowRow(
+                    entry = entry,
+                    selected = state.selectedWorkflow?.entry?.path == entry.path,
+                    onClick = {
+                        openAfterLoadPath = null
+                        saveAfterLoadPath = null
+                        if (!entry.isDirectory) viewModel.selectWorkflow(entry)
+                    },
+                    onDoubleClick = {
+                        saveAfterLoadPath = null
+                        if (!entry.isDirectory) {
+                            if (state.selectedWorkflow?.entry?.path == entry.path) onOpenParameters()
+                            else {
+                                openAfterLoadPath = entry.path
+                                viewModel.selectWorkflow(entry)
+                            }
+                        }
+                    },
+                    onLongClick = {
+                        openAfterLoadPath = null
+                        if (!entry.isDirectory) {
+                            if (state.selectedWorkflow?.entry?.path == entry.path) viewModel.saveWorkflow()
+                            else {
+                                saveAfterLoadPath = entry.path
+                                viewModel.selectWorkflow(entry)
+                            }
+                        }
+                    },
+                )
             }
         }
     }
@@ -439,10 +505,21 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
     if (forceDialog) ConfirmDialog("强制覆盖", "忽略服务器修改时间并覆盖当前工作流，仅在确认桌面端改动可以丢弃时使用。", { forceDialog = false }) { viewModel.saveWorkflow(force = true); forceDialog = false }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun WorkflowRow(entry: WorkflowEntry, selected: Boolean, onClick: () -> Unit) {
+private fun WorkflowRow(
+    entry: WorkflowEntry,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onDoubleClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
     Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth().combinedClickable(
+            onClick = onClick,
+            onDoubleClick = onDoubleClick,
+            onLongClick = onLongClick,
+        ),
         colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -482,8 +559,14 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     val localProblems = FieldValidator.detailedProblems(state.fields)
     val localProblemsByNode = localProblems.groupBy { it.nodeId }.mapValues { (_, items) -> items.map { it.message } }
     val problemNodeIds = localProblemsByNode.keys + state.nodeProblems.keys
+    val listState = rememberLazyListState()
     LaunchedEffect(problemNodeIds) {
         if (problemNodeIds.isNotEmpty()) expandedNodeIds = expandedNodeIds + problemNodeIds
+    }
+    LaunchedEffect(state.currentExecutingNodeId, nodes.size) {
+        val nodeId = state.currentExecutingNodeId ?: return@LaunchedEffect
+        val index = nodes.indexOfFirst { it.first.id == nodeId }
+        if (index >= 0) listState.animateScrollToItem(index)
     }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -494,8 +577,22 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
             IconButton(onClick = { layoutDialog = true }) { Icon(Icons.Default.Tune, "表单布局") }
             IconButton(onClick = { viewModel.saveWorkflow() }) { Icon(Icons.Default.Save, "保存默认值") }
         }
+        if (state.generationMessage.isNotBlank()) {
+            OutlinedCard(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(state.generationMessage, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                        state.activeJobId?.let { Text(it.take(8), style = MaterialTheme.typography.labelSmall) }
+                    }
+                    state.generationProgress?.let { progress ->
+                        LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+        }
         LazyColumn(
             Modifier.weight(1f),
+            state = listState,
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -505,6 +602,7 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                     node = node,
                     fields = fields,
                     expanded = nodeId in expandedNodeIds,
+                    active = state.currentExecutingNodeId == nodeId,
                     problems = localProblemsByNode[nodeId].orEmpty() + state.nodeProblems[nodeId].orEmpty(),
                     cached = state.cacheOutputRules.any {
                         it.enabled && it.serverUrl == state.activeServer?.baseUrl &&
@@ -565,6 +663,7 @@ private fun NodeParameterCard(
     node: WorkflowNode,
     fields: List<ParameterField>,
     expanded: Boolean,
+    active: Boolean,
     problems: List<String>,
     cached: Boolean,
     onToggle: () -> Unit,
@@ -577,15 +676,25 @@ private fun NodeParameterCard(
     OutlinedCard(
         modifier = Modifier.fillMaxWidth(),
         border = BorderStroke(
-            if (problems.isEmpty()) 1.dp else 2.dp,
-            if (problems.isEmpty()) MaterialTheme.colorScheme.outlineVariant else MaterialTheme.colorScheme.error,
+            when {
+                problems.isNotEmpty() -> 2.dp
+                active -> 3.dp
+                else -> 1.dp
+            },
+            when {
+                problems.isNotEmpty() -> MaterialTheme.colorScheme.error
+                active -> Color(0xFF35C46A)
+                else -> MaterialTheme.colorScheme.outlineVariant
+            },
         ),
     ) {
         Column {
             Row(
-                Modifier.fillMaxWidth().combinedClickable(onClick = onToggle, onLongClick = onLongPress).padding(horizontal = 14.dp, vertical = 12.dp),
+                Modifier.fillMaxWidth().combinedClickable(onClick = onToggle, onLongClick = onLongPress).padding(horizontal = 6.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                ConnectionMarkers(node.inputMarkers, input = true)
+                if (node.inputMarkers.isNotEmpty()) Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(title, style = MaterialTheme.typography.titleMedium)
                     Text(
@@ -597,8 +706,12 @@ private fun NodeParameterCard(
                     )
                     if (cached) Text("本地缓存白名单", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
                     if (node.isOutput) Text("长按管理本地缓存", style = MaterialTheme.typography.labelSmall)
+                    if (active) Text("正在执行", color = Color(0xFF35C46A), style = MaterialTheme.typography.labelMedium)
                 }
+                Spacer(Modifier.width(6.dp))
                 Icon(if (expanded) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward, if (expanded) "收起" else "展开")
+                if (node.outputMarkers.isNotEmpty()) Spacer(Modifier.width(8.dp))
+                ConnectionMarkers(node.outputMarkers, input = false)
             }
             if (expanded) {
                 HorizontalDivider()
@@ -610,6 +723,22 @@ private fun NodeParameterCard(
                         if (index < fields.lastIndex) HorizontalDivider()
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConnectionMarkers(markers: List<WorkflowConnectionMarker>, input: Boolean) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        markers.forEach { marker ->
+            val markerColor = remember(marker.color) {
+                runCatching { Color(android.graphics.Color.parseColor(marker.color)) }.getOrDefault(Color(0xFF9E9E9E))
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                if (input) Box(Modifier.size(10.dp).background(markerColor, CircleShape))
+                Text(marker.label, color = markerColor, style = MaterialTheme.typography.labelMedium)
+                if (!input) Box(Modifier.size(10.dp).background(markerColor, CircleShape))
             }
         }
     }
@@ -764,6 +893,8 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
     var layout by remember { mutableStateOf(ResultLayout.ALBUMS) }
     var selectedAlbumId by remember { mutableStateOf<String?>(null) }
     var selectedMedia by remember { mutableStateOf<ResultMedia?>(null) }
+    var galleryItems by remember { mutableStateOf<List<ResultMedia>>(emptyList()) }
+    var galleryInitialIndex by remember { mutableIntStateOf(0) }
     val media = (if (source == ResultSource.LOCAL) state.localResults else state.results)
         .sortedWith(compareByDescending<ResultMedia> { it.createdAt }.thenByDescending { it.taskNumber })
     val albums = media.groupBy { it.jobId }
@@ -771,6 +902,15 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
         .sortedWith(compareByDescending<ResultAlbum> { it.media.maxOfOrNull(ResultMedia::createdAt) ?: 0L }
             .thenByDescending { it.media.maxOfOrNull(ResultMedia::taskNumber) ?: 0L })
     val selectedAlbum = albums.firstOrNull { it.jobId == selectedAlbumId }
+    fun openMedia(item: ResultMedia, context: List<ResultMedia>) {
+        if (item.kind == MediaKind.IMAGE) {
+            val images = context.filter { it.kind == MediaKind.IMAGE }
+            galleryInitialIndex = images.indexOfFirst { (it.localPath ?: it.url) == (item.localPath ?: item.url) }.coerceAtLeast(0)
+            galleryItems = images
+        } else {
+            selectedMedia = item
+        }
+    }
     LaunchedEffect(source) { selectedAlbumId = null }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -797,13 +937,13 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
         when {
             selectedAlbum != null -> {
                 Text(albumTitle(selectedAlbum), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
-                ResultMediaGrid(selectedAlbum.media) { selectedMedia = it }
+                ResultMediaGrid(selectedAlbum.media) { openMedia(it, selectedAlbum.media) }
             }
             media.isEmpty() -> EmptyState(
                 Icons.Default.Image,
                 if (source == ResultSource.LOCAL) "暂无本地缓存\n请在参数页长按输出部件加入白名单" else "云端暂无图片或视频",
             )
-            layout == ResultLayout.ALL -> ResultMediaGrid(media) { selectedMedia = it }
+            layout == ResultLayout.ALL -> ResultMediaGrid(media) { openMedia(it, media) }
             else -> LazyVerticalGrid(
                 columns = GridCells.Adaptive(150.dp),
                 modifier = Modifier.fillMaxSize(),
@@ -836,6 +976,16 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
                     IconButton(onClick = { viewModel.openResult(item) }) { Icon(Icons.Default.FileOpen, "打开原文件") }
                 }
             },
+        )
+    }
+    if (galleryItems.isNotEmpty()) {
+        ImageGalleryViewer(
+            items = galleryItems,
+            initialIndex = galleryInitialIndex,
+            onDismiss = { galleryItems = emptyList() },
+            onSave = viewModel::saveResult,
+            onShare = viewModel::shareResult,
+            onOpen = viewModel::openResult,
         )
     }
 }
@@ -902,6 +1052,102 @@ private fun albumTitle(album: ResultAlbum): String {
     val first = album.media.first()
     return first.workflowName.ifBlank {
         if (first.taskNumber > 0L) "任务 #${first.taskNumber}" else "任务 ${album.jobId.take(8)}"
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ImageGalleryViewer(
+    items: List<ResultMedia>,
+    initialIndex: Int,
+    onDismiss: () -> Unit,
+    onSave: (ResultMedia) -> Unit,
+    onShare: (ResultMedia) -> Unit,
+    onOpen: (ResultMedia) -> Unit,
+) {
+    val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(items.indices)) { items.size }
+    val current = items[pagerState.currentPage.coerceIn(items.indices)]
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        Surface(Modifier.fillMaxSize(), color = Color.Black) {
+            Box(Modifier.fillMaxSize()) {
+                HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+                    ZoomableGalleryImage(items[page])
+                }
+                Row(
+                    Modifier.fillMaxWidth().align(Alignment.TopCenter)
+                        .background(Color.Black.copy(alpha = 0.62f)).padding(horizontal = 8.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
+                    Column(Modifier.weight(1f)) {
+                        Text(current.filename, color = Color.White, maxLines = 1, style = MaterialTheme.typography.bodyMedium)
+                        Text("双指缩放 · 放大后拖动 · 左右滑动换图", color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.labelSmall)
+                    }
+                    Text("${pagerState.currentPage + 1}/${items.size}", color = Color.White)
+                }
+                Row(
+                    Modifier.align(Alignment.BottomCenter).background(Color.Black.copy(alpha = 0.62f))
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { onSave(current) }) { Icon(Icons.Default.Download, "保存到系统相册", tint = Color.White) }
+                    IconButton(onClick = { onShare(current) }) { Icon(Icons.Default.Share, "分享", tint = Color.White) }
+                    IconButton(onClick = { onOpen(current) }) { Icon(Icons.Default.FileOpen, "打开原文件", tint = Color.White) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ZoomableGalleryImage(media: ResultMedia) {
+    var scale by remember(media.localPath, media.url) { mutableFloatStateOf(1f) }
+    var offset by remember(media.localPath, media.url) { mutableStateOf(Offset.Zero) }
+    var viewport by remember(media.localPath, media.url) { mutableStateOf(IntSize.Zero) }
+    Box(
+        Modifier.fillMaxSize().onSizeChanged { viewport = it }.pointerInput(media.localPath, media.url) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false)
+                do {
+                    val event = awaitPointerEvent()
+                    val zoom = event.calculateZoom()
+                    val pan = event.calculatePan()
+                    val isMultiTouch = event.changes.count { it.pressed } > 1
+                    if (isMultiTouch || scale > 1f || zoom != 1f) {
+                        val newScale = (scale * zoom).coerceIn(1f, 5f)
+                        if (newScale <= 1f) {
+                            offset = Offset.Zero
+                        } else {
+                            val maxX = viewport.width * (newScale - 1f) / 2f
+                            val maxY = viewport.height * (newScale - 1f) / 2f
+                            offset = Offset(
+                                x = (offset.x + pan.x).coerceIn(-maxX, maxX),
+                                y = (offset.y + pan.y).coerceIn(-maxY, maxY),
+                            )
+                        }
+                        scale = newScale
+                        event.changes.forEach { it.consume() }
+                    }
+                } while (event.changes.any { it.pressed })
+            }
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        AsyncImage(
+            model = media.url,
+            contentDescription = media.filename,
+            modifier = Modifier.fillMaxSize().graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                translationX = offset.x
+                translationY = offset.y
+            },
+            contentScale = ContentScale.Fit,
+        )
     }
 }
 

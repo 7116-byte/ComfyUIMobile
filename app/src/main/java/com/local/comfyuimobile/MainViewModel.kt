@@ -38,6 +38,7 @@ import com.local.comfyuimobile.network.LanAddress
 import com.local.comfyuimobile.network.LanScanner
 import com.local.comfyuimobile.network.ResultParser
 import com.local.comfyuimobile.network.PromptSubmissionException
+import com.local.comfyuimobile.network.ProgressStateParser
 import com.local.comfyuimobile.service.JobMonitorService
 import com.local.comfyuimobile.update.UpdateManager
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +54,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -71,6 +74,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var bridge: ComfyBridge? = null
     private var reconnectJob: Job? = null
     private var parameterRefreshJob: Job? = null
+    private val resultCacheMutex = Mutex()
     @Volatile private var lastUpdateCheck: Long = 0L
 
     init {
@@ -171,6 +175,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 jobs = emptyList(),
                 results = emptyList(),
                 nodeProblems = emptyMap(),
+                activeJobId = null,
+                currentExecutingNodeId = null,
+                generationProgress = null,
+                generationMessage = "",
                 bridgeReady = false,
             )
         }
@@ -312,7 +320,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val workflow = _state.value.selectedWorkflow ?: return
         viewModelScope.launch {
             runOperation("提交生成失败") {
-                _state.update { it.copy(generating = true, error = null) }
+                _state.update {
+                    it.copy(
+                        generating = true,
+                        error = null,
+                        currentExecutingNodeId = null,
+                        generationProgress = null,
+                        generationMessage = "正在整理工作流参数",
+                    )
+                }
                 val generated = (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
                 val response = try {
                     client.queuePrompt(
@@ -339,6 +355,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         promptHistory = history,
                         generating = false,
                         nodeProblems = emptyMap(),
+                        activeJobId = response.promptId,
+                        currentExecutingNodeId = null,
+                        generationProgress = 0f,
+                        generationMessage = "已经加入队列，等待服务器执行",
                         notice = "已加入队列：${response.promptId.take(8)}",
                     )
                 }
@@ -479,6 +499,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runOperation("取消任务失败") {
                 client.cancel(job)
                 stopMonitor(job.id)
+                if (_state.value.activeJobId == job.id) {
+                    _state.update {
+                        it.copy(
+                            activeJobId = null,
+                            currentExecutingNodeId = null,
+                            generationProgress = null,
+                            generationMessage = "任务已取消",
+                            notice = "任务已取消：${job.id.take(8)}",
+                        )
+                    }
+                }
                 delay(250)
                 refreshTasksInternal()
             }
@@ -673,6 +704,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val type = message.optString("type")
         val data = message.optJSONObject("data") ?: JSONObject()
         when (type) {
+            "execution_start" -> {
+                val id = data.optString("prompt_id")
+                if (id.isNotBlank()) {
+                    updateJob(id) { it.copy(state = JobState.RUNNING, progress = 0f, currentNode = null) }
+                    if (id in _state.value.submittedJobIds) {
+                        _state.update {
+                            it.copy(
+                                activeJobId = id,
+                                currentExecutingNodeId = null,
+                                generationProgress = 0f,
+                                generationMessage = "服务器已经开始生成",
+                            )
+                        }
+                    }
+                }
+            }
             "status" -> {
                 val remaining = data.optJSONObject("status")?.optJSONObject("exec_info")?.optInt("queue_remaining") ?: 0
                 _state.update { it.copy(queueRemaining = remaining) }
@@ -686,19 +733,113 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val progress = (value / max).toFloat()
                     updateJob(id) { it.copy(progress = progress) }
                     updateMonitor(id, (progress * 100).toInt(), null)
+                    if (id in _state.value.submittedJobIds) {
+                        _state.update {
+                            it.copy(
+                                activeJobId = id,
+                                generationProgress = progress,
+                                generationMessage = "正在生成 ${(progress * 100).toInt()}%",
+                            )
+                        }
+                    }
+                }
+            }
+            "progress_state" -> {
+                ProgressStateParser.parse(data)?.let { update ->
+                    updateJob(update.promptId) { it.copy(progress = update.progress, currentNode = update.nodeId, state = JobState.RUNNING) }
+                    updateMonitor(update.promptId, (update.progress * 100).toInt(), update.nodeId)
+                    if (update.promptId in _state.value.submittedJobIds) {
+                        val title = _state.value.selectedWorkflow?.nodes?.firstOrNull { it.id == update.nodeId }?.title
+                        _state.update {
+                            it.copy(
+                                activeJobId = update.promptId,
+                                currentExecutingNodeId = update.nodeId,
+                                generationProgress = update.progress,
+                                generationMessage = "正在执行：${title ?: "部件 ${update.nodeId}"} · ${(update.progress * 100).toInt()}%",
+                            )
+                        }
+                    }
                 }
             }
             "executing" -> {
                 val id = data.optString("prompt_id")
-                val node = data.optString("node")
+                val node = data.optString("display_node").ifBlank { data.optString("node") }
                 if (id.isNotBlank()) {
-                    updateJob(id) { it.copy(currentNode = node.ifBlank { null }, state = JobState.RUNNING) }
+                    val previousState = _state.value.jobs.firstOrNull { it.id == id }?.state
+                    val wasFailed = previousState in setOf(JobState.ERROR, JobState.CANCELLED)
+                    val wasTerminal = previousState in setOf(JobState.SUCCESS, JobState.ERROR, JobState.CANCELLED)
+                    updateJob(id) {
+                        if (node.isBlank() && wasTerminal) it.copy(currentNode = null)
+                        else it.copy(currentNode = node.ifBlank { null }, state = JobState.RUNNING)
+                    }
                     updateMonitor(id, -1, node)
+                    if (id in _state.value.submittedJobIds) {
+                        if (node.isBlank()) {
+                            if (!wasFailed) {
+                                _state.update {
+                                    it.copy(
+                                        activeJobId = id,
+                                        currentExecutingNodeId = null,
+                                        generationProgress = 1f,
+                                        generationMessage = "生成完成，结果已经刷新",
+                                        notice = "生成完成：${id.take(8)}",
+                                    )
+                                }
+                                stopMonitor(id)
+                                viewModelScope.launch { refreshTasksInternal(); refreshResultsInternal() }
+                            }
+                        } else {
+                            val title = _state.value.selectedWorkflow?.nodes?.firstOrNull { it.id == node }?.title
+                            _state.update {
+                                it.copy(
+                                    activeJobId = id,
+                                    currentExecutingNodeId = node,
+                                    generationMessage = "正在执行：${title ?: "部件 $node"}",
+                                )
+                            }
+                        }
+                    }
                 }
             }
-            "execution_error", "execution_success", "executed" -> viewModelScope.launch {
-                refreshTasksInternal()
-                refreshResultsInternal()
+            "executed" -> viewModelScope.launch { refreshResultsInternal() }
+            "execution_success" -> {
+                val id = data.optString("prompt_id")
+                if (id.isNotBlank()) {
+                    updateJob(id) { it.copy(state = JobState.SUCCESS, progress = 1f, currentNode = null) }
+                    stopMonitor(id)
+                    if (id in _state.value.submittedJobIds) {
+                        _state.update {
+                            it.copy(
+                                activeJobId = id,
+                                currentExecutingNodeId = null,
+                                generationProgress = 1f,
+                                generationMessage = "生成完成，结果已经刷新",
+                                notice = "生成完成：${id.take(8)}",
+                            )
+                        }
+                    }
+                }
+                viewModelScope.launch { refreshTasksInternal(); refreshResultsInternal() }
+            }
+            "execution_error", "execution_interrupted" -> {
+                val id = data.optString("prompt_id")
+                val detail = data.optString("exception_message").ifBlank { if (type == "execution_interrupted") "任务已中断" else "服务器执行失败" }
+                if (id.isNotBlank()) {
+                    updateJob(id) { it.copy(state = if (type == "execution_interrupted") JobState.CANCELLED else JobState.ERROR, currentNode = data.optString("node_id").ifBlank { null }, message = detail) }
+                    stopMonitor(id)
+                    if (id in _state.value.submittedJobIds) {
+                        _state.update {
+                            it.copy(
+                                activeJobId = id,
+                                currentExecutingNodeId = data.optString("node_id").ifBlank { null },
+                                generationProgress = null,
+                                generationMessage = "生成失败：$detail",
+                                error = "生成失败：$detail",
+                            )
+                        }
+                    }
+                }
+                viewModelScope.launch { refreshTasksInternal(); refreshResultsInternal() }
             }
         }
     }
@@ -717,10 +858,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun refreshTasksInternal() {
         runCatching {
+            val existing = _state.value.jobs.associateBy { it.id }
             val live = client.queue()
             val history = client.historyJobs()
             val submitted = _state.value.submittedJobIds
-            (live + history).distinctBy { it.id }.map { it.copy(submittedByApp = it.id in submitted) }
+            (live + history).distinctBy { it.id }.map { fresh ->
+                val previous = existing[fresh.id]
+                fresh.copy(
+                    progress = if (fresh.state in setOf(JobState.RUNNING, JobState.PENDING)) previous?.progress else fresh.progress,
+                    currentNode = if (fresh.state == JobState.RUNNING) previous?.currentNode else null,
+                    submittedByApp = fresh.id in submitted,
+                )
+            }
         }.onSuccess { jobs -> _state.update { it.copy(jobs = jobs) } }
     }
 
@@ -734,24 +883,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun cacheWhitelistedResults(results: List<ResultMedia>) {
+    private suspend fun cacheWhitelistedResults(results: List<ResultMedia>) = resultCacheMutex.withLock {
         val ui = _state.value
         val eligible = results.filter { media ->
             CachePolicy.shouldCache(media, ui.submittedJobIds, ui.cacheOutputRules, client.serverUrl())
         }
-        var local = ui.localResults
+        var failed = 0
         for (media in eligible) {
             if (localResultCache.contains(media)) continue
             val destination = localResultCache.destination(media)
             try {
                 destination.parentFile?.mkdirs()
                 client.downloadTo(media.url, destination.outputStream())
-                local = listOf(localResultCache.add(media, destination)) + local
+                localResultCache.add(media, destination)
             } catch (error: Throwable) {
+                failed += 1
                 destination.delete()
             }
         }
-        _state.update { it.copy(localResults = local.distinctBy { item -> "${item.jobId}/${item.nodeId}/${item.filename}" }.sortedByDescending { item -> item.createdAt }) }
+        val local = localResultCache.load()
+        _state.update {
+            it.copy(
+                localResults = local,
+                notice = if (failed > 0) "有 $failed 项本地缓存失败，刷新结果可重试" else it.notice,
+            )
+        }
     }
 
     private suspend fun saveToMediaStore(media: ResultMedia): Uri = withContext(Dispatchers.IO) {
