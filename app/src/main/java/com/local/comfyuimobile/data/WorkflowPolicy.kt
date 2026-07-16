@@ -11,7 +11,8 @@ object WorkflowPolicy {
 
     fun writeMobileLayout(workflow: JSONObject, fields: List<ParameterField>): JSONObject {
         val extra = workflow.optJSONObject("extra") ?: JSONObject().also { workflow.put("extra", it) }
-        val values = JSONObject()
+        val mobile = extra.optJSONObject("comfyMobile") ?: JSONObject().also { extra.put("comfyMobile", it) }
+        val values = mobile.optJSONObject("fields") ?: JSONObject().also { mobile.put("fields", it) }
         fields.forEach { field ->
             values.put(
                 field.key,
@@ -22,7 +23,7 @@ object WorkflowPolicy {
                     .put("order", field.order),
             )
         }
-        extra.put("comfyMobile", JSONObject().put("schema", 1).put("fields", values))
+        mobile.put("schema", 1)
         return workflow
     }
 }

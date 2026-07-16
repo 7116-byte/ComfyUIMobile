@@ -53,6 +53,8 @@ data class ParameterField(
     val section: ParameterSection = ParameterSection.MORE,
     val order: Int = 0,
     val warning: String? = null,
+    val widgetIndex: Int = -1,
+    val refreshesWorkflow: Boolean = false,
 )
 
 data class WorkflowDocument(

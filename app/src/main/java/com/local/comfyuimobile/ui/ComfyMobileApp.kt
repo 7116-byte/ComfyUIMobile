@@ -364,8 +364,7 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val name = displayName(context, uri) ?: "imported.json"
-            val raw = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-            if (raw != null) viewModel.importWorkflow(name, raw)
+            viewModel.importWorkflow(uri, name, context.contentResolver.getType(uri))
         }
     }
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
@@ -383,7 +382,9 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
             singleLine = true,
         )
         Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton(onClick = { importLauncher.launch(arrayOf("application/json", "text/plain")) }) {
+            FilledTonalButton(onClick = {
+                importLauncher.launch(arrayOf("application/json", "text/plain", "image/png", "image/webp", "image/avif"))
+            }) {
                 Icon(Icons.Default.UploadFile, null); Spacer(Modifier.width(4.dp)); Text("导入")
             }
             state.selectedWorkflow?.let {
@@ -449,6 +450,7 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         return
     }
     var showMore by remember { mutableStateOf(false) }
+    var expandedNodeIds by remember(workflow.entry.path) { mutableStateOf(emptySet<String>()) }
     var layoutDialog by remember { mutableStateOf(false) }
     var historyField by remember { mutableStateOf<ParameterField?>(null) }
     var uploadField by remember { mutableStateOf<ParameterField?>(null) }
@@ -457,11 +459,18 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         if (uri != null && field != null) viewModel.uploadField(field, uri)
         uploadField = null
     }
+    val nodeGroups = state.fields
+        .filter { it.visible }
+        .groupBy { it.nodeId }
+        .values
+        .map { fields -> fields.sortedBy { it.order } }
+    val primaryNodes = nodeGroups.filter { fields -> fields.any { it.section == ParameterSection.PRIMARY } }
+    val moreNodes = nodeGroups.filterNot { fields -> fields.any { it.section == ParameterSection.PRIMARY } }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(workflow.entry.name, style = MaterialTheme.typography.titleMedium)
-                Text("${state.fields.count { it.visible }} 个可见参数", style = MaterialTheme.typography.bodySmall)
+                Text("${nodeGroups.size} 个可设置节点 · ${state.fields.count { it.visible }} 个参数", style = MaterialTheme.typography.bodySmall)
             }
             IconButton(onClick = { layoutDialog = true }) { Icon(Icons.Default.Tune, "表单布局") }
             IconButton(onClick = { viewModel.saveWorkflow() }) { Icon(Icons.Default.Save, "保存默认值") }
@@ -471,25 +480,43 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            val primary = state.fields.filter { it.visible && it.section == ParameterSection.PRIMARY }
-            val more = state.fields.filter { it.visible && it.section == ParameterSection.MORE }
-            items(primary, key = { it.key }) { field ->
-                ParameterCard(field, viewModel, onHistory = { historyField = field }, onUpload = {
-                    uploadField = field
-                    uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
-                })
-            }
-            if (more.isNotEmpty()) {
-                item {
-                    OutlinedButton(onClick = { showMore = !showMore }, Modifier.fillMaxWidth()) {
-                        Text(if (showMore) "收起更多参数" else "更多参数（${more.size}）")
-                    }
-                }
-                if (showMore) items(more, key = { it.key }) { field ->
-                    ParameterCard(field, viewModel, onHistory = { historyField = field }, onUpload = {
+            items(primaryNodes, key = { it.first().nodeId }) { fields ->
+                val nodeId = fields.first().nodeId
+                NodeParameterCard(
+                    fields = fields,
+                    expanded = nodeId in expandedNodeIds,
+                    onToggle = {
+                        expandedNodeIds = if (nodeId in expandedNodeIds) expandedNodeIds - nodeId else expandedNodeIds + nodeId
+                    },
+                    viewModel = viewModel,
+                    onHistory = { historyField = it },
+                    onUpload = { field ->
                         uploadField = field
                         uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
-                    })
+                    },
+                )
+            }
+            if (moreNodes.isNotEmpty()) {
+                item {
+                    OutlinedButton(onClick = { showMore = !showMore }, Modifier.fillMaxWidth()) {
+                        Text(if (showMore) "收起更多节点" else "更多节点（${moreNodes.size}）")
+                    }
+                }
+                if (showMore) items(moreNodes, key = { it.first().nodeId }) { fields ->
+                    val nodeId = fields.first().nodeId
+                    NodeParameterCard(
+                        fields = fields,
+                        expanded = nodeId in expandedNodeIds,
+                        onToggle = {
+                            expandedNodeIds = if (nodeId in expandedNodeIds) expandedNodeIds - nodeId else expandedNodeIds + nodeId
+                        },
+                        viewModel = viewModel,
+                        onHistory = { historyField = it },
+                        onUpload = { field ->
+                            uploadField = field
+                            uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
+                        },
+                    )
                 }
             }
         }
@@ -509,48 +536,86 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
 }
 
 @Composable
-private fun ParameterCard(field: ParameterField, viewModel: MainViewModel, onHistory: () -> Unit, onUpload: () -> Unit) {
+private fun NodeParameterCard(
+    fields: List<ParameterField>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    viewModel: MainViewModel,
+    onHistory: (ParameterField) -> Unit,
+    onUpload: (ParameterField) -> Unit,
+) {
+    val first = fields.first()
+    val title = first.nodeTitle.ifBlank { first.nodeType.ifBlank { "未命名节点" } }
     OutlinedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(field.label, style = MaterialTheme.typography.titleSmall)
+        Column {
+            Row(
+                Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(title, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        buildString {
+                            if (first.nodeType.isNotBlank() && first.nodeType != title) append(first.nodeType).append(" · ")
+                            append(fields.size).append(" 个设置")
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
-                if (field.kind == ParameterKind.MULTILINE) IconButton(onClick = onHistory) { Icon(Icons.Default.History, "历史") }
+                Icon(if (expanded) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward, if (expanded) "收起" else "展开")
             }
-            if (field.linked) Text("此参数已由其他节点连接，当前值只读。", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall)
-            when (field.kind) {
-                ParameterKind.BOOLEAN -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    Switch(checked = field.displayValue.toBoolean(), onCheckedChange = { viewModel.updateField(field.key, it.toString()) }, enabled = !field.linked)
-                    Spacer(Modifier.width(10.dp)); Text(if (field.displayValue.toBoolean()) "开启" else "关闭")
-                }
-                ParameterKind.COMBO -> ComboField(field, viewModel)
-                ParameterKind.INTEGER, ParameterKind.DECIMAL -> {
-                    NumberField(field, viewModel)
-                    if (field.name.contains("seed", ignoreCase = true)) {
-                        FilledTonalButton(onClick = {
-                            val upper = field.maximum?.toLong()?.coerceAtMost(Long.MAX_VALUE - 1) ?: Long.MAX_VALUE - 1
-                            viewModel.updateField(field.key, Random.nextLong(0, upper.coerceAtLeast(1) + 1).toString())
-                        }, enabled = !field.linked) { Text("随机种子") }
+            if (expanded) {
+                HorizontalDivider()
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    fields.forEachIndexed { index, field ->
+                        ParameterEditor(field, viewModel, onHistory = { onHistory(field) }, onUpload = { onUpload(field) })
+                        if (index < fields.lastIndex) HorizontalDivider()
                     }
                 }
-                ParameterKind.IMAGE, ParameterKind.VIDEO -> {
-                    OutlinedTextField(field.displayValue, { viewModel.updateField(field.key, it) }, Modifier.fillMaxWidth(), enabled = !field.linked, singleLine = true)
-                    FilledTonalButton(onClick = onUpload, enabled = !field.linked) {
-                        Icon(if (field.kind == ParameterKind.VIDEO) Icons.Default.VideoFile else Icons.Default.UploadFile, null)
-                        Spacer(Modifier.width(6.dp)); Text("选择并上传")
-                    }
-                }
-                ParameterKind.MULTILINE -> OutlinedTextField(
-                    value = field.displayValue,
-                    onValueChange = { viewModel.updateField(field.key, it) },
-                    modifier = Modifier.fillMaxWidth().height(150.dp),
-                    enabled = !field.linked,
-                    minLines = 5,
-                )
-                ParameterKind.TEXT -> OutlinedTextField(field.displayValue, { viewModel.updateField(field.key, it) }, Modifier.fillMaxWidth(), enabled = !field.linked)
-                ParameterKind.UNSUPPORTED -> Text(field.warning ?: "此控件需在高级编辑中修改", color = MaterialTheme.colorScheme.error)
             }
+        }
+    }
+}
+
+@Composable
+private fun ParameterEditor(field: ParameterField, viewModel: MainViewModel, onHistory: () -> Unit, onUpload: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(field.label, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            if (field.kind == ParameterKind.MULTILINE) IconButton(onClick = onHistory) { Icon(Icons.Default.History, "历史") }
+        }
+        if (field.linked) Text("此参数已由其他节点连接，当前值只读。", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall)
+        when (field.kind) {
+            ParameterKind.BOOLEAN -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(checked = field.displayValue.toBoolean(), onCheckedChange = { viewModel.updateField(field.key, it.toString()) }, enabled = !field.linked)
+                Spacer(Modifier.width(10.dp)); Text(if (field.displayValue.toBoolean()) "开启" else "关闭")
+            }
+            ParameterKind.COMBO -> ComboField(field, viewModel)
+            ParameterKind.INTEGER, ParameterKind.DECIMAL -> {
+                NumberField(field, viewModel)
+                if (field.name.contains("seed", ignoreCase = true)) {
+                    FilledTonalButton(onClick = {
+                        val upper = field.maximum?.toLong()?.coerceAtMost(Long.MAX_VALUE - 1) ?: Long.MAX_VALUE - 1
+                        viewModel.updateField(field.key, Random.nextLong(0, upper.coerceAtLeast(1) + 1).toString())
+                    }, enabled = !field.linked) { Text("随机种子") }
+                }
+            }
+            ParameterKind.IMAGE, ParameterKind.VIDEO -> {
+                OutlinedTextField(field.displayValue, { viewModel.updateField(field.key, it) }, Modifier.fillMaxWidth(), enabled = !field.linked, singleLine = true)
+                FilledTonalButton(onClick = onUpload, enabled = !field.linked) {
+                    Icon(if (field.kind == ParameterKind.VIDEO) Icons.Default.VideoFile else Icons.Default.UploadFile, null)
+                    Spacer(Modifier.width(6.dp)); Text("选择并上传")
+                }
+            }
+            ParameterKind.MULTILINE -> OutlinedTextField(
+                value = field.displayValue,
+                onValueChange = { viewModel.updateField(field.key, it) },
+                modifier = Modifier.fillMaxWidth().height(150.dp),
+                enabled = !field.linked,
+                minLines = 5,
+            )
+            ParameterKind.TEXT -> OutlinedTextField(field.displayValue, { viewModel.updateField(field.key, it) }, Modifier.fillMaxWidth(), enabled = !field.linked)
+            ParameterKind.UNSUPPORTED -> Text(field.warning ?: "此控件需在高级编辑中修改", color = MaterialTheme.colorScheme.error)
         }
     }
 }

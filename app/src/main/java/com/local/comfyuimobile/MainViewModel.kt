@@ -36,6 +36,7 @@ import com.local.comfyuimobile.service.JobMonitorService
 import com.local.comfyuimobile.update.UpdateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -62,6 +63,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val state: StateFlow<AppUiState> = _state.asStateFlow()
     private var bridge: ComfyBridge? = null
     private var reconnectJob: Job? = null
+    private var parameterRefreshJob: Job? = null
     private val autoSavedUrls = mutableSetOf<String>()
     @Volatile private var lastUpdateCheck: Long = 0L
 
@@ -189,6 +191,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectWorkflow(entry: WorkflowEntry) {
         if (entry.isDirectory) return
+        parameterRefreshJob?.cancel()
         viewModelScope.launch {
             runOperation("工作流加载失败") {
                 _state.update { it.copy(loading = true, error = null, selectedWorkflow = null, fields = emptyList()) }
@@ -202,6 +205,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateField(key: String, value: String) {
+        val refreshesWorkflow = _state.value.fields.firstOrNull { it.key == key }?.refreshesWorkflow == true
         _state.update { ui ->
             ui.copy(fields = ui.fields.map { field ->
                 if (field.key != key) field else field.copy(
@@ -210,6 +214,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             })
         }
+        if (refreshesWorkflow) refreshParametersAfterWorkflowSwitch()
     }
 
     fun setFieldVisibility(key: String, visible: Boolean) = updateFieldLayout(key) { it.copy(visible = visible) }
@@ -370,15 +375,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun importWorkflow(filename: String, raw: String) {
+    fun importWorkflow(uri: Uri, filename: String, mimeType: String?) {
         viewModelScope.launch {
             runOperation("导入工作流失败") {
+                _state.update { it.copy(loading = true, error = null) }
+                val extension = filename.substringAfterLast('.', "").lowercase()
+                val isImage = mimeType.orEmpty().startsWith("image/") || extension in setOf("png", "webp", "avif")
+                val raw = if (isImage) {
+                    (bridge ?: error("前端桥接不可用")).extractWorkflowFromImage(uri, mimeType, filename)
+                } else {
+                    withContext(Dispatchers.IO) {
+                        app.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                            ?: error("无法读取所选文件")
+                    }
+                }
                 val json = JSONObject(raw)
                 require(json.optJSONArray("nodes") != null) { "不是 ComfyUI 画布工作流 JSON" }
-                val safeName = WorkflowPath.fileName(filename.substringAfterLast('/').substringAfterLast('\\'))
+                val sourceName = filename.substringAfterLast('/').substringAfterLast('\\')
+                val targetName = if (isImage) sourceName.substringBeforeLast('.', sourceName) else sourceName
+                val safeName = WorkflowPath.fileName(targetName)
                 client.writeWorkflow("workflows/$safeName", json.toString(), overwrite = false)
                 refreshWorkflowsInternal()
-                _state.update { it.copy(notice = "已导入 $safeName") }
+                _state.update { it.copy(loading = false, notice = "已从${if (isImage) "图片" else "文件"}导入 $safeName") }
             }
         }
     }
@@ -649,6 +667,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { ui -> ui.copy(fields = ui.fields.map { if (it.key == key) transform(it) else it }) }
     }
 
+    private fun refreshParametersAfterWorkflowSwitch() {
+        parameterRefreshJob?.cancel()
+        parameterRefreshJob = viewModelScope.launch {
+            delay(80)
+            runOperation("切换工作流程失败") {
+                val document = _state.value.selectedWorkflow ?: return@runOperation
+                val activeBridge = bridge ?: error("前端桥接不可用")
+                val snapshot = _state.value.fields
+                _state.update { it.copy(loading = true, error = null) }
+                val raw = activeBridge.syncWorkflow(snapshot)
+                val refreshedFields = activeBridge.loadWorkflow(raw)
+                _state.update { ui ->
+                    if (ui.selectedWorkflow?.entry?.path != document.entry.path) {
+                        ui.copy(loading = false)
+                    } else {
+                        ui.copy(
+                            selectedWorkflow = document.copy(rawJson = raw, fields = refreshedFields),
+                            fields = refreshedFields,
+                            loading = false,
+                            notice = "已切换工作流程并刷新可设置节点",
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private fun updateJob(id: String, transform: (JobSummary) -> JobSummary) {
         _state.update { ui ->
             val current = ui.jobs.firstOrNull { it.id == id } ?: JobSummary(id, JobState.RUNNING, submittedByApp = id in ui.submittedJobIds)
@@ -675,6 +720,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun runOperation(prefix: String, block: suspend () -> Unit) {
         runCatching { block() }.onFailure { error ->
+            if (error is CancellationException) throw error
             _state.update {
                 val detail = error.message ?: error.javaClass.simpleName
                 val connecting = prefix.startsWith("连接")

@@ -17,7 +17,7 @@ class WorkflowPolicyTest {
     }
 
     @Test fun writesVersionedFieldLayoutWithoutRemovingExistingExtraData() {
-        val workflow = JSONObject("""{"extra":{"keep":"yes"}}""")
+        val workflow = JSONObject("""{"extra":{"keep":"yes","comfyMobile":{"schema":1,"fields":{"8/seed":{"label":"旧分支种子"}}}}}""")
         val field = ParameterField(
             key = "7/text", nodeId = "7", nodeTitle = "Positive", nodeType = "CLIPTextEncode",
             name = "text", label = "正向提示词", widgetType = "customtext", kind = ParameterKind.MULTILINE,
@@ -34,5 +34,6 @@ class WorkflowPolicyTest {
         assertFalse(stored.getBoolean("visible"))
         assertEquals("primary", stored.getString("section"))
         assertEquals(3, stored.getInt("order"))
+        assertEquals("旧分支种子", mobile.getJSONObject("fields").getJSONObject("8/seed").getString("label"))
     }
 }
