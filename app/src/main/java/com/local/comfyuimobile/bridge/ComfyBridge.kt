@@ -4,7 +4,9 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.local.comfyuimobile.model.GeneratedPrompt
@@ -25,6 +27,7 @@ import kotlin.coroutines.resumeWithException
 class ComfyBridge(private val activity: Activity) {
     val webView: WebView = WebView(activity)
     @Volatile private var allowedOrigin: String = ""
+    @Volatile private var pageLoadError: String? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     fun configure() {
@@ -41,15 +44,46 @@ class ComfyBridge(private val activity: Activity) {
                 runCatching { activity.startActivity(Intent(Intent.ACTION_VIEW, request.url)) }
                 return true
             }
+
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (request.isForMainFrame) {
+                    pageLoadError = "网页加载失败（${error.errorCode}）：${error.description}"
+                }
+            }
+
+            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+                if (request.isForMainFrame) {
+                    pageLoadError = "网页返回错误 ${errorResponse.statusCode}：${errorResponse.reasonPhrase}"
+                }
+            }
         }
     }
 
-    suspend fun loadServer(baseUrl: String) = withContext(Dispatchers.Main.immediate) {
-        allowedOrigin = baseUrl.trimEnd('/')
-        if (!webView.url.orEmpty().startsWith(allowedOrigin)) webView.loadUrl("$allowedOrigin/")
+    suspend fun loadServer(baseUrl: String, timeoutMillis: Long = 45_000L) {
+        val origin = baseUrl.trimEnd('/')
+        withContext(Dispatchers.Main.immediate) {
+            allowedOrigin = origin
+            pageLoadError = null
+            if (webView.url.orEmpty().startsWith(origin)) webView.reload() else webView.loadUrl("$origin/")
+        }
+
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        var currentUrl = "about:blank"
+        var progress = 0
+        while (System.currentTimeMillis() < deadline) {
+            pageLoadError?.let { throw IllegalStateException(it) }
+            val pageState = withContext(Dispatchers.Main.immediate) {
+                webView.url.orEmpty() to webView.progress
+            }
+            currentUrl = pageState.first.ifBlank { "about:blank" }
+            progress = pageState.second
+            if (currentUrl.startsWith(origin) && currentUrl != "about:blank" && progress >= 100) return
+            delay(100)
+        }
+        throw IllegalStateException("网页加载超时：当前地址 $currentUrl，进度 $progress%")
     }
 
-    suspend fun awaitReady(timeoutMillis: Long = 35_000L) {
+    suspend fun awaitReady(timeoutMillis: Long = 90_000L) {
         val deadline = System.currentTimeMillis() + timeoutMillis
         var lastError = "ComfyUI 前端尚未初始化"
         while (System.currentTimeMillis() < deadline) {
@@ -243,7 +277,8 @@ class ComfyBridge(private val activity: Activity) {
     private fun workflowManifestScript(encodedWorkflow: String) = """
         (async () => {
           try {
-            const app = window.__comfyMobileApp || (await import('/scripts/app.js')).app;
+            const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
+            if (!app) return JSON.stringify({ok:false, error:'ComfyUI 前端对象尚未就绪'});
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedWorkflow'), c => c.charCodeAt(0)));
             const workflow = JSON.parse(text);
             await app.loadGraphData(workflow, true, false);
@@ -294,7 +329,8 @@ class ComfyBridge(private val activity: Activity) {
     private fun promptScript(encodedUpdates: String) = """
         (async () => {
           try {
-            const app = window.__comfyMobileApp || (await import('/scripts/app.js')).app;
+            const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
+            if (!app) return JSON.stringify({ok:false, error:'ComfyUI 前端对象尚未就绪'});
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedUpdates'), c => c.charCodeAt(0)));
             const updates = JSON.parse(text);
             const nodeMap = new Map();
@@ -334,16 +370,16 @@ class ComfyBridge(private val activity: Activity) {
         private val READY_SCRIPT = """
             (async () => {
               try {
-                const mod = await import('/scripts/app.js');
-                if (!(mod.app?.rootGraph || mod.app?.graph)) return JSON.stringify({ok:false,error:'工作流画布尚未就绪'});
-                const settings = mod.app?.ui?.settings;
+                const app = window.comfyAPI?.app?.app;
+                if (!(app?.rootGraph || app?.graph)) return JSON.stringify({ok:false,error:'工作流画布尚未就绪'});
+                const settings = app?.ui?.settings;
                 const locale = settings?.getSettingValue?.('Comfy.Locale');
                 if (settings && locale !== 'zh') {
                   if (typeof settings?.setSettingValueAsync === 'function') await settings.setSettingValueAsync('Comfy.Locale', 'zh');
                   else settings?.setSettingValue?.('Comfy.Locale', 'zh');
                   await new Promise(resolve => setTimeout(resolve, 300));
                 }
-                window.__comfyMobileApp = mod.app;
+                window.__comfyMobileApp = app;
                 return JSON.stringify({ok:true});
               } catch (error) {
                 return JSON.stringify({ok:false,error:'前端初始化错误：' + String(error)});

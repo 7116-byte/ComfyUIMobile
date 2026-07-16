@@ -165,14 +165,27 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState) {
-    Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
+    var settings by remember { mutableStateOf(false) }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {},
+                actions = {
+                    IconButton(onClick = { settings = true }) {
+                        Icon(Icons.Default.Settings, "设置")
+                    }
+                },
+            )
+        },
+        snackbarHost = { SnackbarHost(snackbar) },
+    ) { padding ->
         Column(
             Modifier.fillMaxSize().padding(padding).padding(20.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Spacer(Modifier.height(24.dp))
             Icon(Icons.Default.Wifi, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
             Text("ComfyUI 手机端", style = MaterialTheme.typography.headlineMedium)
             Text("在可信局域网中连接电脑上的 ComfyUI。不会把提示词或工作流上传到云端。", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -198,6 +211,9 @@ private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar
                     Text("扫描局域网")
                 }
             }
+            if (state.status == ConnectionStatus.CONNECTING || state.status == ConnectionStatus.ERROR) {
+                ConnectionProgressCard(state)
+            }
             if (state.savedServers.isNotEmpty()) {
                 Text("已保存", style = MaterialTheme.typography.titleMedium)
                 state.savedServers.forEach { profile ->
@@ -208,26 +224,53 @@ private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar
                 Text("扫描结果", style = MaterialTheme.typography.titleMedium)
                 state.discoveredServers.forEach { profile -> ServerCard(profile, onClick = { viewModel.setServerInput(profile.baseUrl); viewModel.connect(profile.baseUrl) }) }
             }
-            HorizontalDivider()
-            Text("软件更新", style = MaterialTheme.typography.titleMedium)
-            state.updateInfo?.let { info ->
-                OutlinedCard(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("发现新版本 ${info.tag}")
-                        Button(onClick = viewModel::downloadUpdate) {
-                            Icon(Icons.Default.Download, null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("下载并安装")
-                        }
-                    }
-                }
-            } ?: OutlinedButton(onClick = { viewModel.checkUpdate() }) {
-                Icon(Icons.Default.Refresh, null)
-                Spacer(Modifier.width(6.dp))
-                Text("检查更新")
-            }
-            Text("不需要先连接 ComfyUI，也可以在这里检查和安装新版。", style = MaterialTheme.typography.bodySmall)
             Text("电脑端需要使用 --listen 0.0.0.0 启动，并允许 Windows 防火墙放行 8188 端口。", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    if (settings) SettingsDialog(state, viewModel) { settings = false }
+}
+
+private val connectionStepNames = listOf(
+    "检查局域网地址",
+    "读取服务器信息",
+    "打开 ComfyUI 网页",
+    "初始化前端",
+    "读取节点定义",
+    "同步连接数据",
+)
+
+@Composable
+private fun ConnectionProgressCard(state: AppUiState) {
+    val current = state.connectionStep.coerceIn(1, state.connectionTotalSteps)
+    val failed = state.status == ConnectionStatus.ERROR
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                if (failed) "连接失败（第 $current/${state.connectionTotalSteps} 步）"
+                else "正在连接（第 $current/${state.connectionTotalSteps} 步）",
+                style = MaterialTheme.typography.titleMedium,
+                color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+            )
+            LinearProgressIndicator(
+                progress = { current.toFloat() / state.connectionTotalSteps },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(state.connectionMessage, style = MaterialTheme.typography.bodyMedium)
+            connectionStepNames.forEachIndexed { index, name ->
+                val step = index + 1
+                val statusText = when {
+                    step < current -> "已完成"
+                    step == current && failed -> "失败"
+                    step == current -> "进行中"
+                    else -> "等待"
+                }
+                val color = when {
+                    step == current && failed -> MaterialTheme.colorScheme.error
+                    step <= current -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                Text("$step. $name · $statusText", color = color, style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
@@ -720,7 +763,7 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("服务器", style = MaterialTheme.typography.titleSmall)
-                Text(state.activeServer?.baseUrl.orEmpty())
+                Text(state.activeServer?.baseUrl ?: "尚未连接")
                 state.activeServer?.lastSeen?.takeIf { it > 0L }?.let { Text("最后在线：${formatTime(it)}") }
                 state.systemStats?.let { stats ->
                     Text("ComfyUI ${stats.comfyVersion} · 前端 ${stats.frontendVersion}")
@@ -733,12 +776,14 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
                 }
                 HorizontalDivider()
                 Text("软件更新", style = MaterialTheme.typography.titleSmall)
-                OutlinedButton(onClick = { viewModel.checkUpdate() }) { Text("检查 GitHub 更新") }
+                OutlinedButton(onClick = { viewModel.checkUpdate() }) { Text("检查更新") }
                 state.updateInfo?.let { info ->
                     Text("发现 ${info.tag}")
                     Button(onClick = viewModel::downloadUpdate) { Icon(Icons.Default.Download, null); Spacer(Modifier.width(4.dp)); Text("下载并安装") }
                 }
-                OutlinedButton(onClick = { viewModel.disconnect(); onDismiss() }) { Icon(Icons.Default.CloudOff, null); Spacer(Modifier.width(4.dp)); Text("断开连接") }
+                if (state.activeServer != null) {
+                    OutlinedButton(onClick = { viewModel.disconnect(); onDismiss() }) { Icon(Icons.Default.CloudOff, null); Spacer(Modifier.width(4.dp)); Text("断开连接") }
+                }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },

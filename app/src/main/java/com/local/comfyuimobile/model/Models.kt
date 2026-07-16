@@ -100,6 +100,8 @@ data class UpdateInfo(
 data class AppUiState(
     val status: ConnectionStatus = ConnectionStatus.DISCONNECTED,
     val connectionMessage: String = "尚未连接",
+    val connectionStep: Int = 0,
+    val connectionTotalSteps: Int = 6,
     val serverInput: String = "http://192.168.10.109:8188",
     val activeServer: ServerProfile? = null,
     val savedServers: List<ServerProfile> = emptyList(),

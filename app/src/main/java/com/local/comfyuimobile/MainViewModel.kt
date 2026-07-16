@@ -94,35 +94,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun connect(address: String = state.value.serverInput) {
         viewModelScope.launch {
             runOperation("连接失败") {
-                val normalized = LanAddress.normalize(address)
                 val activeBridge = bridge ?: error("前端桥接尚未初始化")
                 _state.update {
                     it.copy(
                         status = ConnectionStatus.CONNECTING,
-                        connectionMessage = "正在连接…",
+                        connectionMessage = "正在检查地址是否为可信局域网地址",
+                        connectionStep = 1,
                         loading = true,
-                        serverInput = normalized,
+                        activeServer = null,
+                        bridgeReady = false,
                         error = null,
                     )
                 }
+                val normalized = LanAddress.normalize(address)
+                _state.update { it.copy(serverInput = normalized) }
                 client.setServer(normalized)
+
+                setConnectionStep(2, "地址检查通过，正在读取服务器版本和显卡信息")
+                val (stats, profile) = client.probe(normalized)
+
+                setConnectionStep(3, "服务器接口正常，正在打开 ComfyUI 网页")
                 activeBridge.loadServer(normalized)
-                val (stats, profile) = coroutineScope {
-                    val probe = async { client.probe(normalized) }
-                    val bridgeReady = async { activeBridge.awaitReady() }
-                    val capabilities = async {
-                        client.features()
-                        require(client.objectInfo().length() > 0) { "服务器没有返回节点定义" }
-                    }
-                    bridgeReady.await()
-                    capabilities.await()
-                    probe.await()
-                }
+
+                setConnectionStep(4, "网页已经打开，正在初始化 ComfyUI 前端")
+                activeBridge.awaitReady()
+
+                setConnectionStep(5, "前端已经就绪，正在读取节点定义")
+                client.features()
+                require(client.objectInfo().length() > 0) { "服务器没有返回节点定义" }
+
+                setConnectionStep(6, "节点定义正常，正在保存连接并同步数据")
                 preferences.saveServer(profile)
                 _state.update {
                     it.copy(
                         status = ConnectionStatus.CONNECTED,
                         connectionMessage = "已连接 ${profile.name}",
+                        connectionStep = it.connectionTotalSteps,
                         activeServer = profile,
                         systemStats = stats,
                         bridgeReady = true,
@@ -142,6 +149,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 status = ConnectionStatus.DISCONNECTED,
                 connectionMessage = "已断开",
+                connectionStep = 0,
                 activeServer = null,
                 systemStats = null,
                 workflows = emptyList(),
@@ -668,14 +676,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun runOperation(prefix: String, block: suspend () -> Unit) {
         runCatching { block() }.onFailure { error ->
             _state.update {
+                val detail = error.message ?: error.javaClass.simpleName
+                val connecting = prefix.startsWith("连接")
                 it.copy(
                     loading = false,
                     generating = false,
                     scanning = false,
-                    error = "$prefix：${error.message ?: error.javaClass.simpleName}",
-                    status = if (prefix.startsWith("连接")) ConnectionStatus.ERROR else it.status,
+                    error = "$prefix：$detail",
+                    status = if (connecting) ConnectionStatus.ERROR else it.status,
+                    connectionMessage = if (connecting) "第 ${it.connectionStep} 步失败：$detail" else it.connectionMessage,
+                    activeServer = if (connecting) null else it.activeServer,
+                    bridgeReady = if (connecting) false else it.bridgeReady,
                 )
             }
+        }
+    }
+
+    private fun setConnectionStep(step: Int, message: String) {
+        _state.update {
+            it.copy(
+                status = ConnectionStatus.CONNECTING,
+                connectionStep = step.coerceIn(1, it.connectionTotalSteps),
+                connectionMessage = message,
+            )
         }
     }
 
