@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -50,6 +51,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.ContentCopy
@@ -116,6 +119,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -163,6 +168,7 @@ import com.local.comfyuimobile.model.WorkflowNode
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.launch
 import kotlin.random.Random
 
 private enum class MainPage(val label: String, val icon: ImageVector) {
@@ -361,6 +367,9 @@ private fun ServerCard(profile: ServerProfile, onClick: () -> Unit, onDelete: ((
 private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState) {
     var page by remember { mutableStateOf(MainPage.WORKFLOWS) }
     var settings by remember { mutableStateOf(false) }
+    var resultSource by rememberSaveable { mutableStateOf(ResultSource.LOCAL) }
+    var resultLayout by rememberSaveable { mutableStateOf(ResultLayout.ALBUMS) }
+    var resultAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -406,7 +415,19 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
             when (page) {
                 MainPage.WORKFLOWS -> WorkflowScreen(state, viewModel, onOpenParameters = { page = MainPage.PARAMETERS })
                 MainPage.PARAMETERS -> ParameterScreen(state, viewModel)
-                MainPage.RESULTS -> ResultScreen(state, viewModel)
+                MainPage.RESULTS -> ResultScreen(
+                    state = state,
+                    viewModel = viewModel,
+                    source = resultSource,
+                    onSourceChange = {
+                        resultSource = it
+                        resultAlbumId = null
+                    },
+                    layout = resultLayout,
+                    onLayoutChange = { resultLayout = it },
+                    selectedAlbumId = resultAlbumId,
+                    onSelectedAlbumChange = { resultAlbumId = it },
+                )
                 MainPage.TASKS -> TaskScreen(state, viewModel)
             }
             if (state.loading || state.generating) {
@@ -939,10 +960,16 @@ private fun LayoutDialog(fields: List<ParameterField>, viewModel: MainViewModel,
 }
 
 @Composable
-private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
-    var source by remember { mutableStateOf(ResultSource.LOCAL) }
-    var layout by remember { mutableStateOf(ResultLayout.ALBUMS) }
-    var selectedAlbumId by remember { mutableStateOf<String?>(null) }
+private fun ResultScreen(
+    state: AppUiState,
+    viewModel: MainViewModel,
+    source: ResultSource,
+    onSourceChange: (ResultSource) -> Unit,
+    layout: ResultLayout,
+    onLayoutChange: (ResultLayout) -> Unit,
+    selectedAlbumId: String?,
+    onSelectedAlbumChange: (String?) -> Unit,
+) {
     var selectedMedia by remember { mutableStateOf<ResultMedia?>(null) }
     var selectedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
     var confirmDeleteSelection by remember { mutableStateOf(false) }
@@ -970,19 +997,16 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
             selectedMedia = item
         }
     }
-    LaunchedEffect(source) {
-        selectedAlbumId = null
-        selectedKeys = emptySet()
-    }
+    LaunchedEffect(source) { selectedKeys = emptySet() }
     LaunchedEffect(media.map(ResultMedia::stableKey)) {
         selectedKeys = selectedKeys.intersect(media.map(ResultMedia::stableKey).toSet())
     }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (source == ResultSource.LOCAL) FilledTonalButton({ source = ResultSource.LOCAL }, Modifier.weight(1f)) { Text("本地") }
-            else OutlinedButton({ source = ResultSource.LOCAL }, Modifier.weight(1f)) { Text("本地") }
-            if (source == ResultSource.CLOUD) FilledTonalButton({ source = ResultSource.CLOUD }, Modifier.weight(1f)) { Text("云端") }
-            else OutlinedButton({ source = ResultSource.CLOUD }, Modifier.weight(1f)) { Text("云端") }
+            if (source == ResultSource.LOCAL) FilledTonalButton({ onSourceChange(ResultSource.LOCAL) }, Modifier.weight(1f)) { Text("本地") }
+            else OutlinedButton({ onSourceChange(ResultSource.LOCAL) }, Modifier.weight(1f)) { Text("本地") }
+            if (source == ResultSource.CLOUD) FilledTonalButton({ onSourceChange(ResultSource.CLOUD) }, Modifier.weight(1f)) { Text("云端") }
+            else OutlinedButton({ onSourceChange(ResultSource.CLOUD) }, Modifier.weight(1f)) { Text("云端") }
         }
         if (selectionMode) {
             Row(
@@ -1007,14 +1031,14 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
         } else {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (selectedAlbum != null) {
-                    TextButton(onClick = { selectedAlbumId = null }) { Text("‹ 返回相册") }
+                    TextButton(onClick = { onSelectedAlbumChange(null) }) { Text("‹ 返回相册") }
                 } else {
                     Text(
                         if (source == ResultSource.LOCAL) "手机独立保存的白名单作品" else "ComfyUI 服务器媒体资产",
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = { layout = if (layout == ResultLayout.ALL) ResultLayout.ALBUMS else ResultLayout.ALL }) {
+                    TextButton(onClick = { onLayoutChange(if (layout == ResultLayout.ALL) ResultLayout.ALBUMS else ResultLayout.ALL) }) {
                         Text(if (layout == ResultLayout.ALL) "任务相册" else "全部平铺")
                     }
                 }
@@ -1059,7 +1083,7 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
                         selected = albumKeys.isNotEmpty() && albumKeys.all { it in selectedKeys },
                         partiallySelected = albumKeys.any { it in selectedKeys },
                         selectionMode = selectionMode,
-                        onClick = { selectedAlbumId = album.jobId },
+                        onClick = { onSelectedAlbumChange(album.jobId) },
                         onToggleSelection = { toggleSelection(album.media) },
                     )
                 }
@@ -1092,7 +1116,7 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
             items = galleryItems,
             initialIndex = galleryInitialIndex,
             onDismiss = { galleryItems = emptyList() },
-            onSave = viewModel::saveResult,
+            onSave = viewModel::saveResultWithFeedback,
             onShare = viewModel::shareResult,
             onOpen = viewModel::openResult,
             favoriteKeys = state.favoriteResultKeys,
@@ -1235,7 +1259,7 @@ private fun ImageGalleryViewer(
     items: List<ResultMedia>,
     initialIndex: Int,
     onDismiss: () -> Unit,
-    onSave: (ResultMedia) -> Unit,
+    onSave: (ResultMedia, (String) -> Unit) -> Unit,
     onShare: (ResultMedia) -> Unit,
     onOpen: (ResultMedia) -> Unit,
     favoriteKeys: Set<String>,
@@ -1243,12 +1267,22 @@ private fun ImageGalleryViewer(
     onDelete: (ResultMedia) -> Unit,
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(items.indices)) { items.size }
+    val pagerScope = rememberCoroutineScope()
+    val transform = remember { GalleryTransformState() }
     val current = items[pagerState.currentPage.coerceIn(items.indices)]
     var chromeVisible by remember { mutableStateOf(true) }
     var moreExpanded by remember { mutableStateOf(false) }
     var showInfo by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var saveFeedback by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
     val isFavorite = current.stableKey() in favoriteKeys
+    LaunchedEffect(saveFeedback, saving) {
+        if (!saving && saveFeedback != null) {
+            kotlinx.coroutines.delay(2_500)
+            saveFeedback = null
+        }
+    }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
@@ -1259,9 +1293,32 @@ private fun ImageGalleryViewer(
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                     ZoomableGalleryImage(
                         media = items[page],
+                        transform = transform,
                         onTap = { chromeVisible = !chromeVisible },
                         onZoom = { chromeVisible = false },
                     )
+                }
+                if (pagerState.currentPage > 0) {
+                    Surface(
+                        modifier = Modifier.align(Alignment.CenterStart).padding(4.dp),
+                        color = Color.Black.copy(alpha = 0.42f),
+                        shape = CircleShape,
+                    ) {
+                        IconButton(onClick = { pagerScope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) } }) {
+                            Icon(Icons.Default.ChevronLeft, "上一张", tint = Color.White, modifier = Modifier.size(34.dp))
+                        }
+                    }
+                }
+                if (pagerState.currentPage < items.lastIndex) {
+                    Surface(
+                        modifier = Modifier.align(Alignment.CenterEnd).padding(4.dp),
+                        color = Color.Black.copy(alpha = 0.42f),
+                        shape = CircleShape,
+                    ) {
+                        IconButton(onClick = { pagerScope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) } }) {
+                            Icon(Icons.Default.ChevronRight, "下一张", tint = Color.White, modifier = Modifier.size(34.dp))
+                        }
+                    }
                 }
                 if (chromeVisible) {
                     Row(
@@ -1287,7 +1344,8 @@ private fun ImageGalleryViewer(
                     }
                     Row(
                         Modifier.fillMaxWidth().align(Alignment.BottomCenter)
-                            .background(Color.Black.copy(alpha = 0.68f)).padding(horizontal = 4.dp, vertical = 8.dp),
+                            .background(Color.Black.copy(alpha = 0.68f)).navigationBarsPadding()
+                            .padding(horizontal = 4.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         GalleryAction(Icons.Default.Share, "分享") { onShare(current) }
@@ -1298,8 +1356,16 @@ private fun ImageGalleryViewer(
                         ) { onFavorite(current) }
                         GalleryAction(
                             if (current.source == ResultSource.CLOUD) Icons.Default.Download else Icons.Default.Save,
-                            if (current.source == ResultSource.CLOUD) "下载" else "保存",
-                        ) { onSave(current) }
+                            if (saving) "${if (current.source == ResultSource.CLOUD) "下载" else "保存"}中" else if (current.source == ResultSource.CLOUD) "下载" else "保存",
+                            enabled = !saving,
+                        ) {
+                            saving = true
+                            saveFeedback = if (current.source == ResultSource.CLOUD) "正在下载…" else "正在保存…"
+                            onSave(current) { message ->
+                                saving = false
+                                saveFeedback = message
+                            }
+                        }
                         GalleryAction(
                             Icons.Default.Delete,
                             "删除",
@@ -1326,6 +1392,15 @@ private fun ImageGalleryViewer(
                                 )
                             }
                         }
+                    }
+                }
+                saveFeedback?.let { message ->
+                    Surface(
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = if (chromeVisible) 72.dp else 20.dp),
+                        color = Color.Black.copy(alpha = 0.78f),
+                        shape = RoundedCornerShape(18.dp),
+                    ) {
+                        Text(message, color = Color.White, modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp))
                     }
                 }
             }
@@ -1364,13 +1439,19 @@ private fun GallerySystemBars(chromeVisible: Boolean) {
         window?.let {
             WindowCompat.getInsetsController(it, view).apply {
                 systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                if (chromeVisible) show(WindowInsetsCompat.Type.systemBars()) else hide(WindowInsetsCompat.Type.systemBars())
+                hide(WindowInsetsCompat.Type.navigationBars())
+                if (chromeVisible) show(WindowInsetsCompat.Type.statusBars()) else hide(WindowInsetsCompat.Type.statusBars())
             }
         }
     }
     DisposableEffect(window) {
         onDispose { window?.let { WindowCompat.getInsetsController(it, view).show(WindowInsetsCompat.Type.systemBars()) } }
     }
+}
+
+private class GalleryTransformState {
+    var scale by mutableFloatStateOf(1f)
+    var offset by mutableStateOf(Offset.Zero)
 }
 
 @Composable
@@ -1392,9 +1473,12 @@ private fun RowScope.GalleryAction(
 }
 
 @Composable
-private fun ZoomableGalleryImage(media: ResultMedia, onTap: () -> Unit, onZoom: () -> Unit) {
-    var scale by remember(media.localPath, media.url) { mutableFloatStateOf(1f) }
-    var offset by remember(media.localPath, media.url) { mutableStateOf(Offset.Zero) }
+private fun ZoomableGalleryImage(
+    media: ResultMedia,
+    transform: GalleryTransformState,
+    onTap: () -> Unit,
+    onZoom: () -> Unit,
+) {
     var viewport by remember(media.localPath, media.url) { mutableStateOf(IntSize.Zero) }
     var imageSize by remember(media.localPath, media.url) { mutableStateOf(IntSize.Zero) }
     Box(
@@ -1404,15 +1488,15 @@ private fun ZoomableGalleryImage(media: ResultMedia, onTap: () -> Unit, onZoom: 
                     onTap = { onTap() },
                     onDoubleTap = {
                         onZoom()
-                        if (scale > 1.05f) {
-                            scale = 1f
-                            offset = Offset.Zero
+                        if (transform.scale > 1.05f) {
+                            transform.scale = 1f
+                            transform.offset = Offset.Zero
                         } else {
                             val viewportAspect = viewport.width.toFloat() / viewport.height.coerceAtLeast(1)
                             val imageAspect = imageSize.width.toFloat() / imageSize.height.coerceAtLeast(1)
                             val fillWidthScale = if (imageAspect > 0f && imageAspect < viewportAspect) viewportAspect / imageAspect else 1f
-                            scale = (if (fillWidthScale > 1.05f) fillWidthScale else 2f).coerceIn(1f, 5f)
-                            offset = Offset.Zero
+                            transform.scale = (if (fillWidthScale > 1.05f) fillWidthScale else 2f).coerceIn(1f, 5f)
+                            transform.offset = Offset.Zero
                         }
                     },
                 )
@@ -1425,20 +1509,20 @@ private fun ZoomableGalleryImage(media: ResultMedia, onTap: () -> Unit, onZoom: 
                     val pan = event.calculatePan()
                     val isMultiTouch = event.changes.count { it.pressed } > 1
                     val isMoving = pan.getDistance() > 0.5f
-                    if (isMultiTouch || zoom != 1f || (scale > 1f && isMoving)) {
+                    if (isMultiTouch || zoom != 1f || (transform.scale > 1f && isMoving)) {
                         if (isMultiTouch || zoom != 1f) onZoom()
-                        val newScale = (scale * zoom).coerceIn(1f, 5f)
+                        val newScale = (transform.scale * zoom).coerceIn(1f, 5f)
                         if (newScale <= 1f) {
-                            offset = Offset.Zero
+                            transform.offset = Offset.Zero
                         } else {
                             val maxX = viewport.width * (newScale - 1f) / 2f
                             val maxY = viewport.height * (newScale - 1f) / 2f
-                            offset = Offset(
-                                x = (offset.x + pan.x).coerceIn(-maxX, maxX),
-                                y = (offset.y + pan.y).coerceIn(-maxY, maxY),
+                            transform.offset = Offset(
+                                x = (transform.offset.x + pan.x).coerceIn(-maxX, maxX),
+                                y = (transform.offset.y + pan.y).coerceIn(-maxY, maxY),
                             )
                         }
-                        scale = newScale
+                        transform.scale = newScale
                         event.changes.forEach { it.consume() }
                     }
                 } while (event.changes.any { it.pressed })
@@ -1450,10 +1534,10 @@ private fun ZoomableGalleryImage(media: ResultMedia, onTap: () -> Unit, onZoom: 
             model = media.url,
             contentDescription = media.filename,
             modifier = Modifier.fillMaxSize().graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationX = offset.x
-                translationY = offset.y
+                scaleX = transform.scale
+                scaleY = transform.scale
+                translationX = transform.offset.x
+                translationY = transform.offset.y
             },
             contentScale = ContentScale.Fit,
             onSuccess = { state ->

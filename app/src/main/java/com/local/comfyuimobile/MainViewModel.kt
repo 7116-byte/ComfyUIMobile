@@ -647,6 +647,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         saveResults(listOf(media))
     }
 
+    fun saveResultWithFeedback(media: ResultMedia, onComplete: (String) -> Unit) {
+        viewModelScope.launch {
+            val verb = if (media.source == com.local.comfyuimobile.model.ResultSource.CLOUD) "下载" else "保存"
+            runCatching { saveToMediaStore(media) }
+                .onSuccess {
+                    val message = "${verb}完成"
+                    _state.update { it.copy(notice = "$message：${media.filename}") }
+                    onComplete(message)
+                }
+                .onFailure { error ->
+                    val message = "${verb}失败：${error.message ?: error.javaClass.simpleName}"
+                    _state.update { it.copy(error = message) }
+                    onComplete(message)
+                }
+        }
+    }
+
     fun saveResults(media: Collection<ResultMedia>) {
         viewModelScope.launch {
             val items = media.distinctBy(ResultMedia::stableKey)
@@ -741,8 +758,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val info = _state.value.updateInfo ?: return
         viewModelScope.launch {
             runOperation("更新下载失败") {
-                updates.enqueue(info)
-                _state.update { it.copy(notice = "更新已开始下载") }
+                val result = updates.enqueue(info)
+                _state.update { it.copy(notice = "已通过${result.source}开始下载") }
             }
         }
     }

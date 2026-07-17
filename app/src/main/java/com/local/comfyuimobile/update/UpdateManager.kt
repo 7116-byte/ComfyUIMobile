@@ -52,17 +52,22 @@ class UpdateManager(private val context: Context) {
         UpdateInfo(tag, apkUrl, shaUrl, root.optString("html_url"))
     }
 
-    suspend fun enqueue(info: UpdateInfo): Long = withContext(Dispatchers.IO) {
+    suspend fun enqueue(info: UpdateInfo): UpdateEnqueueResult = withContext(Dispatchers.IO) {
         val shaUrl = requireNotNull(info.sha256Url) { "Release 缺少 SHA-256 校验文件" }
-        val expectedSha = downloadText(shaUrl).trim().substringBefore(' ')
-        require(expectedSha.matches(Regex("[0-9a-fA-F]{64}"))) { "SHA-256 校验文件格式无效" }
+        val selected = UpdateMirrors.candidates(info.apkUrl, shaUrl).firstNotNullOfOrNull { candidate ->
+            runCatching {
+                val expectedSha = downloadText(candidate.sha256Url).trim().substringBefore(' ')
+                expectedSha.takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) }?.let { candidate to it }
+            }.getOrNull()
+        } ?: throw IllegalStateException("国内镜像和 GitHub 原地址均无法连接")
+        val (candidate, expectedSha) = selected
         val filename = "ComfyUIMobile-${info.tag}-release.apk"
         val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
             ?: throw IllegalStateException("无法访问应用下载目录")
         val file = File(dir, filename).apply { delete() }
-        val request = DownloadManager.Request(Uri.parse(info.apkUrl))
+        val request = DownloadManager.Request(Uri.parse(candidate.apkUrl))
             .setTitle(filename)
-            .setDescription("ComfyUI Mobile 更新")
+            .setDescription("ComfyUI Mobile 更新 · ${candidate.label}")
             .setMimeType(APK_MIME)
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, filename)
@@ -72,8 +77,9 @@ class UpdateManager(private val context: Context) {
             .putString("file", file.absolutePath)
             .putString("sha", expectedSha)
             .putString("tag", info.tag)
+            .putString("source", candidate.label)
             .apply()
-        id
+        UpdateEnqueueResult(id, candidate.label)
     }
 
     suspend fun verifyAndInstall(downloadId: Long): Result<Unit> = withContext(Dispatchers.IO) {
@@ -152,5 +158,27 @@ class UpdateManager(private val context: Context) {
     companion object {
         const val CHANNEL_ID = "comfy_updates"
         const val APK_MIME = "application/vnd.android.package-archive"
+    }
+}
+
+data class UpdateEnqueueResult(val downloadId: Long, val source: String)
+
+data class UpdateDownloadCandidate(
+    val label: String,
+    val apkUrl: String,
+    val sha256Url: String,
+)
+
+object UpdateMirrors {
+    private val mirrors = listOf(
+        "国内节点 ghfast" to "https://ghfast.top/",
+        "国内节点 ghproxy" to "https://ghproxy.net/",
+    )
+
+    fun candidates(apkUrl: String, sha256Url: String): List<UpdateDownloadCandidate> = buildList {
+        mirrors.forEach { (label, prefix) ->
+            add(UpdateDownloadCandidate(label, prefix + apkUrl, prefix + sha256Url))
+        }
+        add(UpdateDownloadCandidate("GitHub 原地址", apkUrl, sha256Url))
     }
 }
