@@ -164,6 +164,7 @@ data class AppUiState(
     val localResults: List<ResultMedia> = emptyList(),
     val cacheOutputRules: List<CacheOutputRule> = emptyList(),
     val cacheClearedAt: Long = 0L,
+    val favoriteResultKeys: Set<String> = emptySet(),
     val nodeProblems: Map<String, List<String>> = emptyMap(),
     val activeJobId: String? = null,
     val currentExecutingNodeId: String? = null,

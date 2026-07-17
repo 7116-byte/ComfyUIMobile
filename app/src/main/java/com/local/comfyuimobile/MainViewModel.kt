@@ -85,6 +85,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         autoSaveResults = stored.autoSaveResults,
                         cacheOutputRules = stored.cacheOutputRules,
                         cacheClearedAt = stored.cacheClearedAt,
+                        favoriteResultKeys = stored.favoriteResultKeys,
                         serverInput = it.activeServer?.baseUrl
                             ?: stored.activeServerUrl.ifBlank { it.serverInput },
                     )
@@ -643,11 +644,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveResult(media: ResultMedia) {
+        saveResults(listOf(media))
+    }
+
+    fun saveResults(media: Collection<ResultMedia>) {
         viewModelScope.launch {
-            runOperation("保存结果失败") {
-                saveToMediaStore(media)
-                _state.update { it.copy(notice = "已保存 ${media.filename}") }
+            val items = media.distinctBy(ResultMedia::stableKey)
+            val verb = if (items.any { it.source == com.local.comfyuimobile.model.ResultSource.CLOUD }) "下载" else "保存"
+            runOperation("${verb}结果失败") {
+                var succeeded = 0
+                var failed = 0
+                items.forEach { item ->
+                    runCatching { saveToMediaStore(item) }
+                        .onSuccess { succeeded += 1 }
+                        .onFailure { failed += 1 }
+                }
+                _state.update {
+                    it.copy(
+                        notice = if (failed == 0) "已${verb} $succeeded 项" else "已${verb} $succeeded 项，$failed 项失败",
+                    )
+                }
             }
+        }
+    }
+
+    fun deleteLocalResults(media: Collection<ResultMedia>) {
+        viewModelScope.launch {
+            runOperation("删除本地作品失败") {
+                val deleted = localResultCache.remove(media.filter { it.source == com.local.comfyuimobile.model.ResultSource.LOCAL })
+                val remaining = localResultCache.load()
+                _state.update { it.copy(localResults = remaining, notice = "已删除 $deleted 项本地作品") }
+            }
+        }
+    }
+
+    fun toggleResultFavorite(media: ResultMedia) {
+        viewModelScope.launch {
+            val key = media.stableKey()
+            val updated = _state.value.favoriteResultKeys.toMutableSet().apply {
+                if (!add(key)) remove(key)
+            }.toSet()
+            preferences.saveFavoriteResultKeys(updated)
+            _state.update { it.copy(favoriteResultKeys = updated) }
         }
     }
 

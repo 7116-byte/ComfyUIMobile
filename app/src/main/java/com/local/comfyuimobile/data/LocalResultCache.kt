@@ -54,6 +54,18 @@ class LocalResultCache(context: Context) {
         }
     }
 
+    suspend fun remove(media: Collection<ResultMedia>): Int = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val keys = media.map(::key).toSet()
+            if (keys.isEmpty()) return@withLock 0
+            val records = readIndex()
+            val removed = records.filter { it.optString("key") in keys }
+            removed.forEach { File(it.optString("localPath")).delete() }
+            writeIndex(records.filterNot { it.optString("key") in keys })
+            removed.size
+        }
+    }
+
     suspend fun sizeBytes(): Long = withContext(Dispatchers.IO) {
         if (!root.exists()) 0L else root.walkTopDown().filter { it.isFile }.sumOf { it.length() }
     }

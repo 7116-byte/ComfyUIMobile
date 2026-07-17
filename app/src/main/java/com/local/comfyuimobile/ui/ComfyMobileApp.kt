@@ -1,6 +1,8 @@
 package com.local.comfyuimobile.ui
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.BackHandler
@@ -15,10 +17,12 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -55,14 +59,18 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
@@ -120,12 +128,17 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -931,6 +944,8 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
     var layout by remember { mutableStateOf(ResultLayout.ALBUMS) }
     var selectedAlbumId by remember { mutableStateOf<String?>(null) }
     var selectedMedia by remember { mutableStateOf<ResultMedia?>(null) }
+    var selectedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var confirmDeleteSelection by remember { mutableStateOf(false) }
     var galleryItems by remember { mutableStateOf<List<ResultMedia>>(emptyList()) }
     var galleryInitialIndex by remember { mutableIntStateOf(0) }
     val media = (if (source == ResultSource.LOCAL) state.localResults else state.results)
@@ -940,6 +955,12 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
         .sortedWith(compareByDescending<ResultAlbum> { it.media.maxOfOrNull(ResultMedia::createdAt) ?: 0L }
             .thenByDescending { it.media.maxOfOrNull(ResultMedia::taskNumber) ?: 0L })
     val selectedAlbum = albums.firstOrNull { it.jobId == selectedAlbumId }
+    val selectedItems = media.filter { it.stableKey() in selectedKeys }
+    val selectionMode = selectedKeys.isNotEmpty()
+    fun toggleSelection(items: Collection<ResultMedia>) {
+        val keys = items.map(ResultMedia::stableKey).toSet()
+        selectedKeys = if (keys.all { it in selectedKeys }) selectedKeys - keys else selectedKeys + keys
+    }
     fun openMedia(item: ResultMedia, context: List<ResultMedia>) {
         if (item.kind == MediaKind.IMAGE) {
             val images = context.filter { it.kind == MediaKind.IMAGE }
@@ -949,7 +970,13 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
             selectedMedia = item
         }
     }
-    LaunchedEffect(source) { selectedAlbumId = null }
+    LaunchedEffect(source) {
+        selectedAlbumId = null
+        selectedKeys = emptySet()
+    }
+    LaunchedEffect(media.map(ResultMedia::stableKey)) {
+        selectedKeys = selectedKeys.intersect(media.map(ResultMedia::stableKey).toSet())
+    }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (source == ResultSource.LOCAL) FilledTonalButton({ source = ResultSource.LOCAL }, Modifier.weight(1f)) { Text("本地") }
@@ -957,31 +984,67 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
             if (source == ResultSource.CLOUD) FilledTonalButton({ source = ResultSource.CLOUD }, Modifier.weight(1f)) { Text("云端") }
             else OutlinedButton({ source = ResultSource.CLOUD }, Modifier.weight(1f)) { Text("云端") }
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (selectedAlbum != null) {
-                TextButton(onClick = { selectedAlbumId = null }) { Text("‹ 返回相册") }
-            } else {
-                Text(
-                    if (source == ResultSource.LOCAL) "手机独立保存的白名单作品" else "ComfyUI 服务器媒体资产",
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = { layout = if (layout == ResultLayout.ALL) ResultLayout.ALBUMS else ResultLayout.ALL }) {
-                    Text(if (layout == ResultLayout.ALL) "任务相册" else "全部平铺")
+        if (selectionMode) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = { selectedKeys = emptySet() }) { Icon(Icons.Default.Close, "退出多选") }
+                Text("已选 ${selectedItems.size} 项", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                IconButton(onClick = { selectedKeys = media.map(ResultMedia::stableKey).toSet() }) {
+                    Icon(Icons.Default.SelectAll, "全选")
+                }
+                IconButton(onClick = {
+                    viewModel.saveResults(selectedItems)
+                    selectedKeys = emptySet()
+                }) {
+                    Icon(if (source == ResultSource.CLOUD) Icons.Default.Download else Icons.Default.Save, if (source == ResultSource.CLOUD) "一键下载" else "一键保存")
+                }
+                if (source == ResultSource.LOCAL) {
+                    IconButton(onClick = { confirmDeleteSelection = true }) { Icon(Icons.Default.Delete, "删除所选") }
                 }
             }
-            IconButton(onClick = viewModel::refreshResults) { Icon(Icons.Default.Refresh, "刷新") }
+        } else {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (selectedAlbum != null) {
+                    TextButton(onClick = { selectedAlbumId = null }) { Text("‹ 返回相册") }
+                } else {
+                    Text(
+                        if (source == ResultSource.LOCAL) "手机独立保存的白名单作品" else "ComfyUI 服务器媒体资产",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { layout = if (layout == ResultLayout.ALL) ResultLayout.ALBUMS else ResultLayout.ALL }) {
+                        Text(if (layout == ResultLayout.ALL) "任务相册" else "全部平铺")
+                    }
+                }
+                IconButton(onClick = { if (source == ResultSource.LOCAL) viewModel.refreshLocalResults() else viewModel.refreshResults() }) {
+                    Icon(Icons.Default.Refresh, "刷新")
+                }
+            }
         }
         when {
             selectedAlbum != null -> {
                 Text(albumTitle(selectedAlbum), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
-                ResultMediaGrid(selectedAlbum.media) { openMedia(it, selectedAlbum.media) }
+                ResultMediaGrid(
+                    media = selectedAlbum.media,
+                    selectedKeys = selectedKeys,
+                    selectionMode = selectionMode,
+                    onOpen = { openMedia(it, selectedAlbum.media) },
+                    onToggleSelection = { toggleSelection(listOf(it)) },
+                )
             }
             media.isEmpty() -> EmptyState(
                 Icons.Default.Image,
                 if (source == ResultSource.LOCAL) "暂无本地作品\n请在参数页长按输出部件加入本地保存白名单" else "云端暂无图片或视频",
             )
-            layout == ResultLayout.ALL -> ResultMediaGrid(media) { openMedia(it, media) }
+            layout == ResultLayout.ALL -> ResultMediaGrid(
+                media = media,
+                selectedKeys = selectedKeys,
+                selectionMode = selectionMode,
+                onOpen = { openMedia(it, media) },
+                onToggleSelection = { toggleSelection(listOf(it)) },
+            )
             else -> LazyVerticalGrid(
                 columns = GridCells.Adaptive(150.dp),
                 modifier = Modifier.fillMaxSize(),
@@ -990,7 +1053,15 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 gridItems(albums, key = { it.jobId }) { album ->
-                    AlbumTile(album) { selectedAlbumId = album.jobId }
+                    val albumKeys = album.media.map(ResultMedia::stableKey).toSet()
+                    AlbumTile(
+                        album = album,
+                        selected = albumKeys.isNotEmpty() && albumKeys.all { it in selectedKeys },
+                        partiallySelected = albumKeys.any { it in selectedKeys },
+                        selectionMode = selectionMode,
+                        onClick = { selectedAlbumId = album.jobId },
+                        onToggleSelection = { toggleSelection(album.media) },
+                    )
                 }
             }
         }
@@ -1024,12 +1095,36 @@ private fun ResultScreen(state: AppUiState, viewModel: MainViewModel) {
             onSave = viewModel::saveResult,
             onShare = viewModel::shareResult,
             onOpen = viewModel::openResult,
+            favoriteKeys = state.favoriteResultKeys,
+            onFavorite = viewModel::toggleResultFavorite,
+            onDelete = { item ->
+                galleryItems = galleryItems.filterNot { it.stableKey() == item.stableKey() }
+                viewModel.deleteLocalResults(listOf(item))
+            },
         )
+    }
+    if (confirmDeleteSelection) {
+        ConfirmDialog(
+            title = "删除所选作品",
+            message = "将删除手机本地缓存中的 ${selectedItems.size} 项作品，不会删除电脑上的文件。",
+            onDismiss = { confirmDeleteSelection = false },
+        ) {
+            viewModel.deleteLocalResults(selectedItems)
+            selectedKeys = emptySet()
+            confirmDeleteSelection = false
+        }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ResultMediaGrid(media: List<ResultMedia>, onOpen: (ResultMedia) -> Unit) {
+private fun ResultMediaGrid(
+    media: List<ResultMedia>,
+    selectedKeys: Set<String>,
+    selectionMode: Boolean,
+    onOpen: (ResultMedia) -> Unit,
+    onToggleSelection: (ResultMedia) -> Unit,
+) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(105.dp),
         modifier = Modifier.fillMaxSize(),
@@ -1038,33 +1133,74 @@ private fun ResultMediaGrid(media: List<ResultMedia>, onOpen: (ResultMedia) -> U
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         gridItems(media, key = { it.stableKey() }) { item ->
-            Card(Modifier.fillMaxWidth().clickable { onOpen(item) }) {
-                MediaCover(item, Modifier.fillMaxWidth().aspectRatio(1f))
+            val selected = item.stableKey() in selectedKeys
+            Card(
+                Modifier.fillMaxWidth().combinedClickable(
+                    onClick = { if (selectionMode) onToggleSelection(item) else onOpen(item) },
+                    onLongClick = { onToggleSelection(item) },
+                ),
+            ) {
+                Box {
+                    MediaCover(item, Modifier.fillMaxWidth().aspectRatio(1f))
+                    if (selected) {
+                        Box(
+                            Modifier.matchParentSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)),
+                        )
+                        Icon(
+                            Icons.Default.CheckCircle,
+                            "已选择",
+                            Modifier.align(Alignment.TopEnd).padding(6.dp).size(26.dp),
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
                 Text(item.filename, Modifier.padding(6.dp), maxLines = 1, style = MaterialTheme.typography.labelSmall)
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun AlbumTile(album: ResultAlbum, onClick: () -> Unit) {
+private fun AlbumTile(
+    album: ResultAlbum,
+    selected: Boolean,
+    partiallySelected: Boolean,
+    selectionMode: Boolean,
+    onClick: () -> Unit,
+    onToggleSelection: () -> Unit,
+) {
     val cover = album.media.firstOrNull { it.kind == MediaKind.IMAGE } ?: album.media.first()
-    Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+    Card(
+        Modifier.fillMaxWidth().combinedClickable(
+            onClick = { if (selectionMode) onToggleSelection() else onClick() },
+            onLongClick = onToggleSelection,
+        ),
+    ) {
         Box {
             MediaCover(cover, Modifier.fillMaxWidth().aspectRatio(1.15f))
-            Text(
-                "${album.media.size}",
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).background(
-                    MaterialTheme.colorScheme.scrim.copy(alpha = 0.72f), RoundedCornerShape(12.dp),
-                ).padding(horizontal = 7.dp, vertical = 2.dp),
-                color = MaterialTheme.colorScheme.inverseOnSurface,
-                style = MaterialTheme.typography.labelMedium,
-            )
+            if (selected || partiallySelected) {
+                Box(
+                    Modifier.matchParentSize().background(MaterialTheme.colorScheme.primary.copy(alpha = if (selected) 0.24f else 0.12f)),
+                )
+                Icon(
+                    Icons.Default.CheckCircle,
+                    if (selected) "已选择整个相册" else "已选择部分作品",
+                    Modifier.align(Alignment.TopEnd).padding(7.dp).size(28.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
         Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(albumTitle(album), maxLines = 1, style = MaterialTheme.typography.titleSmall)
-            album.media.maxOfOrNull(ResultMedia::createdAt)?.takeIf { it > 0L }?.let {
-                Text(formatTime(it), maxLines = 1, style = MaterialTheme.typography.labelSmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    album.media.maxOfOrNull(ResultMedia::createdAt)?.takeIf { it > 0L }?.let(::formatTime).orEmpty(),
+                    maxLines = 1,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                Text("${album.media.size} 项", maxLines = 1, style = MaterialTheme.typography.labelSmall)
             }
         }
     }
@@ -1102,52 +1238,185 @@ private fun ImageGalleryViewer(
     onSave: (ResultMedia) -> Unit,
     onShare: (ResultMedia) -> Unit,
     onOpen: (ResultMedia) -> Unit,
+    favoriteKeys: Set<String>,
+    onFavorite: (ResultMedia) -> Unit,
+    onDelete: (ResultMedia) -> Unit,
 ) {
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(items.indices)) { items.size }
     val current = items[pagerState.currentPage.coerceIn(items.indices)]
+    var chromeVisible by remember { mutableStateOf(true) }
+    var moreExpanded by remember { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    val isFavorite = current.stableKey() in favoriteKeys
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
+            GallerySystemBars(chromeVisible)
             Box(Modifier.fillMaxSize()) {
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
-                    ZoomableGalleryImage(items[page])
+                    ZoomableGalleryImage(
+                        media = items[page],
+                        onTap = { chromeVisible = !chromeVisible },
+                        onZoom = { chromeVisible = false },
+                    )
                 }
-                Row(
-                    Modifier.fillMaxWidth().align(Alignment.TopCenter)
-                        .background(Color.Black.copy(alpha = 0.62f)).padding(horizontal = 8.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
-                    Column(Modifier.weight(1f)) {
-                        Text(current.filename, color = Color.White, maxLines = 1, style = MaterialTheme.typography.bodyMedium)
-                        Text("双指缩放 · 放大后拖动 · 左右滑动换图", color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.labelSmall)
+                if (chromeVisible) {
+                    Row(
+                        Modifier.fillMaxWidth().align(Alignment.TopCenter)
+                            .background(Color.Black.copy(alpha = 0.62f)).padding(horizontal = 8.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                current.createdAt.takeIf { it > 0L }?.let(::formatTime) ?: current.filename,
+                                color = Color.White,
+                                maxLines = 1,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(
+                                "单击沉浸 · 双击缩放 · 左右换图",
+                                color = Color.White.copy(alpha = 0.72f),
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                        Text("${pagerState.currentPage + 1}/${items.size}", color = Color.White)
                     }
-                    Text("${pagerState.currentPage + 1}/${items.size}", color = Color.White)
-                }
-                Row(
-                    Modifier.align(Alignment.BottomCenter).background(Color.Black.copy(alpha = 0.62f))
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = { onSave(current) }) { Icon(Icons.Default.Download, "保存到系统相册", tint = Color.White) }
-                    IconButton(onClick = { onShare(current) }) { Icon(Icons.Default.Share, "分享", tint = Color.White) }
-                    IconButton(onClick = { onOpen(current) }) { Icon(Icons.Default.FileOpen, "打开原文件", tint = Color.White) }
+                    Row(
+                        Modifier.fillMaxWidth().align(Alignment.BottomCenter)
+                            .background(Color.Black.copy(alpha = 0.68f)).padding(horizontal = 4.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        GalleryAction(Icons.Default.Share, "分享") { onShare(current) }
+                        GalleryAction(
+                            if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            if (isFavorite) "已收藏" else "收藏",
+                            tint = if (isFavorite) Color(0xFFFF5A6F) else Color.White,
+                        ) { onFavorite(current) }
+                        GalleryAction(
+                            if (current.source == ResultSource.CLOUD) Icons.Default.Download else Icons.Default.Save,
+                            if (current.source == ResultSource.CLOUD) "下载" else "保存",
+                        ) { onSave(current) }
+                        GalleryAction(
+                            Icons.Default.Delete,
+                            "删除",
+                            enabled = current.source == ResultSource.LOCAL,
+                        ) { confirmDelete = true }
+                        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                            Column(
+                                Modifier.fillMaxWidth().clickable { moreExpanded = true }.padding(vertical = 4.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Icon(Icons.Default.MoreHoriz, "更多", tint = Color.White)
+                                Text("更多", color = Color.White, style = MaterialTheme.typography.labelSmall)
+                            }
+                            DropdownMenu(expanded = moreExpanded, onDismissRequest = { moreExpanded = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("打开原文件") },
+                                    leadingIcon = { Icon(Icons.Default.FileOpen, null) },
+                                    onClick = { moreExpanded = false; onOpen(current) },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("文件信息") },
+                                    leadingIcon = { Icon(Icons.Default.Image, null) },
+                                    onClick = { moreExpanded = false; showInfo = true },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
     }
+    if (confirmDelete) {
+        ConfirmDialog("删除本地作品", "将从 App 本地缓存中删除 ${current.filename}，不会删除电脑上的原文件。", { confirmDelete = false }) {
+            confirmDelete = false
+            onDelete(current)
+        }
+    }
+    if (showInfo) {
+        AlertDialog(
+            onDismissRequest = { showInfo = false },
+            title = { Text("文件信息") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(current.filename)
+                    Text("任务：${current.jobId}", style = MaterialTheme.typography.bodySmall)
+                    Text("输出部件：${current.nodeId}", style = MaterialTheme.typography.bodySmall)
+                    Text("来源：${if (current.source == ResultSource.LOCAL) "本地缓存" else "ComfyUI 服务器"}", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = { showInfo = false }) { Text("关闭") } },
+        )
+    }
 }
 
 @Composable
-private fun ZoomableGalleryImage(media: ResultMedia) {
+private fun GallerySystemBars(chromeVisible: Boolean) {
+    val view = LocalView.current
+    val window = remember(view) {
+        (view.parent as? DialogWindowProvider)?.window ?: view.context.findActivity()?.window
+    }
+    LaunchedEffect(chromeVisible, window) {
+        window?.let {
+            WindowCompat.getInsetsController(it, view).apply {
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                if (chromeVisible) show(WindowInsetsCompat.Type.systemBars()) else hide(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+    DisposableEffect(window) {
+        onDispose { window?.let { WindowCompat.getInsetsController(it, view).show(WindowInsetsCompat.Type.systemBars()) } }
+    }
+}
+
+@Composable
+private fun RowScope.GalleryAction(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean = true,
+    tint: Color = Color.White,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier.weight(1f).alpha(if (enabled) 1f else 0.34f)
+            .clickable(enabled = enabled, onClick = onClick).padding(vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(icon, label, tint = tint)
+        Text(label, color = tint, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+private fun ZoomableGalleryImage(media: ResultMedia, onTap: () -> Unit, onZoom: () -> Unit) {
     var scale by remember(media.localPath, media.url) { mutableFloatStateOf(1f) }
     var offset by remember(media.localPath, media.url) { mutableStateOf(Offset.Zero) }
     var viewport by remember(media.localPath, media.url) { mutableStateOf(IntSize.Zero) }
+    var imageSize by remember(media.localPath, media.url) { mutableStateOf(IntSize.Zero) }
     Box(
-        Modifier.fillMaxSize().onSizeChanged { viewport = it }.pointerInput(media.localPath, media.url) {
+        Modifier.fillMaxSize().onSizeChanged { viewport = it }
+            .pointerInput(media.localPath, media.url, viewport, imageSize) {
+                detectTapGestures(
+                    onTap = { onTap() },
+                    onDoubleTap = {
+                        onZoom()
+                        if (scale > 1.05f) {
+                            scale = 1f
+                            offset = Offset.Zero
+                        } else {
+                            val viewportAspect = viewport.width.toFloat() / viewport.height.coerceAtLeast(1)
+                            val imageAspect = imageSize.width.toFloat() / imageSize.height.coerceAtLeast(1)
+                            val fillWidthScale = if (imageAspect > 0f && imageAspect < viewportAspect) viewportAspect / imageAspect else 1f
+                            scale = (if (fillWidthScale > 1.05f) fillWidthScale else 2f).coerceIn(1f, 5f)
+                            offset = Offset.Zero
+                        }
+                    },
+                )
+            }.pointerInput(media.localPath, media.url) {
             awaitEachGesture {
                 awaitFirstDown(requireUnconsumed = false)
                 do {
@@ -1155,7 +1424,9 @@ private fun ZoomableGalleryImage(media: ResultMedia) {
                     val zoom = event.calculateZoom()
                     val pan = event.calculatePan()
                     val isMultiTouch = event.changes.count { it.pressed } > 1
-                    if (isMultiTouch || scale > 1f || zoom != 1f) {
+                    val isMoving = pan.getDistance() > 0.5f
+                    if (isMultiTouch || zoom != 1f || (scale > 1f && isMoving)) {
+                        if (isMultiTouch || zoom != 1f) onZoom()
                         val newScale = (scale * zoom).coerceIn(1f, 5f)
                         if (newScale <= 1f) {
                             offset = Offset.Zero
@@ -1185,6 +1456,12 @@ private fun ZoomableGalleryImage(media: ResultMedia) {
                 translationY = offset.y
             },
             contentScale = ContentScale.Fit,
+            onSuccess = { state ->
+                imageSize = IntSize(
+                    state.result.drawable.intrinsicWidth.coerceAtLeast(1),
+                    state.result.drawable.intrinsicHeight.coerceAtLeast(1),
+                )
+            },
         )
     }
 }
@@ -1364,6 +1641,12 @@ private fun formatSize(value: Long): String = when {
 
 private fun formatTime(value: Long): String =
     SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(value))
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 private fun previewUrl(media: ResultMedia): String =
     if (media.kind == MediaKind.IMAGE && media.source == ResultSource.CLOUD) "${media.url}&preview=webp;90" else media.url
