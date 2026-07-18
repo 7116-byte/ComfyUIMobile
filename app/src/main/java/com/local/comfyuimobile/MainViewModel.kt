@@ -107,6 +107,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearMessage() = _state.update { it.copy(error = null, notice = null) }
 
     fun connect(address: String = state.value.serverInput) {
+        reconnectJob?.cancel()
+        client.closeWebSocket()
         viewModelScope.launch {
             runOperation("连接失败") {
                 val activeBridge = bridge ?: error("前端桥接尚未初始化")
@@ -204,6 +206,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     async { refreshResultsInternal() },
                 ).awaitAll()
             }
+        }
+    }
+
+    fun refreshOrReconnect() {
+        val current = _state.value
+        if (current.loading || current.status == ConnectionStatus.CONNECTING) return
+        val address = current.activeServer?.baseUrl ?: current.serverInput
+        if (current.status != ConnectionStatus.CONNECTED) {
+            connect(address)
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(connectionMessage = "正在检查服务器连接", error = null) }
+            val stats = runCatching { client.systemStats() }.getOrElse {
+                _state.update {
+                    it.copy(
+                        status = ConnectionStatus.RECONNECTING,
+                        connectionMessage = "刷新失败，正在重新连接",
+                    )
+                }
+                connect(address)
+                return@launch
+            }
+            _state.update {
+                it.copy(
+                    status = ConnectionStatus.CONNECTED,
+                    connectionMessage = "已连接 ${it.activeServer?.name.orEmpty()}",
+                    systemStats = stats,
+                )
+            }
+            refreshAll()
         }
     }
 
@@ -389,18 +422,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val document = _state.value.selectedWorkflow ?: return
         viewModelScope.launch {
             runOperation("工作流保存失败") {
-                _state.update { it.copy(loading = true) }
+                _state.update {
+                    it.copy(
+                        loading = true,
+                        workflowOverwriteRequired = false,
+                        workflowOverwriteReason = "",
+                    )
+                }
                 val current = client.listWorkflows().firstOrNull { it.path == document.entry.path }
-                if (!force && WorkflowPolicy.hasModifiedConflict(document.entry.modified, current?.modified)) {
-                    error("桌面端已修改此工作流。请重新加载、复制为新工作流，或选择强制覆盖。")
+                if (!force && current != null) {
+                    val changed = WorkflowPolicy.hasModifiedConflict(document.entry.modified, current.modified)
+                    _state.update {
+                        it.copy(
+                            loading = false,
+                            workflowOverwriteRequired = true,
+                            workflowOverwriteReason = if (changed) {
+                                "服务器上的同名工作流已被其他设备修改。强制覆盖会丢失服务器上的改动，是否继续？"
+                            } else {
+                                "服务器已有同名工作流。是否用当前参数和工作流强制覆盖服务器文件？"
+                            },
+                        )
+                    }
+                    return@runOperation
                 }
                 val generated = (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
-                val saved = client.writeWorkflow(document.entry.path, generated.workflowJson, overwrite = true)
+                val saved = client.writeWorkflow(document.entry.path, generated.workflowJson, overwrite = current != null)
                 val updated = document.copy(entry = saved, rawJson = generated.workflowJson, fields = _state.value.fields)
-                _state.update { it.copy(selectedWorkflow = updated, loading = false, notice = "工作流已保存") }
+                _state.update {
+                    it.copy(
+                        selectedWorkflow = updated,
+                        loading = false,
+                        workflowOverwriteRequired = false,
+                        workflowOverwriteReason = "",
+                        notice = "工作流已保存到服务器",
+                    )
+                }
                 refreshWorkflowsInternal()
             }
         }
+    }
+
+    fun dismissWorkflowOverwrite() {
+        _state.update { it.copy(workflowOverwriteRequired = false, workflowOverwriteReason = "") }
     }
 
     fun duplicateWorkflow(name: String) {
@@ -1026,7 +1089,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .putExtra(JobMonitorService.EXTRA_BASE_URL, client.serverUrl())
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
             .putExtra(JobMonitorService.EXTRA_WORKFLOW_NAME, workflowName)
-        ContextCompat.startForegroundService(app, intent)
+        runCatching { ContextCompat.startForegroundService(app, intent) }
+            .onFailure { error ->
+                _state.update {
+                    it.copy(notice = "任务已提交，但后台监控启动失败：${error.message.orEmpty()}")
+                }
+            }
     }
 
     private fun updateMonitor(promptId: String, progress: Int, node: String?) {
@@ -1036,14 +1104,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
             .putExtra(JobMonitorService.EXTRA_PROGRESS, progress)
             .putExtra(JobMonitorService.EXTRA_NODE, node)
-        app.startService(intent)
+        runCatching { app.startService(intent) }
     }
 
     private fun stopMonitor(promptId: String) {
         val intent = Intent(app, JobMonitorService::class.java)
             .setAction(JobMonitorService.ACTION_STOP)
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
-        app.startService(intent)
+        runCatching { app.startService(intent) }
     }
 
     private fun updateFieldLayout(key: String, transform: (ParameterField) -> ParameterField) {

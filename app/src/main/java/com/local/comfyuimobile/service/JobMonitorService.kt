@@ -52,7 +52,19 @@ class JobMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = try {
+        handleStartCommand(intent, startId)
+    } catch (_: Throwable) {
+        val promptId = intent?.getStringExtra(EXTRA_PROMPT_ID).orEmpty()
+        monitors.remove(promptId)?.cancel()
+        workflowNames.remove(promptId)
+        runCatching { releaseBackgroundLocks() }
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        stopSelf(startId)
+        START_NOT_STICKY
+    }
+
+    private fun handleStartCommand(intent: Intent?, startId: Int): Int {
         val promptId = intent?.getStringExtra(EXTRA_PROMPT_ID).orEmpty()
         if (intent?.action == ACTION_STOP) {
             monitors.remove(promptId)?.cancel()

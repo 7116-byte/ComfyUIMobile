@@ -18,6 +18,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -392,7 +393,12 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
                 },
                 navigationIcon = { Icon(Icons.Default.Wifi, null, Modifier.padding(start = 12.dp), tint = MaterialTheme.colorScheme.secondary) },
                 actions = {
-                    IconButton(onClick = viewModel::refreshAll) { Icon(Icons.Default.Refresh, "刷新") }
+                    IconButton(onClick = viewModel::refreshOrReconnect) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            if (state.status == ConnectionStatus.CONNECTED) "刷新" else "重新连接",
+                        )
+                    }
                     IconButton(onClick = { settings = true }) { Icon(Icons.Default.Settings, "设置") }
                 },
             )
@@ -448,23 +454,8 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
     var renameDialog by remember { mutableStateOf(false) }
     var moveDialog by remember { mutableStateOf(false) }
     var deleteDialog by remember { mutableStateOf(false) }
-    var forceDialog by remember { mutableStateOf(false) }
     var dialogText by remember { mutableStateOf("") }
     var exportRaw by remember { mutableStateOf<String?>(null) }
-    var openAfterLoadPath by remember { mutableStateOf<String?>(null) }
-    var saveAfterLoadPath by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(state.selectedWorkflow?.entry?.path, openAfterLoadPath) {
-        if (openAfterLoadPath != null && state.selectedWorkflow?.entry?.path == openAfterLoadPath) {
-            openAfterLoadPath = null
-            onOpenParameters()
-        }
-    }
-    LaunchedEffect(state.selectedWorkflow?.entry?.path, saveAfterLoadPath) {
-        if (saveAfterLoadPath != null && state.selectedWorkflow?.entry?.path == saveAfterLoadPath) {
-            saveAfterLoadPath = null
-            viewModel.saveWorkflow()
-        }
-    }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val name = displayName(context, uri) ?: "imported.json"
@@ -491,29 +482,35 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
             }) {
                 Icon(Icons.Default.UploadFile, null); Spacer(Modifier.width(4.dp)); Text("打开工作流文件")
             }
-            state.selectedWorkflow?.let {
-                FilledTonalButton(onClick = { dialogText = it.entry.name.substringBeforeLast('.'); duplicateDialog = true }) {
-                    Icon(Icons.Default.Add, null); Spacer(Modifier.width(4.dp)); Text("新建副本")
-                }
-                OutlinedButton(onClick = onOpenParameters) { Icon(Icons.Default.Tune, null); Spacer(Modifier.width(4.dp)); Text("参数") }
-            }
         }
         Text(
-            "单击选择 · 双击进入参数 · 长按保存工作流",
+            "单击选择工作流，选择后点击“打开参数”",
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (state.selectedWorkflow != null) {
-            Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                IconButton(onClick = { viewModel.saveWorkflow() }) { Icon(Icons.Default.Save, "保存") }
-                IconButton(onClick = { dialogText = state.selectedWorkflow.entry.name.substringBeforeLast('.'); renameDialog = true }) { Icon(Icons.Default.Edit, "改名") }
-                IconButton(onClick = { dialogText = state.selectedWorkflow.entry.path.substringBeforeLast('/', "workflows"); moveDialog = true }) { Icon(Icons.Default.Folder, "移动") }
-                IconButton(onClick = {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(onClick = onOpenParameters) { Text("打开参数") }
+                OutlinedButton(onClick = {
+                    dialogText = state.selectedWorkflow.entry.name.substringBeforeLast('.')
+                    duplicateDialog = true
+                }) { Text("新建副本") }
+                OutlinedButton(onClick = {
+                    dialogText = state.selectedWorkflow.entry.name.substringBeforeLast('.')
+                    renameDialog = true
+                }) { Text("改名") }
+                OutlinedButton(onClick = {
+                    dialogText = state.selectedWorkflow.entry.path.substringBeforeLast('/', "workflows")
+                    moveDialog = true
+                }) { Text("移动") }
+                OutlinedButton(onClick = {
                     state.selectedWorkflow.let { export -> exportRaw = export.rawJson; exportLauncher.launch(export.entry.name) }
-                }) { Icon(Icons.Default.Download, "导出") }
-                IconButton(onClick = { forceDialog = true }) { Icon(Icons.Default.MoreVert, "强制覆盖") }
-                IconButton(onClick = { deleteDialog = true }) { Icon(Icons.Default.Delete, "删除") }
+                }) { Text("导出") }
+                OutlinedButton(onClick = { deleteDialog = true }) { Text("删除") }
             }
         }
         val filtered = state.workflows.filter {
@@ -524,31 +521,7 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
                 WorkflowRow(
                     entry = entry,
                     selected = state.selectedWorkflow?.entry?.path == entry.path,
-                    onClick = {
-                        openAfterLoadPath = null
-                        saveAfterLoadPath = null
-                        if (!entry.isDirectory) viewModel.selectWorkflow(entry)
-                    },
-                    onDoubleClick = {
-                        saveAfterLoadPath = null
-                        if (!entry.isDirectory) {
-                            if (state.selectedWorkflow?.entry?.path == entry.path) onOpenParameters()
-                            else {
-                                openAfterLoadPath = entry.path
-                                viewModel.selectWorkflow(entry)
-                            }
-                        }
-                    },
-                    onLongClick = {
-                        openAfterLoadPath = null
-                        if (!entry.isDirectory) {
-                            if (state.selectedWorkflow?.entry?.path == entry.path) viewModel.saveWorkflow()
-                            else {
-                                saveAfterLoadPath = entry.path
-                                viewModel.selectWorkflow(entry)
-                            }
-                        }
-                    },
+                    onClick = { if (!entry.isDirectory) viewModel.selectWorkflow(entry) },
                 )
             }
         }
@@ -557,24 +530,16 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
     if (renameDialog) NameDialog("工作流改名", dialogText, { renameDialog = false }) { viewModel.renameWorkflow(it); renameDialog = false }
     if (moveDialog) NameDialog("移动到文件夹", dialogText, { moveDialog = false }) { viewModel.moveWorkflow(it); moveDialog = false }
     if (deleteDialog) ConfirmDialog("删除工作流", "将从 ComfyUI 服务器永久删除 ${state.selectedWorkflow?.entry?.name}。", { deleteDialog = false }) { viewModel.deleteWorkflow(); deleteDialog = false }
-    if (forceDialog) ConfirmDialog("强制覆盖", "忽略服务器修改时间并覆盖当前工作流，仅在确认桌面端改动可以丢弃时使用。", { forceDialog = false }) { viewModel.saveWorkflow(force = true); forceDialog = false }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WorkflowRow(
     entry: WorkflowEntry,
     selected: Boolean,
     onClick: () -> Unit,
-    onDoubleClick: () -> Unit,
-    onLongClick: () -> Unit,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth().combinedClickable(
-            onClick = onClick,
-            onDoubleClick = onDoubleClick,
-            onLongClick = onLongClick,
-        ),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
         colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -629,8 +594,8 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                 Text(workflow.entry.name, style = MaterialTheme.typography.titleMedium)
                 Text("${nodes.size} 个流程部件 · ${state.fields.count { it.visible }} 个参数", style = MaterialTheme.typography.bodySmall)
             }
-            IconButton(onClick = { layoutDialog = true }) { Icon(Icons.Default.Tune, "表单布局") }
-            IconButton(onClick = { viewModel.saveWorkflow() }) { Icon(Icons.Default.Save, "保存默认值") }
+            TextButton(onClick = { layoutDialog = true }) { Text("表单布局") }
+            FilledTonalButton(onClick = { viewModel.saveWorkflow() }) { Text("保存工作流") }
         }
         if (state.generationMessage.isNotBlank()) {
             OutlinedCard(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
@@ -692,6 +657,13 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         if (firstProblem != null) {
             Text(firstProblem, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         }
+    }
+    if (state.workflowOverwriteRequired) {
+        ConfirmDialog(
+            "覆盖服务器工作流",
+            state.workflowOverwriteReason,
+            viewModel::dismissWorkflowOverwrite,
+        ) { viewModel.saveWorkflow(force = true) }
     }
     if (historyField != null) PromptHistoryDialog(historyField!!, state, viewModel) { historyField = null }
     if (layoutDialog) LayoutDialog(state.fields, viewModel) { layoutDialog = false }

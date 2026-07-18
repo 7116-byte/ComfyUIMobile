@@ -178,6 +178,8 @@ data class AppUiState(
     val generating: Boolean = false,
     val bridgeReady: Boolean = false,
     val advancedEditor: Boolean = false,
+    val workflowOverwriteRequired: Boolean = false,
+    val workflowOverwriteReason: String = "",
     val error: String? = null,
     val notice: String? = null,
     val updateInfo: UpdateInfo? = null,
