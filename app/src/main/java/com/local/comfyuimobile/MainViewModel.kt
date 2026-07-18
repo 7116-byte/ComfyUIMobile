@@ -72,6 +72,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var bridge: ComfyBridge? = null
     private var reconnectJob: Job? = null
     private var parameterRefreshJob: Job? = null
+    private var generationJob: Job? = null
     @Volatile private var lastUpdateCheck: Long = 0L
 
     init {
@@ -371,19 +372,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun generate() {
+        if (_state.value.generating || generationJob?.isActive == true) return
         val workflow = _state.value.selectedWorkflow ?: return
         AppLogger.info("开始提交生成：${workflow.entry.path}")
-        viewModelScope.launch {
+        _state.update {
+            it.copy(
+                generating = true,
+                error = null,
+                currentExecutingNodeId = null,
+                generationProgress = null,
+                generationMessage = "正在整理工作流参数",
+            )
+        }
+        generationJob = viewModelScope.launch {
             runOperation("提交生成失败") {
-                _state.update {
-                    it.copy(
-                        generating = true,
-                        error = null,
-                        currentExecutingNodeId = null,
-                        generationProgress = null,
-                        generationMessage = "正在整理工作流参数",
-                    )
-                }
                 val generated = (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
                 val response = try {
                     client.queuePrompt(
@@ -420,6 +422,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 AppLogger.info("生成任务已加入队列：${response.promptId}")
                 startMonitor(response.promptId, workflow.entry.name)
                 refreshTasksInternal()
+            }
+        }.also { job ->
+            job.invokeOnCompletion {
+                if (generationJob === job) generationJob = null
             }
         }
     }

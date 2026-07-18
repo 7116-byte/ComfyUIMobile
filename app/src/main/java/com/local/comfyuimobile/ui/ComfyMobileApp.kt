@@ -104,7 +104,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
@@ -625,24 +624,25 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     }
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier.fillMaxWidth().padding(12.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(Modifier.weight(1f)) {
+            Box(Modifier.weight(0.72f)) {
                 OutlinedCard(
                     modifier = Modifier.fillMaxWidth().clickable { recentMenuExpanded = true },
-                    shape = RoundedCornerShape(18.dp),
+                    shape = RoundedCornerShape(12.dp),
                 ) {
                     Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
+                        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text(workflow.entry.name, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                            Text(workflow.entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 1)
                             Text(
                                 "${nodes.size} 个流程部件 · ${state.fields.count { it.visible }} 个参数",
-                                style = MaterialTheme.typography.bodySmall,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                             )
                         }
@@ -687,10 +687,11 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                     }
                 }
             }
-            TextButton(onClick = { layoutDialog = true }) { Text("表单布局") }
+            Spacer(Modifier.weight(0.28f))
+            TextButton(onClick = { layoutDialog = true }, modifier = Modifier.height(42.dp)) { Text("表单布局") }
             Surface(
-                modifier = Modifier.width(158.dp).height(48.dp),
-                shape = RoundedCornerShape(24.dp),
+                modifier = Modifier.width(158.dp).height(42.dp),
+                shape = RoundedCornerShape(21.dp),
                 color = MaterialTheme.colorScheme.secondaryContainer,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             ) {
@@ -862,29 +863,40 @@ private fun NodeParameterCard(
             }
             if (expanded) {
                 HorizontalDivider()
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Column(Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     problems.forEach { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-                    if (fields.isEmpty() && !node.type.contains("Seed (rgthree)", ignoreCase = true)) {
+                    val hasSeedActions = node.type.contains("Seed (rgthree)", ignoreCase = true)
+                    if (fields.isEmpty() && !hasSeedActions) {
                         Text("此部件没有可调整参数。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    fields.forEachIndexed { index, field ->
-                        ParameterEditor(field, viewModel, onHistory = { onHistory(field) }, onUpload = { onUpload(field) })
-                        if (index < fields.lastIndex) HorizontalDivider()
-                    }
-                    if (node.type.contains("Seed (rgthree)", ignoreCase = true)) {
-                        Text("种子快捷操作", style = MaterialTheme.typography.titleSmall)
-                        FilledTonalButton(
-                            onClick = { viewModel.invokeSeedAction(node.id, "Randomize Each Time", "已设为每次生成随机") },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text("每次生成随机") }
-                        FilledTonalButton(
-                            onClick = { viewModel.invokeSeedAction(node.id, "New Fixed Random", "已生成新的固定种子") },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text("生成新的固定种子") }
-                        OutlinedButton(
-                            onClick = { viewModel.invokeSeedAction(node.id, "Use Last Queued Seed", "已使用上次排队种子") },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text("使用上次排队种子") }
+                    if (fields.isNotEmpty() || hasSeedActions) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.75f)),
+                        ) {
+                            Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                fields.forEachIndexed { index, field ->
+                                    ParameterEditor(field, viewModel, onHistory = { onHistory(field) }, onUpload = { onUpload(field) })
+                                    if (index < fields.lastIndex || hasSeedActions) HorizontalDivider()
+                                }
+                                if (hasSeedActions) {
+                                    Text("种子快捷操作", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
+                                    FilledTonalButton(
+                                        onClick = { viewModel.invokeSeedAction(node.id, "Randomize Each Time", "已设为每次生成随机") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) { Text("每次生成随机") }
+                                    FilledTonalButton(
+                                        onClick = { viewModel.invokeSeedAction(node.id, "New Fixed Random", "已生成新的固定种子") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) { Text("生成新的固定种子") }
+                                    OutlinedButton(
+                                        onClick = { viewModel.invokeSeedAction(node.id, "Use Last Queued Seed", "已使用上次排队种子") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) { Text("使用上次排队种子") }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -910,16 +922,27 @@ private fun ConnectionMarkers(markers: List<WorkflowConnectionMarker>, input: Bo
 
 @Composable
 private fun ParameterEditor(field: ParameterField, viewModel: MainViewModel, onHistory: () -> Unit, onUpload: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(field.label, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-            if (field.kind == ParameterKind.MULTILINE) IconButton(onClick = onHistory) { Icon(Icons.Default.History, "历史") }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    field.label,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+                if (!field.name.equals(field.label, ignoreCase = true)) {
+                    Text(field.name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            if (field.kind == ParameterKind.MULTILINE) IconButton(onClick = onHistory, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.History, "历史", modifier = Modifier.size(20.dp))
+            }
         }
-        if (field.linked) Text("此参数已由其他节点连接，当前值只读。", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall)
+        if (field.linked) Text("已由其他部件连接，当前值只读", color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.labelSmall)
         when (field.kind) {
             ParameterKind.BOOLEAN -> Row(verticalAlignment = Alignment.CenterVertically) {
                 Switch(checked = field.displayValue.toBoolean(), onCheckedChange = { viewModel.updateField(field.key, it.toString()) }, enabled = !field.linked)
-                Spacer(Modifier.width(10.dp)); Text(if (field.displayValue.toBoolean()) "开启" else "关闭")
+                Spacer(Modifier.width(10.dp)); Text(if (field.displayValue.toBoolean()) "开启" else "关闭", style = MaterialTheme.typography.bodyMedium)
             }
             ParameterKind.COMBO -> ComboField(field, viewModel)
             ParameterKind.INTEGER, ParameterKind.DECIMAL -> {
@@ -941,12 +964,12 @@ private fun ParameterEditor(field: ParameterField, viewModel: MainViewModel, onH
             ParameterKind.MULTILINE -> OutlinedTextField(
                 value = field.displayValue,
                 onValueChange = { viewModel.updateField(field.key, it) },
-                modifier = Modifier.fillMaxWidth().height(150.dp),
+                modifier = Modifier.fillMaxWidth().height(140.dp),
                 enabled = !field.linked,
                 minLines = 5,
             )
             ParameterKind.TEXT -> OutlinedTextField(field.displayValue, { viewModel.updateField(field.key, it) }, Modifier.fillMaxWidth(), enabled = !field.linked)
-            ParameterKind.UNSUPPORTED -> Text(field.warning ?: "此控件需在高级编辑中修改", color = MaterialTheme.colorScheme.error)
+            ParameterKind.UNSUPPORTED -> Text(field.warning ?: "此控件需在高级编辑中修改", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -981,20 +1004,6 @@ private fun NumberField(field: ParameterField, viewModel: MainViewModel) {
         enabled = !field.linked,
         singleLine = true,
     )
-    val min = field.minimum
-    val max = field.maximum
-    val current = field.displayValue.toDoubleOrNull()
-    if (min != null && max != null && current != null && max > min && max - min < 1_000_000) {
-        Slider(
-            value = current.coerceIn(min, max).toFloat(),
-            onValueChange = {
-                val value = if (field.kind == ParameterKind.INTEGER) it.toLong().toString() else String.format(Locale.US, "%.4f", it).trimEnd('0').trimEnd('.')
-                viewModel.updateField(field.key, value)
-            },
-            valueRange = min.toFloat()..max.toFloat(),
-            enabled = !field.linked,
-        )
-    }
 }
 
 @Composable
