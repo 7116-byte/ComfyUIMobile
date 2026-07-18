@@ -15,6 +15,7 @@ import androidx.lifecycle.viewModelScope
 import com.local.comfyuimobile.bridge.ComfyBridge
 import com.local.comfyuimobile.bridge.WorkflowImageReader
 import com.local.comfyuimobile.data.AppPreferences
+import com.local.comfyuimobile.data.AppLogger
 import com.local.comfyuimobile.data.LocalResultCache
 import com.local.comfyuimobile.data.PromptHistory
 import com.local.comfyuimobile.data.WorkflowPolicy
@@ -66,7 +67,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val scanner = LanScanner(application, client)
     private val updates = UpdateManager(application)
     private val clientId = UUID.randomUUID().toString()
-    private val _state = MutableStateFlow(AppUiState())
+    private val _state = MutableStateFlow(AppUiState(loggingEnabled = AppLogger.isEnabled(application)))
     val state: StateFlow<AppUiState> = _state.asStateFlow()
     private var bridge: ComfyBridge? = null
     private var reconnectJob: Job? = null
@@ -107,6 +108,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearMessage() = _state.update { it.copy(error = null, notice = null) }
 
     fun connect(address: String = state.value.serverInput) {
+        AppLogger.info("请求连接服务器：$address")
         reconnectJob?.cancel()
         client.closeWebSocket()
         viewModelScope.launch {
@@ -242,6 +244,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectWorkflow(entry: WorkflowEntry) {
         if (entry.isDirectory) return
+        AppLogger.info("加载工作流：${entry.path}")
         parameterRefreshJob?.cancel()
         viewModelScope.launch {
             runOperation("工作流加载失败") {
@@ -368,6 +371,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun generate() {
         val workflow = _state.value.selectedWorkflow ?: return
+        AppLogger.info("开始提交生成：${workflow.entry.path}")
         viewModelScope.launch {
             runOperation("提交生成失败") {
                 _state.update {
@@ -412,6 +416,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         notice = "已加入队列：${response.promptId.take(8)}",
                     )
                 }
+                AppLogger.info("生成任务已加入队列：${response.promptId}")
                 startMonitor(response.promptId, workflow.entry.name)
                 refreshTasksInternal()
             }
@@ -627,6 +632,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setLoggingEnabled(enabled: Boolean) {
+        AppLogger.setEnabled(app, enabled)
+        _state.update {
+            it.copy(
+                loggingEnabled = enabled,
+                notice = if (enabled) "诊断日志已开启" else "诊断日志已关闭",
+            )
+        }
+    }
+
+    fun diagnosticLog(): String = AppLogger.read()
+
+    fun clearDiagnosticLog() {
+        AppLogger.clear()
+        _state.update { it.copy(notice = "诊断日志已清空") }
+    }
+
+    fun reportDiagnosticLogExport(success: Boolean) {
+        _state.update {
+            if (success) it.copy(notice = "诊断日志已导出")
+            else it.copy(error = "诊断日志导出失败")
+        }
+    }
+
     fun removePromptHistory(value: String) {
         viewModelScope.launch {
             val updated = _state.value.promptHistory.filterNot { it == value }
@@ -644,19 +673,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleCacheOutput(node: WorkflowNode) {
         if (!node.isOutput) return
-        val workflow = _state.value.selectedWorkflow ?: return
         viewModelScope.launch {
             val serverUrl = client.serverUrl()
             val current = _state.value.cacheOutputRules
             val existing = current.firstOrNull {
-                it.serverUrl == serverUrl && it.workflowPath == workflow.entry.path && it.nodeId == node.id
+                it.serverUrl == serverUrl && it.nodeType == node.type
             }
             val updated = if (existing == null) {
-                current + CacheOutputRule(
+                current.filterNot { it.serverUrl == serverUrl && it.nodeType == node.type } + CacheOutputRule(
                     serverUrl = serverUrl,
-                    workflowPath = workflow.entry.path,
-                    workflowName = workflow.entry.name,
-                    nodeId = node.id,
                     nodeTitle = node.title,
                     nodeType = node.type,
                 )
@@ -667,7 +692,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update {
                 it.copy(
                     cacheOutputRules = updated,
-                    notice = if (existing == null) "已将 ${node.title} 加入本地保存白名单" else "已将 ${node.title} 移出本地保存白名单",
+                    notice = if (existing == null) {
+                        "已将 ${node.title} 加入全工作流保存白名单"
+                    } else {
+                        "已将 ${node.title} 移出全工作流保存白名单"
+                    },
                 )
             }
         }
@@ -1091,6 +1120,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .putExtra(JobMonitorService.EXTRA_WORKFLOW_NAME, workflowName)
         runCatching { ContextCompat.startForegroundService(app, intent) }
             .onFailure { error ->
+                AppLogger.error("后台监控启动失败，任务=$promptId", error)
                 _state.update {
                     it.copy(notice = "任务已提交，但后台监控启动失败：${error.message.orEmpty()}")
                 }
@@ -1105,6 +1135,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .putExtra(JobMonitorService.EXTRA_PROGRESS, progress)
             .putExtra(JobMonitorService.EXTRA_NODE, node)
         runCatching { app.startService(intent) }
+            .onFailure { AppLogger.error("后台进度通知失败，任务=$promptId", it) }
     }
 
     private fun stopMonitor(promptId: String) {
@@ -1112,6 +1143,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .setAction(JobMonitorService.ACTION_STOP)
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
         runCatching { app.startService(intent) }
+            .onFailure { AppLogger.error("停止后台监控失败，任务=$promptId", it) }
     }
 
     private fun updateFieldLayout(key: String, transform: (ParameterField) -> ParameterField) {
@@ -1175,23 +1207,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun runOperation(prefix: String, block: suspend () -> Unit) {
-        runCatching { block() }.onFailure { error ->
-            if (error is CancellationException) throw error
-            _state.update {
-                val detail = error.message ?: error.javaClass.simpleName
-                val connecting = prefix.startsWith("连接")
-                it.copy(
-                    loading = false,
-                    generating = false,
-                    scanning = false,
-                    error = "$prefix：$detail",
-                    status = if (connecting) ConnectionStatus.ERROR else it.status,
-                    connectionMessage = if (connecting) "第 ${it.connectionStep} 步失败：$detail" else it.connectionMessage,
-                    activeServer = if (connecting) null else it.activeServer,
-                    bridgeReady = if (connecting) false else it.bridgeReady,
-                )
+        val operation = prefix.removeSuffix("失败")
+        AppLogger.info("$operation 开始")
+        runCatching { block() }
+            .onSuccess { AppLogger.info("$operation 完成") }
+            .onFailure { error ->
+                if (error is CancellationException) throw error
+                AppLogger.error(prefix, error)
+                _state.update {
+                    val detail = error.message ?: error.javaClass.simpleName
+                    val connecting = prefix.startsWith("连接")
+                    it.copy(
+                        loading = false,
+                        generating = false,
+                        scanning = false,
+                        error = "$prefix：$detail",
+                        status = if (connecting) ConnectionStatus.ERROR else it.status,
+                        connectionMessage = if (connecting) "第 ${it.connectionStep} 步失败：$detail" else it.connectionMessage,
+                        activeServer = if (connecting) null else it.activeServer,
+                        bridgeReady = if (connecting) false else it.bridgeReady,
+                    )
+                }
             }
-        }
     }
 
     private fun setConnectionStep(step: Int, message: String) {

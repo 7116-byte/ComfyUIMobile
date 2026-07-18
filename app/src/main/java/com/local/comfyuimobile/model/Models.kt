@@ -106,6 +106,8 @@ enum class ResultSource { LOCAL, CLOUD }
 data class ResultMedia(
     val jobId: String,
     val nodeId: String,
+    val nodeType: String = "",
+    val nodeTitle: String = "",
     val filename: String,
     val subfolder: String,
     val type: String,
@@ -123,11 +125,11 @@ data class ResultMedia(
 
 data class CacheOutputRule(
     val serverUrl: String,
-    val workflowPath: String,
-    val workflowName: String,
-    val nodeId: String,
-    val nodeTitle: String,
     val nodeType: String,
+    val nodeTitle: String,
+    val workflowPath: String = "",
+    val workflowName: String = "",
+    val nodeId: String = "",
     val enabled: Boolean = true,
 )
 
@@ -173,6 +175,7 @@ data class AppUiState(
     val promptHistory: List<String> = emptyList(),
     val submittedJobIds: Set<String> = emptySet(),
     val autoSaveResults: Boolean = false,
+    val loggingEnabled: Boolean = false,
     val loading: Boolean = false,
     val scanning: Boolean = false,
     val generating: Boolean = false,

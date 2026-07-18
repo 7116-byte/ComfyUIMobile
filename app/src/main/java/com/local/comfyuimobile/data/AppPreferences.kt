@@ -173,6 +173,17 @@ class AppPreferences(private val context: Context) {
                     enabled = item.optBoolean("enabled", true),
                 )
             }
-        }.filter { it.serverUrl.isNotBlank() && it.workflowPath.isNotBlank() && it.nodeId.isNotBlank() }
+        }
+            .filter { it.serverUrl.isNotBlank() && it.nodeType.isNotBlank() }
+            .groupBy { "${it.serverUrl}/${it.nodeType}" }
+            .values
+            .map { matching ->
+                matching.first().copy(
+                    workflowPath = "",
+                    workflowName = "",
+                    nodeId = "",
+                    enabled = matching.any { it.enabled },
+                )
+            }
     }.getOrDefault(emptyList())
 }

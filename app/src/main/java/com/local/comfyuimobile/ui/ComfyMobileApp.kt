@@ -152,6 +152,7 @@ import coil.compose.AsyncImage
 import com.local.comfyuimobile.MainViewModel
 import com.local.comfyuimobile.bridge.ComfyBridge
 import com.local.comfyuimobile.bridge.FieldValidator
+import com.local.comfyuimobile.data.WorkflowBrowser
 import com.local.comfyuimobile.model.AppUiState
 import com.local.comfyuimobile.model.ConnectionStatus
 import com.local.comfyuimobile.model.JobState
@@ -450,6 +451,7 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
 private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenParameters: () -> Unit) {
     val context = LocalContext.current
     var search by remember { mutableStateOf("") }
+    var currentFolder by rememberSaveable(state.activeServer?.baseUrl) { mutableStateOf(WorkflowBrowser.ROOT) }
     var duplicateDialog by remember { mutableStateOf(false) }
     var renameDialog by remember { mutableStateOf(false) }
     var moveDialog by remember { mutableStateOf(false) }
@@ -467,6 +469,11 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
         if (uri != null && raw != null) context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(raw) }
         exportRaw = null
     }
+    LaunchedEffect(state.workflows, currentFolder) {
+        if (currentFolder != WorkflowBrowser.ROOT && state.workflows.none { it.isDirectory && it.path == currentFolder }) {
+            currentFolder = WorkflowBrowser.ROOT
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         OutlinedTextField(
             value = search,
@@ -476,6 +483,19 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
             leadingIcon = { Icon(Icons.Default.Search, null) },
             singleLine = true,
         )
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (currentFolder != WorkflowBrowser.ROOT && search.isBlank()) {
+                OutlinedButton(onClick = { currentFolder = WorkflowBrowser.up(currentFolder) }) { Text("上一级") }
+            }
+            Text(
+                if (search.isBlank()) currentFolder.removePrefix("workflows/").ifBlank { "全部分类" } else "搜索全部分类",
+                style = MaterialTheme.typography.titleSmall,
+            )
+        }
         Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilledTonalButton(onClick = {
                 importLauncher.launch(arrayOf("application/json", "text/plain", "image/*"))
@@ -513,15 +533,20 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
                 OutlinedButton(onClick = { deleteDialog = true }) { Text("删除") }
             }
         }
-        val filtered = state.workflows.filter {
-            search.isBlank() || it.path.contains(search, ignoreCase = true)
-        }
+        val filtered = WorkflowBrowser.entries(state.workflows, currentFolder, search)
         LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(filtered, key = { it.path }) { entry ->
                 WorkflowRow(
                     entry = entry,
                     selected = state.selectedWorkflow?.entry?.path == entry.path,
-                    onClick = { if (!entry.isDirectory) viewModel.selectWorkflow(entry) },
+                    onClick = {
+                        if (entry.isDirectory) {
+                            currentFolder = entry.path
+                            search = ""
+                        } else {
+                            viewModel.selectWorkflow(entry)
+                        }
+                    },
                 )
             }
         }
@@ -625,8 +650,7 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                     active = state.currentExecutingNodeId == nodeId,
                     problems = localProblemsByNode[nodeId].orEmpty() + state.nodeProblems[nodeId].orEmpty(),
                     cached = state.cacheOutputRules.any {
-                        it.enabled && it.serverUrl == state.activeServer?.baseUrl &&
-                            it.workflowPath == workflow.entry.path && it.nodeId == nodeId
+                        it.enabled && it.serverUrl == state.activeServer?.baseUrl && it.nodeType == node.type
                     },
                     onToggle = {
                         expandedNodeIds = if (nodeId in expandedNodeIds) expandedNodeIds - nodeId else expandedNodeIds + nodeId
@@ -669,14 +693,14 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     if (layoutDialog) LayoutDialog(state.fields, viewModel) { layoutDialog = false }
     cacheNode?.let { node ->
         val cached = state.cacheOutputRules.any {
-            it.serverUrl == state.activeServer?.baseUrl && it.workflowPath == workflow.entry.path && it.nodeId == node.id
+            it.serverUrl == state.activeServer?.baseUrl && it.nodeType == node.type
         }
         ConfirmDialog(
-            title = if (cached) "移出本地保存白名单" else "加入本地保存白名单",
+            title = if (cached) "移出全工作流保存白名单" else "加入全工作流保存白名单",
             message = if (cached) {
-                "以后不再自动缓存“${node.title}”的输出，已经缓存的文件不会删除。"
+                "以后所有工作流中的“${node.type}”部件都不再自动保存，已经保存的文件不会删除。"
             } else {
-                "以后仅对本 App 提交的任务，自动缓存“${node.title}”的输出。电脑浏览器提交的任务不会缓存。"
+                "以后所有工作流中的“${node.type}”输出部件都会自动保存。仅处理本 App 提交的任务，电脑浏览器提交的任务不会保存。"
             },
             onDismiss = { cacheNode = null },
             onConfirm = { viewModel.toggleCacheOutput(node); cacheNode = null },
@@ -1032,7 +1056,7 @@ private fun ResultScreen(
             }
             media.isEmpty() -> EmptyState(
                 Icons.Default.Image,
-                if (source == ResultSource.LOCAL) "暂无本地作品\n请在参数页长按输出部件加入本地保存白名单" else "云端暂无图片或视频",
+                if (source == ResultSource.LOCAL) "暂无本地作品\n请在参数页长按输出部件加入全工作流保存白名单" else "云端暂无图片或视频",
             )
             layout == ResultLayout.ALL -> ResultMediaGrid(
                 media = media,
@@ -1584,7 +1608,34 @@ private fun JobCard(job: JobSummary, viewModel: MainViewModel) {
 
 @Composable
 private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
     var confirmDeleteLocal by remember { mutableStateOf(false) }
+    var showDiagnosticLog by remember { mutableStateOf(false) }
+    var diagnosticLog by remember { mutableStateOf("") }
+    var pendingLogExport by remember { mutableStateOf("") }
+    val logExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        val success = uri != null && runCatching {
+            context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(pendingLogExport) }
+                ?: error("无法创建日志文件")
+        }.isSuccess
+        pendingLogExport = ""
+        if (uri != null) viewModel.reportDiagnosticLogExport(success)
+    }
+    if (showDiagnosticLog) {
+        AlertDialog(
+            onDismissRequest = { showDiagnosticLog = false },
+            title = { Text("诊断日志") },
+            text = {
+                Text(
+                    diagnosticLog,
+                    modifier = Modifier.fillMaxWidth().height(420.dp).verticalScroll(rememberScrollState()),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            confirmButton = { TextButton(onClick = { showDiagnosticLog = false }) { Text("关闭") } },
+        )
+        return
+    }
     if (confirmDeleteLocal) {
         ConfirmDialog(
             title = "删除全部本地作品",
@@ -1612,7 +1663,7 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
                 HorizontalDivider()
                 Text("本地作品保存白名单", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "把本 App 提交任务中指定输出部件的结果独立保存到手机；电脑浏览器提交的任务不会进入本地。保存后即使云端删除，本地作品仍然保留。",
+                    "白名单按输出部件类型对所有工作流生效，不再绑定某一个工作流。只保存本 App 提交的任务；电脑浏览器提交的任务不会进入本地。",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (state.cacheOutputRules.isEmpty()) {
@@ -1623,7 +1674,7 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
                             Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
                                     Text(rule.nodeTitle.ifBlank { rule.nodeType }, style = MaterialTheme.typography.titleSmall)
-                                    Text(rule.workflowName, maxLines = 1, style = MaterialTheme.typography.bodySmall)
+                                    Text("${rule.nodeType} · 适用于所有工作流", maxLines = 1, style = MaterialTheme.typography.bodySmall)
                                     Text(rule.serverUrl, maxLines = 1, style = MaterialTheme.typography.labelSmall)
                                 }
                                 Switch(rule.enabled, { viewModel.setCacheRuleEnabled(rule, it) })
@@ -1634,6 +1685,26 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
                 }
                 OutlinedButton(onClick = { confirmDeleteLocal = true }, enabled = state.localResults.isNotEmpty()) {
                     Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("删除全部本地作品（${state.localResults.size} 项）")
+                }
+                HorizontalDivider()
+                Text("诊断日志", style = MaterialTheme.typography.titleSmall)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("记录运行和闪退日志")
+                        Text("不记录提示词、工作流正文或生成图片", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(state.loggingEnabled, viewModel::setLoggingEnabled)
+                }
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = {
+                        diagnosticLog = viewModel.diagnosticLog()
+                        showDiagnosticLog = true
+                    }) { Text("查看日志") }
+                    OutlinedButton(onClick = {
+                        pendingLogExport = viewModel.diagnosticLog()
+                        logExportLauncher.launch("ComfyUIMobile-${System.currentTimeMillis()}.log")
+                    }) { Text("导出日志") }
+                    TextButton(onClick = viewModel::clearDiagnosticLog) { Text("清空日志") }
                 }
                 HorizontalDivider()
                 Text("软件更新", style = MaterialTheme.typography.titleSmall)

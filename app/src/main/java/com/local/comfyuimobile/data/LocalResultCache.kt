@@ -87,6 +87,8 @@ class LocalResultCache(context: Context) {
         .put("key", key)
         .put("jobId", media.jobId)
         .put("nodeId", media.nodeId)
+        .put("nodeType", media.nodeType)
+        .put("nodeTitle", media.nodeTitle)
         .put("filename", media.filename)
         .put("subfolder", media.subfolder)
         .put("type", media.type)
@@ -103,6 +105,8 @@ class LocalResultCache(context: Context) {
         return ResultMedia(
             jobId = item.optString("jobId"),
             nodeId = item.optString("nodeId"),
+            nodeType = item.optString("nodeType"),
+            nodeTitle = item.optString("nodeTitle"),
             filename = item.optString("filename"),
             subfolder = item.optString("subfolder"),
             type = item.optString("type"),

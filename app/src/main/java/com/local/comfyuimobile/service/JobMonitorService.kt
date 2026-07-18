@@ -11,6 +11,7 @@ import android.os.PowerManager
 import com.local.comfyuimobile.MainActivity
 import com.local.comfyuimobile.R
 import com.local.comfyuimobile.data.AppPreferences
+import com.local.comfyuimobile.data.AppLogger
 import com.local.comfyuimobile.data.CachePolicy
 import com.local.comfyuimobile.data.LocalResultCache
 import com.local.comfyuimobile.network.ComfyClient
@@ -54,7 +55,8 @@ class JobMonitorService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = try {
         handleStartCommand(intent, startId)
-    } catch (_: Throwable) {
+    } catch (error: Throwable) {
+        AppLogger.error("后台任务服务启动失败", error)
         val promptId = intent?.getStringExtra(EXTRA_PROMPT_ID).orEmpty()
         monitors.remove(promptId)?.cancel()
         workflowNames.remove(promptId)
@@ -90,12 +92,15 @@ class JobMonitorService : Service() {
             return START_NOT_STICKY
         }
         workflowNames[promptId] = workflowName
+        AppLogger.info("后台开始监控任务：$promptId，工作流=$workflowName")
         holdBackgroundLocks()
         startForeground(FOREGROUND_ID, notification("正在生成", workflowName, true))
         monitors.remove(promptId)?.cancel()
         val monitor = scope.launch(start = CoroutineStart.LAZY) {
+            var consecutivePollFailures = 0
             while (isActive) {
                 runCatching { readStatus(baseUrl, promptId) }.onSuccess { status ->
+                    consecutivePollFailures = 0
                     if (status.completed) {
                         if (status.error) {
                             getSystemService(NotificationManager::class.java)
@@ -114,6 +119,7 @@ class JobMonitorService : Service() {
                                 delay(minOf(30_000L, (attempt + 1) * 2_000L))
                             }
                             val title = if (report.failed == 0) "生成完成，本地已保存 ${report.total} 项" else "生成完成，本地保存失败"
+                            AppLogger.info("后台任务完成：$promptId，总输出=${report.total}，失败=${report.failed}，详情=${report.detail}")
                             val detail = if (report.failed == 0) workflowName else listOf(workflowName, report.detail.ifBlank { "${report.failed} 项保存失败" }).joinToString(" · ")
                             getSystemService(NotificationManager::class.java)
                                 .notify(promptId.hashCode(), notification(title, detail, false))
@@ -128,6 +134,11 @@ class JobMonitorService : Service() {
                         workflowNames.remove(promptId)
                         stopIfIdle()
                         return@launch
+                    }
+                }.onFailure { error ->
+                    consecutivePollFailures += 1
+                    if (consecutivePollFailures == 1 || consecutivePollFailures % 6 == 0) {
+                        AppLogger.error("后台轮询任务失败：$promptId，连续失败=$consecutivePollFailures", error)
                     }
                 }
                 delay(5_000)

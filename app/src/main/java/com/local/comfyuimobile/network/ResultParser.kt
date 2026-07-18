@@ -22,9 +22,23 @@ object ResultParser {
                 ?: executionStart(job)
             val workflowPath = mobile?.optString("workflow_path").orEmpty()
             val workflowName = mobile?.optString("workflow_name").orEmpty()
+            val nodeDescriptors = workflowNodeDescriptors(extraData)
             val outputs = job.optJSONObject("outputs") ?: return@forEach
             outputs.keys().forEach { nodeId ->
-                collect(baseUrl, jobId, nodeId, outputs.opt(nodeId), createdAt, taskNumber, workflowPath, workflowName, result)
+                val descriptor = nodeDescriptors[nodeId]
+                collect(
+                    baseUrl,
+                    jobId,
+                    nodeId,
+                    descriptor?.type.orEmpty(),
+                    descriptor?.title.orEmpty(),
+                    outputs.opt(nodeId),
+                    createdAt,
+                    taskNumber,
+                    workflowPath,
+                    workflowName,
+                    result,
+                )
             }
         }
         return result
@@ -36,6 +50,8 @@ object ResultParser {
         baseUrl: String,
         jobId: String,
         nodeId: String,
+        nodeType: String,
+        nodeTitle: String,
         value: Any?,
         createdAt: Long,
         taskNumber: Long,
@@ -60,6 +76,8 @@ object ResultParser {
                         out += ResultMedia(
                             jobId = jobId,
                             nodeId = nodeId,
+                            nodeType = nodeType,
+                            nodeTitle = nodeTitle,
                             filename = filename,
                             subfolder = subfolder,
                             type = type,
@@ -72,10 +90,30 @@ object ResultParser {
                         )
                     }
                 }
-                value.keys().forEach { collect(baseUrl, jobId, nodeId, value.opt(it), createdAt, taskNumber, workflowPath, workflowName, out) }
+                value.keys().forEach {
+                    collect(baseUrl, jobId, nodeId, nodeType, nodeTitle, value.opt(it), createdAt, taskNumber, workflowPath, workflowName, out)
+                }
             }
             is JSONArray -> repeat(value.length()) {
-                collect(baseUrl, jobId, nodeId, value.opt(it), createdAt, taskNumber, workflowPath, workflowName, out)
+                collect(baseUrl, jobId, nodeId, nodeType, nodeTitle, value.opt(it), createdAt, taskNumber, workflowPath, workflowName, out)
+            }
+        }
+    }
+
+    private fun workflowNodeDescriptors(extraData: JSONObject?): Map<String, NodeDescriptor> {
+        val nodes = extraData
+            ?.optJSONObject("extra_pnginfo")
+            ?.optJSONObject("workflow")
+            ?.optJSONArray("nodes")
+            ?: return emptyMap()
+        return buildMap {
+            repeat(nodes.length()) { index ->
+                val node = nodes.optJSONObject(index) ?: return@repeat
+                val id = node.opt("id")?.toString().orEmpty()
+                val type = node.optString("type")
+                if (id.isNotBlank() && type.isNotBlank()) {
+                    put(id, NodeDescriptor(type, node.optString("title").ifBlank { type }))
+                }
             }
         }
     }
@@ -90,4 +128,6 @@ object ResultParser {
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+
+    private data class NodeDescriptor(val type: String, val title: String)
 }

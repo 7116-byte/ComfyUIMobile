@@ -19,6 +19,8 @@ class CachePolicyTest {
     private val media = ResultMedia(
         jobId = "app-job",
         nodeId = "9",
+        nodeType = "SaveImage",
+        nodeTitle = "保存图像",
         filename = "a.png",
         subfolder = "",
         type = "output",
@@ -32,9 +34,10 @@ class CachePolicyTest {
         assertFalse(CachePolicy.shouldCache(media, emptySet(), listOf(rule), rule.serverUrl))
     }
 
-    @Test fun rejectsOtherWorkflowNodeOrServer() {
-        assertFalse(CachePolicy.shouldCache(media.copy(nodeId = "10"), setOf("app-job"), listOf(rule), rule.serverUrl))
-        assertFalse(CachePolicy.shouldCache(media.copy(workflowPath = "workflows/b.json"), setOf("app-job"), listOf(rule), rule.serverUrl))
+    @Test fun appliesSameOutputTypeAcrossWorkflowsButRejectsOtherTypeOrServer() {
+        assertTrue(CachePolicy.shouldCache(media.copy(nodeId = "10"), setOf("app-job"), listOf(rule), rule.serverUrl))
+        assertTrue(CachePolicy.shouldCache(media.copy(workflowPath = "workflows/b.json"), setOf("app-job"), listOf(rule), rule.serverUrl))
+        assertFalse(CachePolicy.shouldCache(media.copy(nodeType = "PreviewImage"), setOf("app-job"), listOf(rule), rule.serverUrl))
         assertFalse(CachePolicy.shouldCache(media, setOf("app-job"), listOf(rule), "http://192.168.10.110:8188"))
     }
 

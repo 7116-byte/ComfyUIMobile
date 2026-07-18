@@ -34,7 +34,7 @@ class ResultParserTest {
 
     @Test fun keepsEveryImageFromOneBatchAndOneOutputNode() {
         val history = JSONObject(
-            """{"batch-job":{"prompt":[3,"batch-job",{}, {"create_time":300,"comfy_mobile":{"workflow_path":"workflows/a.json"}}],"outputs":{"305":{"images":[
+            """{"batch-job":{"prompt":[3,"batch-job",{}, {"create_time":300,"comfy_mobile":{"workflow_path":"workflows/a.json"},"extra_pnginfo":{"workflow":{"nodes":[{"id":305,"type":"SaveImage","title":"保存图像"}]}}}],"outputs":{"305":{"images":[
               {"filename":"batch_00001.png","type":"output"},
               {"filename":"batch_00002.png","type":"output"},
               {"filename":"batch_00003.png","type":"output"},
@@ -45,6 +45,8 @@ class ResultParserTest {
         val result = ResultParser.parse("http://192.168.10.109:8188", history)
 
         assertEquals(4, result.size)
+        assertEquals(setOf("SaveImage"), result.map { it.nodeType }.toSet())
+        assertEquals(setOf("保存图像"), result.map { it.nodeTitle }.toSet())
         assertEquals(setOf("batch_00001.png", "batch_00002.png", "batch_00003.png", "batch_00004.png"), result.map { it.filename }.toSet())
     }
 
