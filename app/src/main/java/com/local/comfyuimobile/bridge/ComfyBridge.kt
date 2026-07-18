@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.local.comfyuimobile.data.AppLogger
+import com.local.comfyuimobile.data.PromptGraphPolicy
 import com.local.comfyuimobile.data.WorkflowPolicy
 import com.local.comfyuimobile.model.GeneratedPrompt
 import com.local.comfyuimobile.model.ParameterField
@@ -347,6 +348,17 @@ class ComfyBridge(private val activity: Activity) {
         val root = JSONObject(response)
         if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "生成 Prompt 失败"))
         val prompt = root.getJSONObject("prompt")
+        val relevantNodeIds = buildSet {
+            val values = root.optJSONArray("relevantNodeIds") ?: JSONArray()
+            repeat(values.length()) { index -> add(values.optString(index)) }
+        }
+        val filterResult = PromptGraphPolicy.retainExecutableAncestors(prompt, relevantNodeIds)
+        AppLogger.info(
+            "Prompt 执行链整理：官方节点=${filterResult.originalCount}，" +
+                "根节点命中=${filterResult.matchedRootCount}，保留节点=${filterResult.retainedCount}，" +
+                "完整保留=${filterResult.keptFullPrompt}",
+        )
+        if (prompt.length() == 0) throw IllegalStateException("当前工作流没有可执行的输出链")
         val workflow = root.getJSONObject("workflow")
         WorkflowPolicy.writeMobileLayout(workflow, fields)
         return GeneratedPrompt(prompt.toString(), workflow.toString())
@@ -865,16 +877,17 @@ class ComfyBridge(private val activity: Activity) {
                 try { restore(); } catch (_) {}
               }
             }
-            setPhase('筛选当前输出链');
             const relevantIds = window.__comfyMobileRelevantNodeIds || new Set();
-            for (const nodeId of Object.keys(result.output || {})) {
-              if (!relevantIds.has(String(nodeId))) delete result.output[nodeId];
-            }
             if (!Object.keys(result.output || {}).length) {
               return JSON.stringify({ok:false, error:'当前工作流没有可执行的输出链'});
             }
             setPhase('序列化 Prompt 和工作流');
-            return JSON.stringify({ok:true, prompt:result.output, workflow:result.workflow});
+            return JSON.stringify({
+              ok:true,
+              prompt:result.output,
+              workflow:result.workflow,
+              relevantNodeIds:[...relevantIds].map(String)
+            });
           } catch (error) {
             return JSON.stringify({ok:false, error:'生成参数转换错误：' + String(error?.stack || error)});
           }
