@@ -320,12 +320,40 @@ class ComfyBridge(private val activity: Activity) {
         val encoded = Base64.getEncoder().encodeToString(updates.toString().toByteArray(Charsets.UTF_8))
         AppLogger.info("前端桥接：参数序列化完成，Base64=${encoded.length} 字符")
 
-        lastBridgePhase = "应用手机参数"
+        lastBridgePhase = "比较参数变更"
         AppLogger.info("前端桥接阶段：$lastBridgePhase")
-        val applyResponse = withContext(Dispatchers.Main.immediate) { evaluateImmediate(promptApplyScript(encoded)) }
-        val applyRoot = JSONObject(applyResponse)
-        if (!applyRoot.optBoolean("ok")) {
-            throw IllegalStateException(applyRoot.optString("error", "应用手机参数失败"))
+        val changedResponse = withContext(Dispatchers.Main.immediate) {
+            evaluateImmediate(promptChangedFieldsScript(encoded))
+        }
+        val changedRoot = JSONObject(changedResponse)
+        if (!changedRoot.optBoolean("ok")) {
+            throw IllegalStateException(changedRoot.optString("error", "比较参数变更失败"))
+        }
+        val changedKeys = changedRoot.getJSONArray("changed").let { array ->
+            buildSet { repeat(array.length()) { add(array.getString(it)) } }
+        }
+        val changedFields = fields.filter { it.key in changedKeys }
+        AppLogger.info("前端桥接：仅应用实际修改参数，共 ${changedFields.size} 项")
+
+        for (field in changedFields) {
+            lastBridgePhase = "应用参数：${field.nodeTitle}/${field.label}（${field.key}）"
+            AppLogger.info("前端桥接阶段：$lastBridgePhase")
+            val singleUpdate = JSONArray().put(
+                JSONObject()
+                    .put("key", field.key)
+                    .put("widgetIndex", field.widgetIndex)
+                    .put("value", parseJsonValue(field.valueJson)),
+            )
+            val singleEncoded = Base64.getEncoder().encodeToString(
+                singleUpdate.toString().toByteArray(Charsets.UTF_8),
+            )
+            val applyResponse = withContext(Dispatchers.Main.immediate) {
+                evaluateImmediate(promptApplyScript(singleEncoded))
+            }
+            val applyRoot = JSONObject(applyResponse)
+            if (!applyRoot.optBoolean("ok")) {
+                throw IllegalStateException(applyRoot.optString("error", "应用手机参数失败"))
+            }
         }
 
         lastBridgePhase = "执行排队前回调"
@@ -799,6 +827,49 @@ class ComfyBridge(private val activity: Activity) {
             return JSON.stringify({ok:true});
           } catch (error) {
             return JSON.stringify({ok:false, error:'应用手机参数错误：' + String(error?.stack || error)});
+          }
+        })()
+    """.trimIndent()
+
+    private fun promptChangedFieldsScript(encodedUpdates: String) = """
+        (() => {
+          try {
+            const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
+            const graph = app?.rootGraph || app?.graph;
+            if (!graph) return JSON.stringify({ok:false, error:'ComfyUI 工作流画布尚未就绪'});
+            const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedUpdates'), c => c.charCodeAt(0)));
+            const updates = JSON.parse(text);
+            const nodeMap = new Map();
+            const visit = (current, prefix = '') => {
+              for (const node of (current?._nodes || [])) {
+                const nodeKey = prefix + String(node.id);
+                nodeMap.set(nodeKey, node);
+                if (node.subgraph) visit(node.subgraph, nodeKey + ':');
+              }
+              for (const [id, subgraph] of (current?.subgraphs?.entries?.() || [])) {
+                visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
+              }
+            };
+            visit(graph);
+            const equal = (left, right) => {
+              if (Object.is(left, right)) return true;
+              try { return JSON.stringify(left) === JSON.stringify(right); } catch (_) { return false; }
+            };
+            const changed = [];
+            for (const update of updates) {
+              const cut = update.key.lastIndexOf('/');
+              const node = nodeMap.get(update.key.slice(0, cut));
+              const widget = update.widgetIndex >= 0
+                ? node?.widgets?.[update.widgetIndex]
+                : node?.widgets?.find(w => w.name === update.key.slice(cut + 1));
+              if (!widget) continue;
+              const groupToggle = widget.value && typeof widget.value === 'object' && typeof widget.value.toggled === 'boolean';
+              const currentValue = groupToggle ? widget.value.toggled : widget.value;
+              if (!equal(currentValue, update.value)) changed.push(update.key);
+            }
+            return JSON.stringify({ok:true, changed});
+          } catch (error) {
+            return JSON.stringify({ok:false, error:'比较参数变更错误：' + String(error?.stack || error)});
           }
         })()
     """.trimIndent()
