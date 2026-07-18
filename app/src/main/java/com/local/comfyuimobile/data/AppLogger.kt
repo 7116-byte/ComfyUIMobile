@@ -5,6 +5,7 @@ import android.app.ApplicationExitInfo
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import androidx.annotation.RequiresApi
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -18,6 +19,7 @@ object AppLogger {
     private const val ENABLED = "enabled"
     private const val LAST_EXIT_TIMESTAMP = "last_exit_timestamp"
     private const val MAX_BYTES = 2L * 1024L * 1024L
+    private const val MAX_EXIT_TRACE_BYTES = 128 * 1024
     private val lock = Any()
     private val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.CHINA)
     @Volatile private var context: Context? = null
@@ -110,13 +112,59 @@ object AppLogger {
             exits.forEach { exit ->
                 info(
                     "系统历史退出：时间=${formatter.format(Date(exit.timestamp))}，原因=${exitReason(exit.reason)}，" +
-                        "状态=${exit.status}，描述=${exit.description.orEmpty()}",
+                        "进程=${exit.processName.orEmpty()}，PID=${exit.pid}，状态=${exit.status}，" +
+                        "重要性=${exit.importance}，PSS=${exit.pss}KB，RSS=${exit.rss}KB，" +
+                        "描述=${exit.description.orEmpty()}",
                 )
+                readExitTrace(exit)?.let { trace ->
+                    info("系统退出追踪：进程=${exit.processName.orEmpty()}\n$trace")
+                }
             }
             exits.maxOfOrNull { it.timestamp }?.let { newest ->
                 preferences.edit().putLong(LAST_EXIT_TIMESTAMP, newest).apply()
             }
         }.onFailure { error("读取系统历史退出原因失败", it) }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun readExitTrace(exit: ApplicationExitInfo): String? = runCatching {
+        val stream = exit.traceInputStream ?: return@runCatching null
+        val output = ArrayList<Byte>(MAX_EXIT_TRACE_BYTES)
+        var truncated = false
+        stream.use { input ->
+            val buffer = ByteArray(8 * 1024)
+            while (output.size < MAX_EXIT_TRACE_BYTES) {
+                val remaining = MAX_EXIT_TRACE_BYTES - output.size
+                val count = input.read(buffer, 0, minOf(buffer.size, remaining))
+                if (count < 0) break
+                repeat(count) { output.add(buffer[it]) }
+            }
+            truncated = input.read() >= 0
+        }
+        if (output.isEmpty()) return@runCatching null
+        val bytes = ByteArray(output.size) { output[it] }
+        val cleaned = bytes.toString(Charsets.UTF_8)
+            .map { char ->
+                when {
+                    char == '\n' || char == '\r' || char == '\t' -> char
+                    char.code >= 0x20 && char != '\u007f' -> char
+                    else -> ' '
+                }
+            }
+            .joinToString("")
+            .lineSequence()
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .take(240)
+            .joinToString("\n")
+            .take(64 * 1024)
+        if (cleaned.isBlank()) "追踪文件为二进制内容，共读取 ${bytes.size} 字节"
+        else buildString {
+            append(cleaned)
+            if (truncated) append("\n……追踪内容过长，已截断……")
+        }
+    }.getOrElse { throwable ->
+        "读取退出追踪失败：${throwable.javaClass.simpleName}: ${throwable.message.orEmpty()}"
     }
 
     private fun exitReason(reason: Int): String = when (reason) {

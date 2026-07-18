@@ -9,6 +9,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.RenderProcessGoneDetail
+import com.local.comfyuimobile.data.AppLogger
 import com.local.comfyuimobile.model.GeneratedPrompt
 import com.local.comfyuimobile.model.ParameterField
 import com.local.comfyuimobile.model.ParameterSection
@@ -34,6 +36,7 @@ class ComfyBridge(private val activity: Activity) {
     val webView: WebView = WebView(activity)
     @Volatile private var allowedOrigin: String = ""
     @Volatile private var pageLoadError: String? = null
+    @Volatile private var lastBridgePhase: String = "尚未执行前端脚本"
     private val pendingImageImports = ConcurrentHashMap<String, PendingImageImport>()
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -86,6 +89,14 @@ class ComfyBridge(private val activity: Activity) {
                 if (request.isForMainFrame) {
                     pageLoadError = "网页返回错误 ${errorResponse.statusCode}：${errorResponse.reasonPhrase}"
                 }
+            }
+
+            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                AppLogger.error(
+                    "WebView 渲染进程退出：崩溃=${detail.didCrash()}，" +
+                        "退出时优先级=${detail.rendererPriorityAtExit()}，最后阶段=$lastBridgePhase",
+                )
+                return false
             }
         }
     }
@@ -262,6 +273,8 @@ class ComfyBridge(private val activity: Activity) {
 
     suspend fun buildPrompt(fields: List<ParameterField>): GeneratedPrompt {
         awaitReady()
+        lastBridgePhase = "准备参数，共 ${fields.size} 项"
+        AppLogger.info("前端桥接：$lastBridgePhase")
         val updates = JSONArray().apply {
             fields.forEach { field ->
                 put(
@@ -273,7 +286,10 @@ class ComfyBridge(private val activity: Activity) {
             }
         }
         val encoded = Base64.getEncoder().encodeToString(updates.toString().toByteArray(Charsets.UTF_8))
+        AppLogger.info("前端桥接：参数序列化完成，Base64=${encoded.length} 字符")
         val response = evaluate(promptScript(encoded))
+        lastBridgePhase = "Prompt 已返回 Android，响应=${response.length} 字符"
+        AppLogger.info("前端桥接：$lastBridgePhase")
         val root = JSONObject(response)
         if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "生成 Prompt 失败"))
         val prompt = root.getJSONObject("prompt")
@@ -332,6 +348,7 @@ class ComfyBridge(private val activity: Activity) {
         val kickoff = """
             (() => {
               window.__comfyMobileResults = window.__comfyMobileResults || Object.create(null);
+              window.__comfyMobileCurrentPhase = '';
               (async () => {
                 try {
                   const value = await ($script);
@@ -354,18 +371,32 @@ class ComfyBridge(private val activity: Activity) {
             (() => {
               const store = window.__comfyMobileResults;
               const result = store?.[$quotedToken];
-              if (!result) return '';
+              const phase = String(window.__comfyMobileCurrentPhase || '');
+              if (!result && !phase) return '';
+              if (!result) return JSON.stringify({phase});
               delete store[$quotedToken];
-              return JSON.stringify(result);
+              return JSON.stringify({phase, result});
             })()
         """.trimIndent()
         val cleanup = "delete window.__comfyMobileResults?.[$quotedToken]"
         val deadline = System.currentTimeMillis() + timeoutMillis
+        var reportedPhase = ""
         try {
             while (System.currentTimeMillis() < deadline) {
                 val raw = evaluateImmediate(poll)
                 if (raw.isNotEmpty()) {
-                    val result = JSONObject(raw)
+                    val envelope = JSONObject(raw)
+                    val phase = envelope.optString("phase")
+                    if (phase.isNotBlank() && phase != reportedPhase) {
+                        reportedPhase = phase
+                        lastBridgePhase = phase
+                        AppLogger.info("前端桥接阶段：$phase")
+                    }
+                    val result = envelope.optJSONObject("result")
+                    if (result == null) {
+                        delay(50)
+                        continue
+                    }
                     val error = result.optString("error")
                     if (error.isNotBlank()) throw IllegalStateException(error)
                     return@withContext result.optString("value")
@@ -638,8 +669,16 @@ class ComfyBridge(private val activity: Activity) {
     private fun promptScript(encodedUpdates: String) = """
         (async () => {
           try {
+            const setPhase = (stage, node, widget) => {
+              const details = [stage];
+              if (node) details.push('节点=' + String(node.title || node.type || node.id), 'ID=' + String(node.id));
+              if (widget) details.push('控件=' + String(widget.name || widget.label || '?'));
+              window.__comfyMobileCurrentPhase = details.join('，');
+            };
+            setPhase('查找 ComfyUI 前端对象');
             const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
             if (!app) return JSON.stringify({ok:false, error:'ComfyUI 前端对象尚未就绪'});
+            setPhase('解析手机参数');
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedUpdates'), c => c.charCodeAt(0)));
             const updates = JSON.parse(text);
             const nodeMap = new Map();
@@ -653,7 +692,9 @@ class ComfyBridge(private val activity: Activity) {
                 visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
               }
             };
+            setPhase('扫描工作流节点');
             visit(app.rootGraph || app.graph);
+            setPhase('应用手机参数');
             for (const update of updates) {
               const cut = update.key.lastIndexOf('/');
               const node = nodeMap.get(update.key.slice(0, cut));
@@ -677,16 +718,27 @@ class ComfyBridge(private val activity: Activity) {
             for (const [nodeId, node] of nodeMap.entries()) {
               if (!relevantIds.has(String(nodeId))) continue;
               for (const widget of (node.widgets || [])) {
-                await widget.beforeQueued?.({isPartialExecution:false});
+                if (typeof widget.beforeQueued !== 'function') continue;
+                setPhase('执行排队前回调', node, widget);
+                try {
+                  widget.beforeQueued({isPartialExecution:false});
+                } catch (error) {
+                  throw new Error('节点 ' + String(node.title || node.type || node.id) +
+                    '（' + String(node.id) + '）控件 ' + String(widget.name || widget.label || '?') +
+                    ' 的排队前回调失败：' + String(error?.stack || error));
+                }
               }
             }
+            setPhase('转换 API Prompt');
             const result = await app.graphToPrompt();
+            setPhase('筛选当前输出链');
             for (const nodeId of Object.keys(result.output || {})) {
               if (!relevantIds.has(String(nodeId))) delete result.output[nodeId];
             }
             if (!Object.keys(result.output || {}).length) {
               return JSON.stringify({ok:false, error:'当前工作流没有可执行的输出链'});
             }
+            setPhase('序列化 Prompt 和工作流');
             return JSON.stringify({ok:true, prompt:result.output, workflow:result.workflow});
           } catch (error) {
             return JSON.stringify({ok:false, error:'生成参数转换错误：' + String(error?.stack || error)});
