@@ -87,6 +87,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         cacheOutputRules = stored.cacheOutputRules,
                         cacheClearedAt = stored.cacheClearedAt,
                         favoriteResultKeys = stored.favoriteResultKeys,
+                        recentWorkflowPaths = stored.recentWorkflows,
                         serverInput = it.activeServer?.baseUrl
                             ?: stored.activeServerUrl.ifBlank { it.serverInput },
                     )
@@ -467,6 +468,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun saveWorkflowAs(name: String) {
+        val document = _state.value.selectedWorkflow ?: return
+        viewModelScope.launch {
+            runOperation("工作流另存失败") {
+                _state.update { it.copy(loading = true, error = null) }
+                val folder = document.entry.path.substringBeforeLast('/', "workflows")
+                val fileName = WorkflowPath.fileName(name)
+                val destination = "$folder/$fileName"
+                require(destination != document.entry.path) { "另存名称不能与当前工作流相同" }
+                require(client.listWorkflows().none { it.path == destination }) { "同名工作流已存在，请换一个名称" }
+
+                val generated = (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
+                val savedJson = JSONObject(generated.workflowJson)
+                    .put("id", UUID.randomUUID().toString())
+                    .put("revision", 0)
+                    .toString()
+                val saved = client.writeWorkflow(destination, savedJson, overwrite = false)
+                val updated = document.copy(
+                    entry = saved,
+                    rawJson = savedJson,
+                    fields = _state.value.fields,
+                )
+                preferences.setRecentWorkflow(saved.path)
+                _state.update {
+                    it.copy(
+                        selectedWorkflow = updated,
+                        loading = false,
+                        nodeProblems = emptyMap(),
+                        notice = "已另存为 $fileName",
+                    )
+                }
+                refreshWorkflowsInternal()
+            }
+        }
+    }
+
     fun dismissWorkflowOverwrite() {
         _state.update { it.copy(workflowOverwriteRequired = false, workflowOverwriteReason = "") }
     }
@@ -495,6 +532,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val fileName = WorkflowPath.fileName(name)
                 val moved = client.moveWorkflow(document.entry.path, "$folder/$fileName")
                 _state.update { it.copy(selectedWorkflow = document.copy(entry = moved), notice = "已改名为 $fileName") }
+                preferences.setRecentWorkflow(moved.path, replacedPath = document.entry.path)
                 refreshWorkflowsInternal()
             }
         }
@@ -507,6 +545,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val destination = "${WorkflowPath.folder(folder)}/${document.entry.name}"
                 val moved = client.moveWorkflow(document.entry.path, destination)
                 _state.update { it.copy(selectedWorkflow = document.copy(entry = moved), notice = "已移动到 ${WorkflowPath.folder(folder)}") }
+                preferences.setRecentWorkflow(moved.path, replacedPath = document.entry.path)
                 refreshWorkflowsInternal()
             }
         }
@@ -517,6 +556,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runOperation("删除工作流失败") {
                 client.deleteWorkflow(document.entry.path)
+                preferences.removeRecentWorkflow(document.entry.path)
                 _state.update { it.copy(selectedWorkflow = null, fields = emptyList(), notice = "已删除 ${document.entry.name}") }
                 refreshWorkflowsInternal()
             }

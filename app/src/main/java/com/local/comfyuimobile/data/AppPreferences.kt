@@ -22,7 +22,7 @@ data class StoredSettings(
     val submittedJobs: Set<String> = emptySet(),
     val autoSaveResults: Boolean = false,
     val lastUpdateCheck: Long = 0L,
-    val recentWorkflow: String = "",
+    val recentWorkflows: List<String> = emptyList(),
     val cacheOutputRules: List<CacheOutputRule> = emptyList(),
     val cacheClearedAt: Long = 0L,
     val favoriteResultKeys: Set<String> = emptySet(),
@@ -37,6 +37,7 @@ class AppPreferences(private val context: Context) {
         val autoSaveResults = booleanPreferencesKey("auto_save_results")
         val lastUpdateCheck = longPreferencesKey("last_update_check")
         val recentWorkflow = stringPreferencesKey("recent_workflow")
+        val recentWorkflows = stringPreferencesKey("recent_workflows")
         val cacheOutputRules = stringPreferencesKey("cache_output_rules")
         val cacheClearedAt = longPreferencesKey("cache_cleared_at")
         val favoriteResultKeys = stringPreferencesKey("favorite_result_keys")
@@ -50,7 +51,9 @@ class AppPreferences(private val context: Context) {
             submittedJobs = decodeStrings(preferences[Keys.submittedJobs].orEmpty()).toSet(),
             autoSaveResults = preferences[Keys.autoSaveResults] ?: false,
             lastUpdateCheck = preferences[Keys.lastUpdateCheck] ?: 0L,
-            recentWorkflow = preferences[Keys.recentWorkflow].orEmpty(),
+            recentWorkflows = decodeStrings(preferences[Keys.recentWorkflows].orEmpty())
+                .ifEmpty { listOfNotNull(preferences[Keys.recentWorkflow]?.takeIf(String::isNotBlank)) }
+                .take(RecentWorkflows.MAX_SIZE),
             cacheOutputRules = decodeCacheOutputRules(preferences[Keys.cacheOutputRules].orEmpty()),
             cacheClearedAt = preferences[Keys.cacheClearedAt] ?: 0L,
             favoriteResultKeys = decodeStrings(preferences[Keys.favoriteResultKeys].orEmpty()).toSet(),
@@ -90,8 +93,28 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit { it[Keys.lastUpdateCheck] = timestamp }
     }
 
-    suspend fun setRecentWorkflow(path: String) {
-        context.dataStore.edit { it[Keys.recentWorkflow] = path }
+    suspend fun setRecentWorkflow(path: String, replacedPath: String? = null) {
+        context.dataStore.edit { preferences ->
+            val current = decodeStrings(preferences[Keys.recentWorkflows].orEmpty())
+                .ifEmpty { listOfNotNull(preferences[Keys.recentWorkflow]?.takeIf(String::isNotBlank)) }
+            val updated = RecentWorkflows.add(current, path, replacedPath)
+            preferences[Keys.recentWorkflow] = path
+            preferences[Keys.recentWorkflows] = encodeStrings(updated)
+        }
+    }
+
+    suspend fun removeRecentWorkflow(path: String) {
+        context.dataStore.edit { preferences ->
+            val updated = RecentWorkflows.remove(
+                decodeStrings(preferences[Keys.recentWorkflows].orEmpty()),
+                path,
+            )
+            preferences[Keys.recentWorkflows] = encodeStrings(updated)
+            if (preferences[Keys.recentWorkflow] == path) {
+                updated.firstOrNull()?.let { preferences[Keys.recentWorkflow] = it }
+                    ?: preferences.remove(Keys.recentWorkflow)
+            }
+        }
     }
 
     suspend fun saveCacheOutputRules(rules: List<CacheOutputRule>) {

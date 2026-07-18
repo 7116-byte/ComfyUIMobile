@@ -160,6 +160,7 @@ data class AppUiState(
     val systemStats: SystemStats? = null,
     val queueRemaining: Int = 0,
     val workflows: List<WorkflowEntry> = emptyList(),
+    val recentWorkflowPaths: List<String> = emptyList(),
     val selectedWorkflow: WorkflowDocument? = null,
     val fields: List<ParameterField> = emptyList(),
     val jobs: List<JobSummary> = emptyList(),

@@ -594,6 +594,9 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     var historyField by remember { mutableStateOf<ParameterField?>(null) }
     var uploadField by remember { mutableStateOf<ParameterField?>(null) }
     var cacheNode by remember { mutableStateOf<WorkflowNode?>(null) }
+    var recentMenuExpanded by remember { mutableStateOf(false) }
+    var saveAsDialog by remember { mutableStateOf(false) }
+    var saveAsName by remember { mutableStateOf("") }
     val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val field = uploadField
         if (uri != null && field != null) viewModel.uploadField(field, uri)
@@ -607,6 +610,10 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     val localProblems = FieldValidator.detailedProblems(state.fields)
     val localProblemsByNode = localProblems.groupBy { it.nodeId }.mapValues { (_, items) -> items.map { it.message } }
     val problemNodeIds = localProblemsByNode.keys + state.nodeProblems.keys
+    val recentWorkflows = state.recentWorkflowPaths.mapNotNull { path ->
+        state.workflows.firstOrNull { !it.isDirectory && it.path == path }
+    }.let { entries -> listOf(workflow.entry) + entries.filterNot { it.path == workflow.entry.path } }
+        .distinctBy { it.path }
     val listState = rememberLazyListState()
     LaunchedEffect(problemNodeIds) {
         if (problemNodeIds.isNotEmpty()) expandedNodeIds = expandedNodeIds + problemNodeIds
@@ -617,13 +624,93 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         if (index >= 0) listState.animateScrollToItem(index)
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(workflow.entry.name, style = MaterialTheme.typography.titleMedium)
-                Text("${nodes.size} 个流程部件 · ${state.fields.count { it.visible }} 个参数", style = MaterialTheme.typography.bodySmall)
+        Row(
+            Modifier.fillMaxWidth().padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(Modifier.weight(1f)) {
+                OutlinedCard(
+                    modifier = Modifier.fillMaxWidth().clickable { recentMenuExpanded = true },
+                    shape = RoundedCornerShape(18.dp),
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(workflow.entry.name, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                            Text(
+                                "${nodes.size} 个流程部件 · ${state.fields.count { it.visible }} 个参数",
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                            )
+                        }
+                        Icon(
+                            if (recentMenuExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            "选择最近打开的工作流",
+                        )
+                    }
+                }
+                DropdownMenu(
+                    expanded = recentMenuExpanded,
+                    onDismissRequest = { recentMenuExpanded = false },
+                ) {
+                    if (recentWorkflows.isEmpty()) {
+                        DropdownMenuItem(text = { Text("暂无最近打开的工作流") }, onClick = {}, enabled = false)
+                    } else {
+                        recentWorkflows.forEach { entry ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(entry.name, maxLines = 1)
+                                        Text(
+                                            entry.path.substringBeforeLast('/', "workflows"),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                        )
+                                    }
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        if (entry.path == workflow.entry.path) Icons.Default.CheckCircle else Icons.Default.History,
+                                        null,
+                                    )
+                                },
+                                onClick = {
+                                    recentMenuExpanded = false
+                                    if (entry.path != workflow.entry.path) viewModel.selectWorkflow(entry)
+                                },
+                            )
+                        }
+                    }
+                }
             }
             TextButton(onClick = { layoutDialog = true }) { Text("表单布局") }
-            FilledTonalButton(onClick = { viewModel.saveWorkflow() }) { Text("保存工作流") }
+            Surface(
+                modifier = Modifier.width(158.dp).height(48.dp),
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier.weight(1f).fillMaxHeight().clickable { viewModel.saveWorkflow() },
+                        contentAlignment = Alignment.Center,
+                    ) { Text("保存", color = MaterialTheme.colorScheme.onSecondaryContainer) }
+                    Box(
+                        Modifier.width(1.dp).fillMaxHeight(0.58f).background(MaterialTheme.colorScheme.outlineVariant),
+                    )
+                    Box(
+                        Modifier.weight(1f).fillMaxHeight().clickable {
+                            saveAsName = workflow.entry.name.substringBeforeLast('.') + "-副本"
+                            saveAsDialog = true
+                        },
+                        contentAlignment = Alignment.Center,
+                    ) { Text("另存", color = MaterialTheme.colorScheme.onSecondaryContainer) }
+                }
+            }
         }
         if (state.generationMessage.isNotBlank()) {
             OutlinedCard(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
@@ -694,6 +781,12 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     }
     if (historyField != null) PromptHistoryDialog(historyField!!, state, viewModel) { historyField = null }
     if (layoutDialog) LayoutDialog(state.fields, viewModel) { layoutDialog = false }
+    if (saveAsDialog) {
+        NameDialog("工作流另存为", saveAsName, { saveAsDialog = false }) {
+            viewModel.saveWorkflowAs(it)
+            saveAsDialog = false
+        }
+    }
     cacheNode?.let { node ->
         val cached = state.cacheOutputRules.any {
             it.serverUrl == state.activeServer?.baseUrl && it.nodeType == node.type
