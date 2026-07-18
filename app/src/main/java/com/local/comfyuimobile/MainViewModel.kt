@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.core.content.ContextCompat
@@ -34,6 +35,7 @@ import com.local.comfyuimobile.model.WorkflowDocument
 import com.local.comfyuimobile.model.WorkflowEntry
 import com.local.comfyuimobile.model.WorkflowNode
 import com.local.comfyuimobile.network.ComfyClient
+import com.local.comfyuimobile.network.ExecutionNodeResolver
 import com.local.comfyuimobile.network.LanAddress
 import com.local.comfyuimobile.network.LanScanner
 import com.local.comfyuimobile.network.ResultParser
@@ -55,6 +57,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
@@ -66,18 +70,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val client = ComfyClient()
     private val scanner = LanScanner(application, client)
     private val updates = UpdateManager(application)
-    private val clientId = UUID.randomUUID().toString()
+    private val clientId = application
+        .getSharedPreferences("comfy_mobile_runtime", android.content.Context.MODE_PRIVATE)
+        .let { store ->
+            store.getString("stable_client_id", null)?.takeIf { it.isNotBlank() }
+                ?: UUID.randomUUID().toString().also { store.edit().putString("stable_client_id", it).apply() }
+        }
     private val _state = MutableStateFlow(AppUiState(loggingEnabled = AppLogger.isEnabled(application)))
     val state: StateFlow<AppUiState> = _state.asStateFlow()
     private var bridge: ComfyBridge? = null
     private var reconnectJob: Job? = null
     private var parameterRefreshJob: Job? = null
     private var generationJob: Job? = null
+    private var workflowSaveJob: Job? = null
+    private var visibleNodeJob: Job? = null
+    private val bridgeOperationMutex = Mutex()
+    private val monitoredJobIds = mutableSetOf<String>()
+    private var visibleNodeChangedAt = 0L
     @Volatile private var lastUpdateCheck: Long = 0L
 
     init {
         viewModelScope.launch {
             preferences.settings.collect { stored ->
+                val submittedJobsChanged = _state.value.submittedJobIds != stored.submittedJobs
                 lastUpdateCheck = stored.lastUpdateCheck
                 _state.update {
                     it.copy(
@@ -92,6 +107,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         serverInput = it.activeServer?.baseUrl
                             ?: stored.activeServerUrl.ifBlank { it.serverInput },
                     )
+                }
+                if (submittedJobsChanged && _state.value.activeServer != null) {
+                    refreshTasksInternal()
                 }
             }
         }
@@ -372,7 +390,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun generate() {
-        if (_state.value.generating || generationJob?.isActive == true) return
+        if (
+            _state.value.generating || _state.value.loading ||
+            generationJob?.isActive == true || workflowSaveJob?.isActive == true
+        ) return
         val workflow = _state.value.selectedWorkflow ?: return
         AppLogger.info("开始提交生成：${workflow.entry.path}")
         _state.update {
@@ -386,7 +407,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         generationJob = viewModelScope.launch {
             runOperation("提交生成失败") {
-                val generated = (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
+                val generated = bridgeOperationMutex.withLock {
+                    (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
+                }
                 val response = try {
                     client.queuePrompt(
                         generated.promptJson,
@@ -431,16 +454,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveWorkflow(force: Boolean = false) {
+        if (workflowSaveJob?.isActive == true || generationJob?.isActive == true || _state.value.generating) return
         val document = _state.value.selectedWorkflow ?: return
-        viewModelScope.launch {
+        _state.update {
+            it.copy(
+                loading = true,
+                workflowOverwriteRequired = false,
+                workflowOverwriteReason = "",
+                error = null,
+            )
+        }
+        workflowSaveJob = viewModelScope.launch {
             runOperation("工作流保存失败") {
-                _state.update {
-                    it.copy(
-                        loading = true,
-                        workflowOverwriteRequired = false,
-                        workflowOverwriteReason = "",
-                    )
-                }
                 val current = client.listWorkflows().firstOrNull { it.path == document.entry.path }
                 if (!force && current != null) {
                     val changed = WorkflowPolicy.hasModifiedConflict(document.entry.modified, current.modified)
@@ -457,9 +482,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     return@runOperation
                 }
-                val generated = (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
-                val saved = client.writeWorkflow(document.entry.path, generated.workflowJson, overwrite = current != null)
-                val updated = document.copy(entry = saved, rawJson = generated.workflowJson, fields = _state.value.fields)
+                val workflowJson = bridgeOperationMutex.withLock {
+                    (bridge ?: error("前端桥接不可用")).syncWorkflow(_state.value.fields)
+                }
+                val saved = client.writeWorkflow(document.entry.path, workflowJson, overwrite = current != null)
+                val updated = document.copy(entry = saved, rawJson = workflowJson, fields = _state.value.fields)
                 _state.update {
                     it.copy(
                         selectedWorkflow = updated,
@@ -471,22 +498,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 refreshWorkflowsInternal()
             }
+        }.also { job ->
+            job.invokeOnCompletion {
+                if (workflowSaveJob === job) workflowSaveJob = null
+            }
         }
     }
 
     fun saveWorkflowAs(name: String) {
+        if (workflowSaveJob?.isActive == true || generationJob?.isActive == true || _state.value.generating) return
         val document = _state.value.selectedWorkflow ?: return
-        viewModelScope.launch {
+        _state.update { it.copy(loading = true, error = null) }
+        workflowSaveJob = viewModelScope.launch {
             runOperation("工作流另存失败") {
-                _state.update { it.copy(loading = true, error = null) }
                 val folder = document.entry.path.substringBeforeLast('/', "workflows")
                 val fileName = WorkflowPath.fileName(name)
                 val destination = "$folder/$fileName"
                 require(destination != document.entry.path) { "另存名称不能与当前工作流相同" }
                 require(client.listWorkflows().none { it.path == destination }) { "同名工作流已存在，请换一个名称" }
 
-                val generated = (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
-                val savedJson = JSONObject(generated.workflowJson)
+                val workflowJson = bridgeOperationMutex.withLock {
+                    (bridge ?: error("前端桥接不可用")).syncWorkflow(_state.value.fields)
+                }
+                val savedJson = JSONObject(workflowJson)
                     .put("id", UUID.randomUUID().toString())
                     .put("revision", 0)
                     .toString()
@@ -506,6 +540,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 refreshWorkflowsInternal()
+            }
+        }.also { job ->
+            job.invokeOnCompletion {
+                if (workflowSaveJob === job) workflowSaveJob = null
             }
         }
     }
@@ -941,6 +979,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (id.isNotBlank()) {
                     updateJob(id) { it.copy(state = JobState.RUNNING, progress = 0f, currentNode = null) }
                     if (id in _state.value.submittedJobIds) {
+                        visibleNodeJob?.cancel()
+                        visibleNodeChangedAt = 0L
                         _state.update {
                             it.copy(
                                 activeJobId = id,
@@ -978,24 +1018,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             "progress_state" -> {
                 ProgressStateParser.parse(data)?.let { update ->
-                    updateJob(update.promptId) { it.copy(progress = update.progress, currentNode = update.nodeId, state = JobState.RUNNING) }
-                    updateMonitor(update.promptId, (update.progress * 100).toInt(), update.nodeId)
+                    val nodeId = resolveVisibleNode(update.nodeId)
+                    updateJob(update.promptId) { it.copy(progress = update.progress, currentNode = nodeId, state = JobState.RUNNING) }
+                    updateMonitor(update.promptId, (update.progress * 100).toInt(), nodeId)
                     if (update.promptId in _state.value.submittedJobIds) {
-                        val title = _state.value.selectedWorkflow?.nodes?.firstOrNull { it.id == update.nodeId }?.title
-                        _state.update {
-                            it.copy(
-                                activeJobId = update.promptId,
-                                currentExecutingNodeId = update.nodeId,
-                                generationProgress = update.progress,
-                                generationMessage = "正在执行：${title ?: "部件 ${update.nodeId}"} · ${(update.progress * 100).toInt()}%",
-                            )
-                        }
+                        showVisibleExecutingNode(update.promptId, nodeId, update.progress)
                     }
                 }
             }
             "executing" -> {
                 val id = data.optTextOrEmpty("prompt_id")
-                val node = data.optTextOrEmpty("display_node").ifBlank { data.optTextOrEmpty("node") }
+                val runtimeNode = data.optTextOrEmpty("display_node_id")
+                    .ifBlank { data.optTextOrEmpty("display_node") }
+                    .ifBlank { data.optTextOrEmpty("node_id") }
+                    .ifBlank { data.optTextOrEmpty("node") }
+                val node = resolveVisibleNode(runtimeNode).orEmpty()
                 if (id.isNotBlank()) {
                     val previousState = _state.value.jobs.firstOrNull { it.id == id }?.state
                     val wasFailed = previousState in setOf(JobState.ERROR, JobState.CANCELLED)
@@ -1010,25 +1047,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (id in _state.value.submittedJobIds) {
                         if (node.isBlank()) {
                             if (!wasFailed) {
-                                _state.update {
-                                    it.copy(
-                                        activeJobId = id,
-                                        currentExecutingNodeId = null,
-                                        generationProgress = 1f,
-                                        generationMessage = "生成完成，正在后台保存本地作品",
-                                        notice = "生成完成：${id.take(8)}",
-                                    )
-                                }
+                                finishVisibleExecution(id)
                             }
                         } else {
-                            val title = _state.value.selectedWorkflow?.nodes?.firstOrNull { it.id == node }?.title
-                            _state.update {
-                                it.copy(
-                                    activeJobId = id,
-                                    currentExecutingNodeId = node,
-                                    generationMessage = "正在执行：${title ?: "部件 $node"}",
-                                )
-                            }
+                            showVisibleExecutingNode(id, node)
                         }
                     }
                     if (node.isBlank()) {
@@ -1047,15 +1069,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (id.isNotBlank()) {
                     updateJob(id) { it.copy(state = JobState.SUCCESS, progress = 1f, currentNode = null) }
                     if (id in _state.value.submittedJobIds) {
-                        _state.update {
-                            it.copy(
-                                activeJobId = id,
-                                currentExecutingNodeId = null,
-                                generationProgress = 1f,
-                                generationMessage = "生成完成，正在后台保存本地作品",
-                                notice = "生成完成：${id.take(8)}",
-                            )
-                        }
+                        finishVisibleExecution(id)
                     }
                 }
                 // 某些版本的 execution_success 早于历史落盘，保留延迟刷新作为兼容兜底。
@@ -1067,7 +1081,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             "execution_error", "execution_interrupted" -> {
                 val id = data.optTextOrEmpty("prompt_id")
-                val nodeId = data.optTextOrEmpty("node_id")
+                val nodeId = resolveVisibleNode(data.optTextOrEmpty("node_id")).orEmpty()
                 val detail = data.optTextOrEmpty("exception_message").ifBlank { if (type == "execution_interrupted") "任务已中断" else "服务器执行失败" }
                 if (id.isNotBlank()) {
                     updateJob(id) { it.copy(state = if (type == "execution_interrupted") JobState.CANCELLED else JobState.ERROR, currentNode = nodeId.ifBlank { null }, message = detail) }
@@ -1114,7 +1128,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     submittedByApp = fresh.id in submitted,
                 )
             }
-        }.onSuccess { jobs -> _state.update { it.copy(jobs = jobs) } }
+        }.onSuccess { jobs ->
+            val activeAppJobs = jobs.filter {
+                it.submittedByApp && it.state in setOf(JobState.RUNNING, JobState.PENDING)
+            }
+            val currentActiveId = _state.value.activeJobId
+            val recovered = activeAppJobs.firstOrNull { it.id == currentActiveId }
+                ?: activeAppJobs.firstOrNull { it.state == JobState.RUNNING }
+                ?: activeAppJobs.firstOrNull()
+            _state.update { ui ->
+                if (recovered == null) {
+                    ui.copy(jobs = jobs)
+                } else {
+                    val resolvedNode = ExecutionNodeResolver.resolve(recovered.currentNode, ui.selectedWorkflow?.nodes.orEmpty())
+                    ui.copy(
+                        jobs = jobs,
+                        activeJobId = recovered.id,
+                        currentExecutingNodeId = resolvedNode,
+                        generationProgress = recovered.progress,
+                        generationMessage = when {
+                            recovered.state == JobState.PENDING -> "已接管此前提交的任务，正在等待服务器执行"
+                            resolvedNode != null -> {
+                                val title = ui.selectedWorkflow?.nodes?.firstOrNull { it.id == resolvedNode }?.title
+                                "已接管运行中的任务：${title ?: "部件 $resolvedNode"}"
+                            }
+                            else -> "已接管此前提交的运行中任务"
+                        },
+                    )
+                }
+            }
+            activeAppJobs.forEach { job ->
+                startMonitor(
+                    job.id,
+                    job.workflowName.ifBlank {
+                        _state.value.selectedWorkflow?.entry?.name ?: "ComfyUI 工作流"
+                    },
+                )
+            }
+        }
     }
 
     private suspend fun refreshResultsInternal() {
@@ -1160,12 +1211,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun startMonitor(promptId: String, workflowName: String) {
+        if (!monitoredJobIds.add(promptId)) return
         val intent = Intent(app, JobMonitorService::class.java)
             .putExtra(JobMonitorService.EXTRA_BASE_URL, client.serverUrl())
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
             .putExtra(JobMonitorService.EXTRA_WORKFLOW_NAME, workflowName)
         runCatching { ContextCompat.startForegroundService(app, intent) }
             .onFailure { error ->
+                monitoredJobIds.remove(promptId)
                 AppLogger.error("后台监控启动失败，任务=$promptId", error)
                 _state.update {
                     it.copy(notice = "任务已提交，但后台监控启动失败：${error.message.orEmpty()}")
@@ -1185,6 +1238,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun stopMonitor(promptId: String) {
+        monitoredJobIds.remove(promptId)
         val intent = Intent(app, JobMonitorService::class.java)
             .setAction(JobMonitorService.ACTION_STOP)
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
@@ -1227,6 +1281,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { ui ->
             val current = ui.jobs.firstOrNull { it.id == id } ?: JobSummary(id, JobState.RUNNING, submittedByApp = id in ui.submittedJobIds)
             ui.copy(jobs = listOf(transform(current)) + ui.jobs.filterNot { it.id == id })
+        }
+    }
+
+    private fun resolveVisibleNode(runtimeNodeId: String?): String? =
+        ExecutionNodeResolver.resolve(runtimeNodeId, _state.value.selectedWorkflow?.nodes.orEmpty())
+
+    private fun showVisibleExecutingNode(promptId: String, nodeId: String?, progress: Float? = null) {
+        val resolvedNodeId = resolveVisibleNode(nodeId) ?: return
+        val applyUpdate = {
+            val title = _state.value.selectedWorkflow?.nodes?.firstOrNull { it.id == resolvedNodeId }?.title
+            val percent = progress?.let { " · ${(it * 100).toInt()}%" }.orEmpty()
+            _state.update { ui ->
+                if (promptId !in ui.submittedJobIds) ui else ui.copy(
+                    activeJobId = promptId,
+                    currentExecutingNodeId = resolvedNodeId,
+                    generationProgress = progress ?: ui.generationProgress,
+                    generationMessage = "正在执行：${title ?: "部件 $resolvedNodeId"}$percent",
+                )
+            }
+            visibleNodeChangedAt = SystemClock.elapsedRealtime()
+        }
+
+        val current = _state.value.currentExecutingNodeId
+        if (current == null || current == resolvedNodeId) {
+            visibleNodeJob?.cancel()
+            if (current == resolvedNodeId) {
+                val title = _state.value.selectedWorkflow?.nodes?.firstOrNull { it.id == resolvedNodeId }?.title
+                val percent = progress?.let { " · ${(it * 100).toInt()}%" }.orEmpty()
+                _state.update { ui ->
+                    ui.copy(
+                        activeJobId = promptId,
+                        generationProgress = progress ?: ui.generationProgress,
+                        generationMessage = "正在执行：${title ?: "部件 $resolvedNodeId"}$percent",
+                    )
+                }
+            } else {
+                applyUpdate()
+            }
+            return
+        }
+
+        val waitMillis = (MIN_VISIBLE_NODE_MILLIS - (SystemClock.elapsedRealtime() - visibleNodeChangedAt)).coerceAtLeast(0L)
+        visibleNodeJob?.cancel()
+        visibleNodeJob = viewModelScope.launch {
+            delay(waitMillis)
+            if (_state.value.activeJobId == promptId) applyUpdate()
+        }
+    }
+
+    private fun finishVisibleExecution(promptId: String) {
+        val waitMillis = (MIN_VISIBLE_NODE_MILLIS - (SystemClock.elapsedRealtime() - visibleNodeChangedAt)).coerceAtLeast(0L)
+        visibleNodeJob?.cancel()
+        visibleNodeJob = viewModelScope.launch {
+            delay(waitMillis)
+            _state.update { ui ->
+                if (ui.activeJobId != promptId) ui else ui.copy(
+                    currentExecutingNodeId = null,
+                    generationProgress = 1f,
+                    generationMessage = "生成完成，正在后台保存本地作品",
+                    notice = "生成完成：${promptId.take(8)}",
+                )
+            }
         }
     }
 
@@ -1290,5 +1406,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         client.closeWebSocket()
         super.onCleared()
+    }
+
+    private companion object {
+        const val MIN_VISIBLE_NODE_MILLIS = 450L
     }
 }

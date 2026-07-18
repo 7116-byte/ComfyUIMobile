@@ -157,7 +157,15 @@ class ComfyClient {
                     completed -> JobState.SUCCESS
                     else -> JobState.UNKNOWN
                 }
-                add(JobSummary(id = id, state = state, message = statusString))
+                val extraData = item.optJSONArray("prompt")?.optJSONObject(3)
+                add(
+                    JobSummary(
+                        id = id,
+                        state = state,
+                        workflowName = workflowName(extraData),
+                        message = statusString,
+                    ),
+                )
             }
         }
     }
@@ -320,10 +328,21 @@ class ComfyClient {
             repeat(array.length()) { index ->
                 val item = array.optJSONArray(index) ?: return@repeat
                 val id = item.optString(1)
-                if (id.isNotBlank()) add(JobSummary(id = id, state = state))
+                if (id.isNotBlank()) {
+                    add(
+                        JobSummary(
+                            id = id,
+                            state = state,
+                            workflowName = workflowName(item.optJSONObject(3)),
+                        ),
+                    )
+                }
             }
         }
     }
+
+    private fun workflowName(extraData: JSONObject?): String =
+        extraData?.optJSONObject("comfy_mobile")?.optString("workflow_name").orEmpty()
 
     private fun parseNodeProblems(nodeErrors: JSONObject?): Map<String, List<String>> {
         if (nodeErrors == null) return emptyMap()

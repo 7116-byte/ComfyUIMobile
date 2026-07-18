@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -43,6 +44,8 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -133,6 +136,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntSize
@@ -171,6 +175,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlin.random.Random
 
 private enum class MainPage(val label: String, val icon: ImageVector) {
@@ -727,7 +732,7 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
             }
         }
         LazyColumn(
-            Modifier.weight(1f),
+            Modifier.weight(1f).imePadding(),
             state = listState,
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -758,7 +763,11 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         }
         Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onClick = { viewModel.setAdvancedEditor(true) }, Modifier.weight(1f)) { Text("高级编辑") }
-            Button(onClick = viewModel::generate, enabled = !state.generating && state.bridgeReady && localProblems.isEmpty(), modifier = Modifier.weight(1f)) {
+            Button(
+                onClick = viewModel::generate,
+                enabled = !state.generating && !state.loading && state.bridgeReady && localProblems.isEmpty(),
+                modifier = Modifier.weight(1f),
+            ) {
                 Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("生成")
             }
         }
@@ -955,7 +964,13 @@ private fun ParameterEditor(field: ParameterField, viewModel: MainViewModel, onH
                 }
             }
             ParameterKind.IMAGE, ParameterKind.VIDEO -> {
-                OutlinedTextField(field.displayValue, { viewModel.updateField(field.key, it) }, Modifier.fillMaxWidth(), enabled = !field.linked, singleLine = true)
+                OutlinedTextField(
+                    field.displayValue,
+                    { viewModel.updateField(field.key, it) },
+                    focusedFieldModifier(Modifier.fillMaxWidth()),
+                    enabled = !field.linked,
+                    singleLine = true,
+                )
                 FilledTonalButton(onClick = onUpload, enabled = !field.linked) {
                     Icon(if (field.kind == ParameterKind.VIDEO) Icons.Default.VideoFile else Icons.Default.UploadFile, null)
                     Spacer(Modifier.width(6.dp)); Text("选择并上传")
@@ -964,11 +979,16 @@ private fun ParameterEditor(field: ParameterField, viewModel: MainViewModel, onH
             ParameterKind.MULTILINE -> OutlinedTextField(
                 value = field.displayValue,
                 onValueChange = { viewModel.updateField(field.key, it) },
-                modifier = Modifier.fillMaxWidth().height(140.dp),
+                modifier = focusedFieldModifier(Modifier.fillMaxWidth().height(140.dp)),
                 enabled = !field.linked,
                 minLines = 5,
             )
-            ParameterKind.TEXT -> OutlinedTextField(field.displayValue, { viewModel.updateField(field.key, it) }, Modifier.fillMaxWidth(), enabled = !field.linked)
+            ParameterKind.TEXT -> OutlinedTextField(
+                field.displayValue,
+                { viewModel.updateField(field.key, it) },
+                focusedFieldModifier(Modifier.fillMaxWidth()),
+                enabled = !field.linked,
+            )
             ParameterKind.UNSUPPORTED -> Text(field.warning ?: "此控件需在高级编辑中修改", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -1000,10 +1020,28 @@ private fun NumberField(field: ParameterField, viewModel: MainViewModel) {
     OutlinedTextField(
         value = field.displayValue,
         onValueChange = { viewModel.updateField(field.key, it) },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = focusedFieldModifier(Modifier.fillMaxWidth()),
         enabled = !field.linked,
         singleLine = true,
     )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun focusedFieldModifier(base: Modifier): Modifier {
+    val requester = remember { BringIntoViewRequester() }
+    val scope = rememberCoroutineScope()
+    return base
+        .bringIntoViewRequester(requester)
+        .onFocusChanged { focus ->
+            if (focus.isFocused) {
+                scope.launch {
+                    // 等软键盘完成占位后，再把真正获得焦点的参数移入可视区。
+                    delay(220)
+                    requester.bringIntoView()
+                }
+            }
+        }
 }
 
 @Composable
