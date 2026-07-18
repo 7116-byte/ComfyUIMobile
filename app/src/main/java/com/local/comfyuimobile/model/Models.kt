@@ -43,6 +43,7 @@ data class ParameterField(
     val widgetType: String,
     val kind: ParameterKind,
     val valueJson: String,
+    val originalValueJson: String = valueJson,
     val displayValue: String,
     val options: List<String> = emptyList(),
     val minimum: Double? = null,

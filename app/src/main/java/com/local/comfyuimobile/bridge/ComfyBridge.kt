@@ -307,33 +307,8 @@ class ComfyBridge(private val activity: Activity) {
         awaitReady()
         lastBridgePhase = "准备参数，共 ${fields.size} 项"
         AppLogger.info("前端桥接：$lastBridgePhase")
-        val updates = JSONArray().apply {
-            fields.forEach { field ->
-                put(
-                    JSONObject()
-                        .put("key", field.key)
-                        .put("widgetIndex", field.widgetIndex)
-                        .put("value", parseJsonValue(field.valueJson)),
-                )
-            }
-        }
-        val encoded = Base64.getEncoder().encodeToString(updates.toString().toByteArray(Charsets.UTF_8))
-        AppLogger.info("前端桥接：参数序列化完成，Base64=${encoded.length} 字符")
-
-        lastBridgePhase = "比较参数变更"
-        AppLogger.info("前端桥接阶段：$lastBridgePhase")
-        val changedResponse = withContext(Dispatchers.Main.immediate) {
-            evaluateImmediate(promptChangedFieldsScript(encoded))
-        }
-        val changedRoot = JSONObject(changedResponse)
-        if (!changedRoot.optBoolean("ok")) {
-            throw IllegalStateException(changedRoot.optString("error", "比较参数变更失败"))
-        }
-        val changedKeys = changedRoot.getJSONArray("changed").let { array ->
-            buildSet { repeat(array.length()) { add(array.getString(it)) } }
-        }
-        val changedFields = fields.filter { it.key in changedKeys }
-        AppLogger.info("前端桥接：仅应用实际修改参数，共 ${changedFields.size} 项")
+        val changedFields = fields.filter { it.valueJson != it.originalValueJson }
+        AppLogger.info("前端桥接：Android 已比较参数，仅应用实际修改，共 ${changedFields.size} 项")
 
         for (field in changedFields) {
             lastBridgePhase = "应用参数：${field.nodeTitle}/${field.label}（${field.key}）"
@@ -791,20 +766,10 @@ class ComfyBridge(private val activity: Activity) {
           try {
             const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
             if (!app) return JSON.stringify({ok:false, error:'ComfyUI 前端对象尚未就绪'});
+            const graph = app.rootGraph || app.graph;
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedUpdates'), c => c.charCodeAt(0)));
             const updates = JSON.parse(text);
-            const nodeMap = new Map();
-            const visit = (graph, prefix = '') => {
-              for (const node of (graph?._nodes || [])) {
-                const nodeKey = prefix + String(node.id);
-                nodeMap.set(nodeKey, node);
-                if (node.subgraph) visit(node.subgraph, nodeKey + ':');
-              }
-              for (const [id, subgraph] of (graph?.subgraphs?.entries?.() || [])) {
-                visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
-              }
-            };
-            visit(app.rootGraph || app.graph);
+            const nodeMap = new Map((graph?._nodes || []).map(node => [String(node.id), node]));
             for (const update of updates) {
               const cut = update.key.lastIndexOf('/');
               const node = nodeMap.get(update.key.slice(0, cut));
@@ -831,67 +796,13 @@ class ComfyBridge(private val activity: Activity) {
         })()
     """.trimIndent()
 
-    private fun promptChangedFieldsScript(encodedUpdates: String) = """
-        (() => {
-          try {
-            const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
-            const graph = app?.rootGraph || app?.graph;
-            if (!graph) return JSON.stringify({ok:false, error:'ComfyUI 工作流画布尚未就绪'});
-            const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedUpdates'), c => c.charCodeAt(0)));
-            const updates = JSON.parse(text);
-            const nodeMap = new Map();
-            const visit = (current, prefix = '') => {
-              for (const node of (current?._nodes || [])) {
-                const nodeKey = prefix + String(node.id);
-                nodeMap.set(nodeKey, node);
-                if (node.subgraph) visit(node.subgraph, nodeKey + ':');
-              }
-              for (const [id, subgraph] of (current?.subgraphs?.entries?.() || [])) {
-                visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
-              }
-            };
-            visit(graph);
-            const equal = (left, right) => {
-              if (Object.is(left, right)) return true;
-              try { return JSON.stringify(left) === JSON.stringify(right); } catch (_) { return false; }
-            };
-            const changed = [];
-            for (const update of updates) {
-              const cut = update.key.lastIndexOf('/');
-              const node = nodeMap.get(update.key.slice(0, cut));
-              const widget = update.widgetIndex >= 0
-                ? node?.widgets?.[update.widgetIndex]
-                : node?.widgets?.find(w => w.name === update.key.slice(cut + 1));
-              if (!widget) continue;
-              const groupToggle = widget.value && typeof widget.value === 'object' && typeof widget.value.toggled === 'boolean';
-              const currentValue = groupToggle ? widget.value.toggled : widget.value;
-              if (!equal(currentValue, update.value)) changed.push(update.key);
-            }
-            return JSON.stringify({ok:true, changed});
-          } catch (error) {
-            return JSON.stringify({ok:false, error:'比较参数变更错误：' + String(error?.stack || error)});
-          }
-        })()
-    """.trimIndent()
-
     private val PROMPT_BEFORE_QUEUE_SCRIPT = """
         (() => {
           try {
             const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
             const graph = app?.rootGraph || app?.graph;
             if (!graph) return JSON.stringify({ok:false, error:'ComfyUI 工作流画布尚未就绪'});
-            const nodeMap = new Map();
-            const visit = (current, prefix = '') => {
-              for (const node of (current?._nodes || [])) {
-                const nodeKey = prefix + String(node.id);
-                nodeMap.set(nodeKey, node);
-                if (node.subgraph) visit(node.subgraph, nodeKey + ':');
-              }
-              for (const [id, subgraph] of (current?.subgraphs?.entries?.() || [])) {
-                visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
-              }
-            };
-            visit(graph);
+            const nodeMap = new Map((graph._nodes || []).map(node => [String(node.id), node]));
             const relevantIds = window.__comfyMobileRelevantNodeIds || new Set();
             for (const [nodeId, node] of nodeMap.entries()) {
               if (!relevantIds.has(String(nodeId))) continue;
@@ -926,15 +837,7 @@ class ComfyBridge(private val activity: Activity) {
             const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
             if (!app) return JSON.stringify({ok:false, error:'ComfyUI 前端对象尚未就绪'});
             const graph = app.rootGraph || app.graph;
-            const nodeMap = new Map();
-            const visit = (current) => {
-              for (const node of (current?._nodes || [])) {
-                nodeMap.set(String(node.id), node);
-                if (node.subgraph) visit(node.subgraph);
-              }
-              for (const subgraph of (current?.subgraphs?.values?.() || [])) visit(subgraph);
-            };
-            visit(graph);
+            const nodeMap = new Map((graph?._nodes || []).map(node => [String(node.id), node]));
             const restores = [];
             const wrap = (object, key, stage, node, widget) => {
               const original = object?.[key];
@@ -986,18 +889,7 @@ class ComfyBridge(private val activity: Activity) {
             if (!graph) return JSON.stringify({ok:false, error:'ComfyUI 工作流画布尚未就绪'});
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedUpdates'), c => c.charCodeAt(0)));
             const updates = JSON.parse(text);
-            const nodeMap = new Map();
-            const visit = (current, prefix = '') => {
-              for (const node of (current?._nodes || [])) {
-                const nodeKey = prefix + String(node.id);
-                nodeMap.set(nodeKey, node);
-                if (node.subgraph) visit(node.subgraph, nodeKey + ':');
-              }
-              for (const [id, subgraph] of (current?.subgraphs?.entries?.() || [])) {
-                visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
-              }
-            };
-            visit(graph);
+            const nodeMap = new Map((graph._nodes || []).map(node => [String(node.id), node]));
             for (const update of updates) {
               const cut = update.key.lastIndexOf('/');
               const node = nodeMap.get(update.key.slice(0, cut));
