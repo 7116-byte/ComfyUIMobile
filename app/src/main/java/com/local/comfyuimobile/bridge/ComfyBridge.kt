@@ -50,6 +50,7 @@ class ComfyBridge(private val activity: Activity) {
     @SuppressLint("SetJavaScriptEnabled")
     fun configure() {
         configureWebView(webView)
+        logWebViewRuntime("初始化")
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -123,6 +124,7 @@ class ComfyBridge(private val activity: Activity) {
                     val replacement = WebView(activity)
                     configureWebView(replacement)
                     webView = replacement
+                    logWebViewRuntime("崩溃后重建")
                     if (origin.isNotBlank()) replacement.loadUrl("$origin/")
                 }
                 // 返回 true 表示已处理；返回 false 会让 Android 连带杀死整个 App。
@@ -317,7 +319,26 @@ class ComfyBridge(private val activity: Activity) {
         }
         val encoded = Base64.getEncoder().encodeToString(updates.toString().toByteArray(Charsets.UTF_8))
         AppLogger.info("前端桥接：参数序列化完成，Base64=${encoded.length} 字符")
-        val response = evaluate(promptScript(encoded))
+
+        lastBridgePhase = "应用手机参数"
+        AppLogger.info("前端桥接阶段：$lastBridgePhase")
+        val applyResponse = withContext(Dispatchers.Main.immediate) { evaluateImmediate(promptApplyScript(encoded)) }
+        val applyRoot = JSONObject(applyResponse)
+        if (!applyRoot.optBoolean("ok")) {
+            throw IllegalStateException(applyRoot.optString("error", "应用手机参数失败"))
+        }
+
+        lastBridgePhase = "执行排队前回调"
+        AppLogger.info("前端桥接阶段：$lastBridgePhase")
+        val callbackResponse = withContext(Dispatchers.Main.immediate) { evaluateImmediate(PROMPT_BEFORE_QUEUE_SCRIPT) }
+        val callbackRoot = JSONObject(callbackResponse)
+        if (!callbackRoot.optBoolean("ok")) {
+            throw IllegalStateException(callbackRoot.optString("error", "执行排队前回调失败"))
+        }
+
+        lastBridgePhase = "调用官方 graphToPrompt"
+        AppLogger.info("前端桥接阶段：$lastBridgePhase")
+        val response = evaluate(PROMPT_CONVERT_SCRIPT)
         lastBridgePhase = "Prompt 已返回 Android，响应=${response.length} 字符"
         AppLogger.info("前端桥接：$lastBridgePhase")
         val root = JSONObject(response)
@@ -393,7 +414,7 @@ class ComfyBridge(private val activity: Activity) {
                     };
                   }
                 })();
-              }, 0);
+              }, 250);
               return 'started';
             })()
         """.trimIndent()
@@ -481,6 +502,14 @@ class ComfyBridge(private val activity: Activity) {
     private fun rendererGoneException() = IllegalStateException(
         "ComfyUI 网页渲染进程崩溃，前端桥接已自动重建。请等待连接恢复后重新生成。最后阶段：$lastBridgePhase",
     )
+
+    private fun logWebViewRuntime(action: String) {
+        val packageInfo = WebView.getCurrentWebViewPackage()
+        AppLogger.info(
+            "WebView 运行时（$action）：包=${packageInfo?.packageName.orEmpty()}，" +
+                "版本=${packageInfo?.versionName.orEmpty()}",
+        )
+    }
 
     private fun decodeJavascriptResult(value: String): String {
         if (value == "null" || value.isBlank()) return "{}"
@@ -729,19 +758,11 @@ class ComfyBridge(private val activity: Activity) {
         })()
     """.trimIndent()
 
-    private fun promptScript(encodedUpdates: String) = """
-        (async () => {
+    private fun promptApplyScript(encodedUpdates: String) = """
+        (() => {
           try {
-            const setPhase = (stage, node, widget) => {
-              const details = [stage];
-              if (node) details.push('节点=' + String(node.title || node.type || node.id), 'ID=' + String(node.id));
-              if (widget) details.push('控件=' + String(widget.name || widget.label || '?'));
-              window.__comfyMobileCurrentPhase = details.join('，');
-            };
-            setPhase('查找 ComfyUI 前端对象');
             const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
             if (!app) return JSON.stringify({ok:false, error:'ComfyUI 前端对象尚未就绪'});
-            setPhase('解析手机参数');
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedUpdates'), c => c.charCodeAt(0)));
             const updates = JSON.parse(text);
             const nodeMap = new Map();
@@ -755,9 +776,7 @@ class ComfyBridge(private val activity: Activity) {
                 visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
               }
             };
-            setPhase('扫描工作流节点');
             visit(app.rootGraph || app.graph);
-            setPhase('应用手机参数');
             for (const update of updates) {
               const cut = update.key.lastIndexOf('/');
               const node = nodeMap.get(update.key.slice(0, cut));
@@ -777,12 +796,36 @@ class ComfyBridge(private val activity: Activity) {
                 try { widget.callback?.(update.value, app.canvas, node); } catch (_) {}
               }
             }
+            return JSON.stringify({ok:true});
+          } catch (error) {
+            return JSON.stringify({ok:false, error:'应用手机参数错误：' + String(error?.stack || error)});
+          }
+        })()
+    """.trimIndent()
+
+    private val PROMPT_BEFORE_QUEUE_SCRIPT = """
+        (() => {
+          try {
+            const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
+            const graph = app?.rootGraph || app?.graph;
+            if (!graph) return JSON.stringify({ok:false, error:'ComfyUI 工作流画布尚未就绪'});
+            const nodeMap = new Map();
+            const visit = (current, prefix = '') => {
+              for (const node of (current?._nodes || [])) {
+                const nodeKey = prefix + String(node.id);
+                nodeMap.set(nodeKey, node);
+                if (node.subgraph) visit(node.subgraph, nodeKey + ':');
+              }
+              for (const [id, subgraph] of (current?.subgraphs?.entries?.() || [])) {
+                visit(subgraph, prefix + 'subgraph:' + String(id) + ':');
+              }
+            };
+            visit(graph);
             const relevantIds = window.__comfyMobileRelevantNodeIds || new Set();
             for (const [nodeId, node] of nodeMap.entries()) {
               if (!relevantIds.has(String(nodeId))) continue;
               for (const widget of (node.widgets || [])) {
                 if (typeof widget.beforeQueued !== 'function') continue;
-                setPhase('执行排队前回调', node, widget);
                 try {
                   widget.beforeQueued({isPartialExecution:false});
                 } catch (error) {
@@ -792,8 +835,35 @@ class ComfyBridge(private val activity: Activity) {
                 }
               }
             }
-            setPhase('准备转换 API Prompt');
+            return JSON.stringify({ok:true});
+          } catch (error) {
+            return JSON.stringify({ok:false, error:'排队前回调错误：' + String(error?.stack || error)});
+          }
+        })()
+    """.trimIndent()
+
+    private val PROMPT_CONVERT_SCRIPT = """
+        (async () => {
+          try {
+            const setPhase = (stage, node, widget) => {
+              const details = [stage];
+              if (node) details.push('节点=' + String(node.title || node.type || node.id), 'ID=' + String(node.id));
+              if (widget) details.push('控件=' + String(widget.name || widget.label || '?'));
+              window.__comfyMobileCurrentPhase = details.join('，');
+            };
+            setPhase('查找 ComfyUI 前端对象');
+            const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
+            if (!app) return JSON.stringify({ok:false, error:'ComfyUI 前端对象尚未就绪'});
             const graph = app.rootGraph || app.graph;
+            const nodeMap = new Map();
+            const visit = (current) => {
+              for (const node of (current?._nodes || [])) {
+                nodeMap.set(String(node.id), node);
+                if (node.subgraph) visit(node.subgraph);
+              }
+              for (const subgraph of (current?.subgraphs?.values?.() || [])) visit(subgraph);
+            };
+            visit(graph);
             const restores = [];
             const wrap = (object, key, stage, node, widget) => {
               const original = object?.[key];
@@ -822,6 +892,7 @@ class ComfyBridge(private val activity: Activity) {
               }
             }
             setPhase('筛选当前输出链');
+            const relevantIds = window.__comfyMobileRelevantNodeIds || new Set();
             for (const nodeId of Object.keys(result.output || {})) {
               if (!relevantIds.has(String(nodeId))) delete result.output[nodeId];
             }
