@@ -22,6 +22,7 @@ import com.local.comfyuimobile.model.WorkflowConnectionMarker
 import com.local.comfyuimobile.model.WorkflowManifest
 import com.local.comfyuimobile.model.WorkflowNode
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
@@ -44,6 +45,7 @@ class ComfyBridge(private val activity: Activity) {
     @Volatile private var lastBridgePhase: String = "尚未执行前端脚本"
     @Volatile private var rendererEpoch: Int = 0
     private val pendingImageImports = ConcurrentHashMap<String, PendingImageImport>()
+    private val pendingEvaluations = ConcurrentHashMap<String, CancellableContinuation<String>>()
 
     @SuppressLint("SetJavaScriptEnabled")
     fun configure() {
@@ -108,6 +110,12 @@ class ComfyBridge(private val activity: Activity) {
                 rendererEpoch += 1
                 pageLoadError = "ComfyUI 网页渲染进程崩溃，已自动重建前端桥接"
                 AppLogger.error(message)
+                val rendererError = rendererGoneException()
+                pendingEvaluations.entries.toList().forEach { (id, continuation) ->
+                    if (pendingEvaluations.remove(id, continuation) && continuation.isActive) {
+                        continuation.resumeWithException(rendererError)
+                    }
+                }
 
                 if (webView === view) {
                     val origin = allowedOrigin
@@ -372,18 +380,20 @@ class ComfyBridge(private val activity: Activity) {
             (() => {
               window.__comfyMobileResults = window.__comfyMobileResults || Object.create(null);
               window.__comfyMobileCurrentPhase = '';
-              (async () => {
-                try {
-                  const value = await ($script);
-                  window.__comfyMobileResults[$quotedToken] = {
-                    value: typeof value === 'string' ? value : JSON.stringify(value ?? null)
-                  };
-                } catch (error) {
-                  window.__comfyMobileResults[$quotedToken] = {
-                    error: String(error?.stack || error)
-                  };
-                }
-              })();
+              setTimeout(() => {
+                (async () => {
+                  try {
+                    const value = await ($script);
+                    window.__comfyMobileResults[$quotedToken] = {
+                      value: typeof value === 'string' ? value : JSON.stringify(value ?? null)
+                    };
+                  } catch (error) {
+                    window.__comfyMobileResults[$quotedToken] = {
+                      error: String(error?.stack || error)
+                    };
+                  }
+                })();
+              }, 0);
               return 'started';
             })()
         """.trimIndent()
@@ -447,12 +457,23 @@ class ComfyBridge(private val activity: Activity) {
     private suspend fun evaluateImmediate(script: String): String =
         withTimeout(10_000L) {
             suspendCancellableCoroutine { continuation ->
+                val evaluationId = UUID.randomUUID().toString()
                 val target = webView
-                target.evaluateJavascript(script) { encodedResult ->
-                    if (!continuation.isActive) return@evaluateJavascript
-                    runCatching { decodeJavascriptResult(encodedResult) }
-                        .onSuccess(continuation::resume)
-                        .onFailure(continuation::resumeWithException)
+                pendingEvaluations[evaluationId] = continuation
+                continuation.invokeOnCancellation { pendingEvaluations.remove(evaluationId, continuation) }
+                runCatching {
+                    target.evaluateJavascript(script) { encodedResult ->
+                        if (!pendingEvaluations.remove(evaluationId, continuation) || !continuation.isActive) {
+                            return@evaluateJavascript
+                        }
+                        runCatching { decodeJavascriptResult(encodedResult) }
+                            .onSuccess(continuation::resume)
+                            .onFailure(continuation::resumeWithException)
+                    }
+                }.onFailure { throwable ->
+                    if (pendingEvaluations.remove(evaluationId, continuation) && continuation.isActive) {
+                        continuation.resumeWithException(throwable)
+                    }
                 }
             }
         }
@@ -771,8 +792,35 @@ class ComfyBridge(private val activity: Activity) {
                 }
               }
             }
-            setPhase('转换 API Prompt');
-            const result = await app.graphToPrompt();
+            setPhase('准备转换 API Prompt');
+            const graph = app.rootGraph || app.graph;
+            const restores = [];
+            const wrap = (object, key, stage, node, widget) => {
+              const original = object?.[key];
+              if (typeof original !== 'function') return;
+              try {
+                object[key] = function(...args) {
+                  setPhase(stage, node, widget);
+                  return original.apply(this, args);
+                };
+                restores.push(() => { object[key] = original; });
+              } catch (_) {}
+            };
+            wrap(graph, 'computeExecutionOrder', '计算节点执行顺序');
+            wrap(graph, 'serialize', '序列化画布工作流');
+            for (const node of nodeMap.values()) {
+              for (const widget of (node.widgets || [])) {
+                wrap(widget, 'serializeValue', '序列化节点控件', node, widget);
+              }
+            }
+            let result;
+            try {
+              result = await app.graphToPrompt();
+            } finally {
+              for (const restore of restores.reverse()) {
+                try { restore(); } catch (_) {}
+              }
+            }
             setPhase('筛选当前输出链');
             for (const nodeId of Object.keys(result.output || {})) {
               if (!relevantIds.has(String(nodeId))) delete result.output[nodeId];
