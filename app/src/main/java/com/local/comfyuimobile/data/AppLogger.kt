@@ -20,6 +20,10 @@ object AppLogger {
     private const val LAST_EXIT_TIMESTAMP = "last_exit_timestamp"
     private const val MAX_BYTES = 2L * 1024L * 1024L
     private const val MAX_EXIT_TRACE_BYTES = 128 * 1024
+    private val traceKeyword = Regex(
+        "fatal|sig[a-z0-9]+|crash|webview|chromium|abort|backtrace|fingerprint|abi|process|pid|tid|signal|tombstone|\\.so\\b",
+        RegexOption.IGNORE_CASE,
+    )
     private val lock = Any()
     private val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.CHINA)
     @Volatile private var context: Context? = null
@@ -59,7 +63,11 @@ object AppLogger {
         val folder = File(app.filesDir, "logs")
         val previous = File(folder, "comfy-mobile.previous.log").takeIf(File::isFile)?.readText().orEmpty()
         val current = File(folder, "comfy-mobile.log").takeIf(File::isFile)?.readText().orEmpty()
-        listOf(previous, current).filter(String::isNotBlank).joinToString("\n").ifBlank { "暂无诊断日志" }
+        listOf(previous, current)
+            .filter(String::isNotBlank)
+            .joinToString("\n")
+            .let(::compactBinaryTraceForDisplay)
+            .ifBlank { "暂无诊断日志" }
     }
 
     fun clear() = synchronized(lock) {
@@ -143,29 +151,45 @@ object AppLogger {
         }
         if (output.isEmpty()) return@runCatching null
         val bytes = ByteArray(output.size) { output[it] }
-        val cleaned = bytes.toString(Charsets.UTF_8)
-            .map { char ->
-                when {
-                    char == '\n' || char == '\r' || char == '\t' -> char
-                    char.code >= 0x20 && char != '\u007f' -> char
-                    else -> ' '
-                }
-            }
-            .joinToString("")
-            .lineSequence()
-            .map(String::trim)
-            .filter(String::isNotBlank)
-            .take(240)
-            .joinToString("\n")
-            .take(64 * 1024)
-        if (cleaned.isBlank()) "追踪文件为二进制内容，共读取 ${bytes.size} 字节"
+        val readable = extractReadableTrace(bytes)
+        if (readable.isBlank()) "二进制追踪中未提取到可读的崩溃信息，共读取 ${bytes.size} 字节"
         else buildString {
-            append(cleaned)
+            append(readable)
             if (truncated) append("\n……追踪内容过长，已截断……")
         }
     }.getOrElse { throwable ->
         "读取退出追踪失败：${throwable.javaClass.simpleName}: ${throwable.message.orEmpty()}"
     }
+
+    private fun extractReadableTrace(bytes: ByteArray): String {
+        val runs = mutableListOf<String>()
+        val current = StringBuilder()
+        fun flush() {
+            current.toString().trim().takeIf { it.length >= 4 }?.let(runs::add)
+            current.clear()
+        }
+        bytes.forEach { byte ->
+            val value = byte.toInt() and 0xff
+            if (value in 0x20..0x7e || value == '\t'.code) current.append(value.toChar()) else flush()
+        }
+        flush()
+        val distinct = runs.asSequence().map(String::trim).filter(String::isNotBlank).distinct().toList()
+        val important = distinct.filter(traceKeyword::containsMatchIn)
+        return (important.ifEmpty { distinct.take(12) })
+            .take(60)
+            .joinToString("\n")
+            .take(16 * 1024)
+    }
+
+    private fun compactBinaryTraceForDisplay(raw: String): String = raw.lineSequence()
+        .mapNotNull { line ->
+            if (line.count { it == '\uFFFD' } < 3) return@mapNotNull line
+            val ascii = line.map { char ->
+                if (char.code in 0x20..0x7e || char == '\t') char else ' '
+            }.joinToString("").replace(Regex("[ \\t]+"), " ").trim()
+            ascii.takeIf(traceKeyword::containsMatchIn)?.take(1_200)
+        }
+        .joinToString("\n")
 
     private fun exitReason(reason: Int): String = when (reason) {
         ApplicationExitInfo.REASON_CRASH -> "Java/Kotlin 闪退"

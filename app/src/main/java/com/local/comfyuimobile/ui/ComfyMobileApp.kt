@@ -116,6 +116,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -223,17 +224,19 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
                     ConnectedApp(state, viewModel, snackbar)
                 }
             }
-            AndroidView(
-                factory = { bridge.webView },
-                update = { view ->
-                    if (state.advancedEditor) {
-                        view.onResume()
-                        view.requestLayout()
-                        view.invalidate()
-                    }
-                },
-                modifier = if (state.advancedEditor) Modifier.fillMaxSize() else Modifier.size(1.dp).alpha(0f),
-            )
+            key(bridge.webView) {
+                AndroidView(
+                    factory = { bridge.webView },
+                    update = { view ->
+                        if (state.advancedEditor) {
+                            view.onResume()
+                            view.requestLayout()
+                            view.invalidate()
+                        }
+                    },
+                    modifier = if (state.advancedEditor) Modifier.fillMaxSize() else Modifier.size(1.dp).alpha(0f),
+                )
+            }
         }
     }
 }

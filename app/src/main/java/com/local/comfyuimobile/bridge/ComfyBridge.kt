@@ -7,20 +7,24 @@ import android.net.Uri
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.RenderProcessGoneDetail
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.local.comfyuimobile.data.AppLogger
+import com.local.comfyuimobile.data.WorkflowPolicy
 import com.local.comfyuimobile.model.GeneratedPrompt
 import com.local.comfyuimobile.model.ParameterField
 import com.local.comfyuimobile.model.ParameterSection
-import com.local.comfyuimobile.model.WorkflowManifest
 import com.local.comfyuimobile.model.WorkflowConnectionMarker
+import com.local.comfyuimobile.model.WorkflowManifest
 import com.local.comfyuimobile.model.WorkflowNode
-import com.local.comfyuimobile.data.WorkflowPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -33,21 +37,28 @@ import kotlin.coroutines.resumeWithException
 class ComfyBridge(private val activity: Activity) {
     private data class PendingImageImport(val uri: Uri, val mimeType: String)
 
-    val webView: WebView = WebView(activity)
+    var webView: WebView by mutableStateOf(WebView(activity))
+        private set
     @Volatile private var allowedOrigin: String = ""
     @Volatile private var pageLoadError: String? = null
     @Volatile private var lastBridgePhase: String = "尚未执行前端脚本"
+    @Volatile private var rendererEpoch: Int = 0
     private val pendingImageImports = ConcurrentHashMap<String, PendingImageImport>()
 
     @SuppressLint("SetJavaScriptEnabled")
     fun configure() {
-        webView.settings.javaScriptEnabled = true
-        webView.settings.domStorageEnabled = true
-        webView.settings.databaseEnabled = true
-        webView.settings.mediaPlaybackRequiresUserGesture = false
-        webView.settings.allowFileAccess = false
-        webView.settings.allowContentAccess = false
-        webView.webViewClient = object : WebViewClient() {
+        configureWebView(webView)
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun configureWebView(target: WebView) {
+        target.settings.javaScriptEnabled = true
+        target.settings.domStorageEnabled = true
+        target.settings.databaseEnabled = true
+        target.settings.mediaPlaybackRequiresUserGesture = false
+        target.settings.allowFileAccess = false
+        target.settings.allowContentAccess = false
+        target.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                 val token = request.url.pathSegments
                     .takeIf { it.size == 2 && it[0] == IMAGE_IMPORT_PATH }
@@ -92,11 +103,22 @@ class ComfyBridge(private val activity: Activity) {
             }
 
             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
-                AppLogger.error(
-                    "WebView 渲染进程退出：崩溃=${detail.didCrash()}，" +
-                        "退出时优先级=${detail.rendererPriorityAtExit()}，最后阶段=$lastBridgePhase",
-                )
-                return false
+                val message = "WebView 渲染进程退出：崩溃=${detail.didCrash()}，" +
+                    "退出时优先级=${detail.rendererPriorityAtExit()}，最后阶段=$lastBridgePhase"
+                rendererEpoch += 1
+                pageLoadError = "ComfyUI 网页渲染进程崩溃，已自动重建前端桥接"
+                AppLogger.error(message)
+
+                if (webView === view) {
+                    val origin = allowedOrigin
+                    view.destroy()
+                    val replacement = WebView(activity)
+                    configureWebView(replacement)
+                    webView = replacement
+                    if (origin.isNotBlank()) replacement.loadUrl("$origin/")
+                }
+                // 返回 true 表示已处理；返回 false 会让 Android 连带杀死整个 App。
+                return true
             }
         }
     }
@@ -343,6 +365,7 @@ class ComfyBridge(private val activity: Activity) {
     }
 
     private suspend fun evaluate(script: String, timeoutMillis: Long = 120_000L): String = withContext(Dispatchers.Main.immediate) {
+        val expectedRendererEpoch = rendererEpoch
         val token = UUID.randomUUID().toString()
         val quotedToken = JSONObject.quote(token)
         val kickoff = """
@@ -364,7 +387,13 @@ class ComfyBridge(private val activity: Activity) {
               return 'started';
             })()
         """.trimIndent()
-        val started = evaluateImmediate(kickoff)
+        val started = try {
+            evaluateImmediate(kickoff)
+        } catch (throwable: Throwable) {
+            if (rendererEpoch != expectedRendererEpoch) throw rendererGoneException()
+            throw throwable
+        }
+        if (rendererEpoch != expectedRendererEpoch) throw rendererGoneException()
         if (started != "started") throw IllegalStateException("ComfyUI 页面正在加载")
 
         val poll = """
@@ -383,7 +412,13 @@ class ComfyBridge(private val activity: Activity) {
         var reportedPhase = ""
         try {
             while (System.currentTimeMillis() < deadline) {
-                val raw = evaluateImmediate(poll)
+                if (rendererEpoch != expectedRendererEpoch) throw rendererGoneException()
+                val raw = try {
+                    evaluateImmediate(poll)
+                } catch (throwable: Throwable) {
+                    if (rendererEpoch != expectedRendererEpoch) throw rendererGoneException()
+                    throw throwable
+                }
                 if (raw.isNotEmpty()) {
                     val envelope = JSONObject(raw)
                     val phase = envelope.optString("phase")
@@ -410,14 +445,21 @@ class ComfyBridge(private val activity: Activity) {
     }
 
     private suspend fun evaluateImmediate(script: String): String =
-        suspendCancellableCoroutine { continuation ->
-            webView.evaluateJavascript(script) { encodedResult ->
-                if (!continuation.isActive) return@evaluateJavascript
-                runCatching { decodeJavascriptResult(encodedResult) }
-                    .onSuccess(continuation::resume)
-                    .onFailure(continuation::resumeWithException)
+        withTimeout(10_000L) {
+            suspendCancellableCoroutine { continuation ->
+                val target = webView
+                target.evaluateJavascript(script) { encodedResult ->
+                    if (!continuation.isActive) return@evaluateJavascript
+                    runCatching { decodeJavascriptResult(encodedResult) }
+                        .onSuccess(continuation::resume)
+                        .onFailure(continuation::resumeWithException)
+                }
             }
         }
+
+    private fun rendererGoneException() = IllegalStateException(
+        "ComfyUI 网页渲染进程崩溃，前端桥接已自动重建。请等待连接恢复后重新生成。最后阶段：$lastBridgePhase",
+    )
 
     private fun decodeJavascriptResult(value: String): String {
         if (value == "null" || value.isBlank()) return "{}"
