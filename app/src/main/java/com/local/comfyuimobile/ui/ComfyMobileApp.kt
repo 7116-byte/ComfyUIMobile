@@ -29,7 +29,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -44,8 +43,6 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -136,11 +133,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogWindowProvider
@@ -175,7 +173,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
 import kotlin.random.Random
 
 private enum class MainPage(val label: String, val icon: ImageVector) {
@@ -732,7 +729,7 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
             }
         }
         LazyColumn(
-            Modifier.weight(1f).imePadding(),
+            Modifier.weight(1f),
             state = listState,
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -967,7 +964,7 @@ private fun ParameterEditor(field: ParameterField, viewModel: MainViewModel, onH
                 OutlinedTextField(
                     field.displayValue,
                     { viewModel.updateField(field.key, it) },
-                    focusedFieldModifier(Modifier.fillMaxWidth()),
+                    Modifier.fillMaxWidth(),
                     enabled = !field.linked,
                     singleLine = true,
                 )
@@ -976,17 +973,11 @@ private fun ParameterEditor(field: ParameterField, viewModel: MainViewModel, onH
                     Spacer(Modifier.width(6.dp)); Text("选择并上传")
                 }
             }
-            ParameterKind.MULTILINE -> OutlinedTextField(
-                value = field.displayValue,
-                onValueChange = { viewModel.updateField(field.key, it) },
-                modifier = focusedFieldModifier(Modifier.fillMaxWidth().height(140.dp)),
-                enabled = !field.linked,
-                minLines = 5,
-            )
+            ParameterKind.MULTILINE -> MultilineTextField(field, viewModel)
             ParameterKind.TEXT -> OutlinedTextField(
                 field.displayValue,
                 { viewModel.updateField(field.key, it) },
-                focusedFieldModifier(Modifier.fillMaxWidth()),
+                Modifier.fillMaxWidth(),
                 enabled = !field.linked,
             )
             ParameterKind.UNSUPPORTED -> Text(field.warning ?: "此控件需在高级编辑中修改", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -1020,28 +1011,34 @@ private fun NumberField(field: ParameterField, viewModel: MainViewModel) {
     OutlinedTextField(
         value = field.displayValue,
         onValueChange = { viewModel.updateField(field.key, it) },
-        modifier = focusedFieldModifier(Modifier.fillMaxWidth()),
+        modifier = Modifier.fillMaxWidth(),
         enabled = !field.linked,
         singleLine = true,
     )
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun focusedFieldModifier(base: Modifier): Modifier {
-    val requester = remember { BringIntoViewRequester() }
-    val scope = rememberCoroutineScope()
-    return base
-        .bringIntoViewRequester(requester)
-        .onFocusChanged { focus ->
-            if (focus.isFocused) {
-                scope.launch {
-                    // 等软键盘完成占位后，再把真正获得焦点的参数移入可视区。
-                    delay(220)
-                    requester.bringIntoView()
-                }
-            }
+private fun MultilineTextField(field: ParameterField, viewModel: MainViewModel) {
+    var editorValue by rememberSaveable(field.key, stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(field.displayValue))
+    }
+    LaunchedEffect(field.displayValue) {
+        if (field.displayValue != editorValue.text) {
+            editorValue = TextFieldValue(
+                text = field.displayValue,
+                selection = TextRange(field.displayValue.length),
+            )
         }
+    }
+    OutlinedTextField(
+        value = editorValue,
+        onValueChange = { value ->
+            editorValue = value
+            if (value.text != field.displayValue) viewModel.updateField(field.key, value.text)
+        },
+        modifier = Modifier.fillMaxWidth().aspectRatio(2f),
+        enabled = !field.linked,
+    )
 }
 
 @Composable
