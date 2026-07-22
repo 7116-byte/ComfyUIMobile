@@ -3,9 +3,10 @@ package com.local.comfyuimobile.ui
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
-import androidx.activity.compose.BackHandler
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -120,7 +121,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -136,8 +136,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -156,6 +159,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.local.comfyuimobile.MainViewModel
+import com.local.comfyuimobile.AdvancedEditorActivity
 import com.local.comfyuimobile.bridge.ComfyBridge
 import com.local.comfyuimobile.bridge.FieldValidator
 import com.local.comfyuimobile.data.CachePolicy
@@ -195,6 +199,10 @@ private data class ResultAlbum(val jobId: String, val media: List<ResultMedia>)
 fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+    val context = LocalContext.current
+    val advancedEditorLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        viewModel.finishAdvancedEditor(result.resultCode == Activity.RESULT_OK)
+    }
     LaunchedEffect(state.error, state.notice) {
         val message = state.error ?: state.notice
         if (!message.isNullOrBlank()) {
@@ -202,62 +210,42 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
             viewModel.clearMessage()
         }
     }
-
-    BackHandler(enabled = state.advancedEditor) { viewModel.finishAdvancedEditor() }
-    Column(Modifier.fillMaxSize()) {
+    LaunchedEffect(state.advancedEditor) {
         if (state.advancedEditor) {
-            Surface(tonalElevation = 4.dp, modifier = Modifier.statusBarsPadding()) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("ComfyUI 网页编辑", style = MaterialTheme.typography.titleMedium)
-                        Text(state.activeServer?.baseUrl.orEmpty(), style = MaterialTheme.typography.bodySmall, maxLines = 1)
-                    }
-                    TextButton(onClick = viewModel::finishAdvancedEditor, enabled = !state.loading) {
-                        Icon(Icons.Default.Close, null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("关闭并刷新参数")
-                    }
-                }
-            }
+            advancedEditorLauncher.launch(
+                Intent(context, AdvancedEditorActivity::class.java).putExtra(
+                    AdvancedEditorActivity.EXTRA_SERVER_URL,
+                    state.activeServer?.baseUrl.orEmpty(),
+                ),
+            )
         }
-        Box(Modifier.fillMaxWidth().weight(1f)) {
-            if (!state.advancedEditor) {
-                if (state.activeServer == null) {
-                    ConnectionPage(state, viewModel, snackbar)
-                } else {
-                    ConnectedApp(state, viewModel, snackbar)
-                }
-            }
-            key(bridge.webView) {
-                AndroidView(
-                    factory = { bridge.webView },
-                    update = { view ->
-                        if (state.advancedEditor) {
-                            view.onResume()
-                            view.requestLayout()
-                            view.invalidate()
-                        }
-                    },
-                    modifier = if (state.advancedEditor) Modifier.fillMaxSize() else Modifier.size(1.dp).alpha(0f),
-                )
-                if (state.advancedEditor && state.loading) {
-                    Surface(
-                        modifier = Modifier.align(Alignment.Center),
-                        shape = RoundedCornerShape(16.dp),
-                        tonalElevation = 6.dp,
-                    ) {
-                        Row(
-                            Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
-                            Text("正在打开 ComfyUI 网页…")
-                        }
-                    }
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        if (state.activeServer == null) {
+            ConnectionPage(state, viewModel, snackbar)
+        } else {
+            ConnectedApp(state, viewModel, snackbar)
+        }
+        key(bridge.webView) {
+            AndroidView(
+                factory = { bridge.webView },
+                modifier = Modifier.size(1.dp).alpha(0f),
+            )
+        }
+        if (state.loading && state.advancedEditor) {
+            Surface(
+                modifier = Modifier.align(Alignment.Center),
+                shape = RoundedCornerShape(16.dp),
+                tonalElevation = 6.dp,
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
+                    Text("正在准备高级编辑…")
                 }
             }
         }
@@ -624,7 +612,6 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         mutableStateOf(workflow.entry.path.substringBeforeLast('/', "workflows"))
     }
     var confirmGenerateWithoutLocalOutput by remember { mutableStateOf(false) }
-    val multilineEditorStates = remember(workflow.entry.path) { mutableStateMapOf<String, TextFieldValue>() }
     val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val field = uploadField
         if (uri != null && field != null) viewModel.uploadField(field, uri)
@@ -792,7 +779,6 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                         uploadField = field
                         uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
                     },
-                    multilineEditorStates = multilineEditorStates,
                 )
             }
         }
@@ -887,7 +873,6 @@ private fun NodeParameterCard(
     viewModel: MainViewModel,
     onHistory: (ParameterField) -> Unit,
     onUpload: (ParameterField) -> Unit,
-    multilineEditorStates: MutableMap<String, TextFieldValue>,
 ) {
     val title = node.title.ifBlank { node.type.ifBlank { "未命名节点" } }
     var headerHeightPx by remember(node.id) { mutableIntStateOf(0) }
@@ -962,7 +947,6 @@ private fun NodeParameterCard(
                                             viewModel,
                                             onHistory = { onHistory(field) },
                                             onUpload = { onUpload(field) },
-                                            multilineEditorStates = multilineEditorStates,
                                         )
                                         if (index < fields.lastIndex || hasSeedActions) HorizontalDivider()
                                     }
@@ -1057,7 +1041,6 @@ private fun ParameterEditor(
     viewModel: MainViewModel,
     onHistory: () -> Unit,
     onUpload: () -> Unit,
-    multilineEditorStates: MutableMap<String, TextFieldValue>,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1104,7 +1087,7 @@ private fun ParameterEditor(
                     Spacer(Modifier.width(6.dp)); Text("选择并上传")
                 }
             }
-            ParameterKind.MULTILINE -> MultilineTextField(field, viewModel, multilineEditorStates)
+            ParameterKind.MULTILINE -> MultilineTextField(field, viewModel)
             ParameterKind.TEXT -> OutlinedTextField(
                 field.displayValue,
                 { viewModel.updateField(field.key, it) },
@@ -1152,36 +1135,103 @@ private fun NumberField(field: ParameterField, viewModel: MainViewModel) {
 private fun MultilineTextField(
     field: ParameterField,
     viewModel: MainViewModel,
-    editorStates: MutableMap<String, TextFieldValue>,
 ) {
-    var editorValue by remember(field.key) {
+    var editorOpen by remember(field.key) { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth().aspectRatio(2f)) {
+        OutlinedTextField(
+            value = field.displayValue,
+            onValueChange = {},
+            modifier = Modifier.fillMaxSize(),
+            enabled = !field.linked,
+            readOnly = true,
+        )
+        if (!field.linked) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .clickable { editorOpen = true },
+            )
+        }
+    }
+    if (editorOpen) {
+        MultilineEditorDialog(
+            title = field.label,
+            initialValue = field.displayValue,
+            onDismiss = { editorOpen = false },
+            onConfirm = { value ->
+                viewModel.updateField(field.key, value)
+                editorOpen = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun MultilineEditorDialog(
+    title: String,
+    initialValue: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var editorValue by remember(initialValue) {
         mutableStateOf(
-            editorStates[field.key] ?: TextFieldValue(
-                text = field.displayValue,
-                selection = TextRange(field.displayValue.length),
+            TextFieldValue(
+                text = initialValue,
+                selection = TextRange(initialValue.length),
             ),
         )
     }
-    LaunchedEffect(field.displayValue) {
-        if (field.displayValue != editorValue.text) {
-            val updated = TextFieldValue(
-                text = field.displayValue,
-                selection = TextRange(field.displayValue.length),
-            )
-            editorValue = updated
-            editorStates[field.key] = updated
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        val view = LocalView.current
+        DisposableEffect(view) {
+            val window = (view.parent as? DialogWindowProvider)?.window
+            window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            onDispose { }
+        }
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background,
+        ) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding(),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TextButton(onClick = onDismiss) { Text("取消") }
+                    Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                    Button(onClick = { onConfirm(editorValue.text) }) { Text("完成") }
+                }
+                OutlinedTextField(
+                    value = editorValue,
+                    onValueChange = { editorValue = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .focusRequester(focusRequester),
+                )
+            }
+        }
+        LaunchedEffect(Unit) {
+            kotlinx.coroutines.delay(150)
+            focusRequester.requestFocus()
+            keyboardController?.show()
         }
     }
-    OutlinedTextField(
-        value = editorValue,
-        onValueChange = { value ->
-            editorValue = value
-            editorStates[field.key] = value
-            if (value.text != field.displayValue) viewModel.updateField(field.key, value.text)
-        },
-        modifier = Modifier.fillMaxWidth().aspectRatio(2f),
-        enabled = !field.linked,
-    )
 }
 
 @Composable

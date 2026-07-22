@@ -14,6 +14,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.local.comfyuimobile.bridge.ComfyBridge
+import com.local.comfyuimobile.bridge.AdvancedEditorSession
 import com.local.comfyuimobile.bridge.WorkflowImageReader
 import com.local.comfyuimobile.data.AppPreferences
 import com.local.comfyuimobile.data.AppLogger
@@ -128,22 +129,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openAdvancedEditor() {
         if (_state.value.loading || _state.value.generating || generationJob?.isActive == true) return
-        val document = _state.value.selectedWorkflow ?: return
-        val server = _state.value.activeServer ?: return
+        _state.value.selectedWorkflow ?: return
+        _state.value.activeServer ?: return
         val activeBridge = bridge ?: return
-        _state.update { it.copy(advancedEditor = true, loading = true, error = null) }
+        _state.update { it.copy(loading = true, error = null) }
         viewModelScope.launch {
             runCatching {
                 bridgeOperationMutex.withLock {
                     val currentWorkflow = activeBridge.syncWorkflow(_state.value.fields)
-                    activeBridge.recreateForVisibleEditor(server.baseUrl)
-                    activeBridge.loadWorkflow(currentWorkflow)
-                    activeBridge.refreshVisibleViewport()
+                    AdvancedEditorSession.begin(currentWorkflow)
                 }
             }.onSuccess {
-                _state.update { it.copy(loading = false, notice = "ComfyUI 网页已打开") }
+                _state.update { it.copy(advancedEditor = true, loading = false) }
             }.onFailure { error ->
                 if (error is CancellationException) throw error
+                AdvancedEditorSession.clear()
                 AppLogger.error("打开高级编辑失败", error)
                 _state.update {
                     it.copy(
@@ -372,18 +372,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun finishAdvancedEditor() {
+    fun finishAdvancedEditor(saved: Boolean) {
         val document = _state.value.selectedWorkflow
-        if (_state.value.loading) return
-        _state.update { it.copy(advancedEditor = false, loading = document != null) }
-        if (document == null) {
+        _state.update { it.copy(advancedEditor = false, loading = saved && document != null) }
+        if (!saved || document == null) {
+            AdvancedEditorSession.clear()
+            return
+        }
+        val raw = AdvancedEditorSession.consumeOutput()
+        if (raw.isNullOrBlank()) {
+            _state.update { it.copy(loading = false, error = "高级编辑没有返回工作流内容") }
             return
         }
         viewModelScope.launch {
             runCatching {
                 bridgeOperationMutex.withLock {
                     val activeBridge = bridge ?: error("前端桥接不可用")
-                    val raw = activeBridge.exportCurrentWorkflow()
                     raw to activeBridge.loadWorkflow(raw)
                 }
             }.onSuccess { (raw, manifest) ->

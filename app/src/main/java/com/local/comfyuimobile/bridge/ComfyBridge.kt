@@ -41,6 +41,7 @@ class ComfyBridge(private val activity: Activity) {
 
     var webView: WebView by mutableStateOf(WebView(activity))
         private set
+    var onWebViewRecreated: ((WebView) -> Unit)? = null
     @Volatile private var allowedOrigin: String = ""
     @Volatile private var pageLoadError: String? = null
     @Volatile private var lastBridgePhase: String = "尚未执行前端脚本"
@@ -125,6 +126,7 @@ class ComfyBridge(private val activity: Activity) {
                     val replacement = WebView(activity)
                     configureWebView(replacement)
                     webView = replacement
+                    onWebViewRecreated?.invoke(replacement)
                     logWebViewRuntime("崩溃后重建")
                     if (origin.isNotBlank()) replacement.loadUrl("$origin/")
                 }
@@ -175,29 +177,6 @@ class ComfyBridge(private val activity: Activity) {
             delay(500)
         }
         throw IllegalStateException("前端桥接超时：$lastError")
-    }
-
-    suspend fun recreateForVisibleEditor(baseUrl: String) {
-        val origin = baseUrl.trimEnd('/')
-        val previous = withContext(Dispatchers.Main.immediate) {
-            allowedOrigin = origin
-            pageLoadError = null
-            lastBridgePhase = "正在创建可见网页"
-            val old = webView
-            val replacement = WebView(activity)
-            configureWebView(replacement)
-            webView = replacement
-            logWebViewRuntime("打开高级编辑")
-            old
-        }
-        // 让 Compose 先把新 WebView 以全屏尺寸挂载，再开始初始化 ComfyUI 画布。
-        delay(200)
-        withContext(Dispatchers.Main.immediate) {
-            previous.stopLoading()
-            previous.destroy()
-        }
-        loadServer(origin)
-        awaitReady()
     }
 
     suspend fun refreshVisibleViewport() = withContext(Dispatchers.Main.immediate) {
@@ -439,6 +418,7 @@ class ComfyBridge(private val activity: Activity) {
     }
 
     fun destroy() {
+        onWebViewRecreated = null
         webView.stopLoading()
         webView.destroy()
     }
