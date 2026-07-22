@@ -961,11 +961,13 @@ private fun NodeParameterCard(
         }
         ConnectionMarkerDashes(
             node.inputMarkers,
-            Modifier.align(Alignment.TopStart).offset(x = (-7).dp, y = 12.dp),
+            input = true,
+            modifier = Modifier.align(Alignment.TopStart).offset(x = (-7).dp, y = 12.dp),
         )
         ConnectionMarkerDashes(
             node.outputMarkers,
-            Modifier.align(Alignment.TopEnd).offset(x = 7.dp, y = 12.dp),
+            input = false,
+            modifier = Modifier.align(Alignment.TopEnd).offset(x = 7.dp, y = 12.dp),
         )
     }
 }
@@ -974,16 +976,35 @@ private fun NodeParameterCard(
 private fun ConnectionMarkerLabels(markers: List<WorkflowConnectionMarker>) {
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         markers.forEach { marker ->
-            Text(marker.label, color = connectionMarkerColor(marker.color), style = MaterialTheme.typography.labelMedium)
+            Text(
+                marker.label,
+                color = connectionMarkerColor(marker.color),
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+            )
         }
     }
 }
 
 @Composable
-private fun ConnectionMarkerDashes(markers: List<WorkflowConnectionMarker>, modifier: Modifier = Modifier) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+private fun ConnectionMarkerDashes(
+    markers: List<WorkflowConnectionMarker>,
+    input: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier,
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+        horizontalAlignment = if (input) Alignment.Start else Alignment.End,
+    ) {
         markers.forEach { marker ->
-            Box(Modifier.width(14.dp).height(20.dp), contentAlignment = Alignment.Center) {
+            Box(contentAlignment = if (input) Alignment.CenterStart else Alignment.CenterEnd) {
+                Text(
+                    marker.label,
+                    modifier = Modifier.alpha(0f),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                )
                 Box(
                     Modifier.width(14.dp).height(3.dp).background(
                         connectionMarkerColor(marker.color),
