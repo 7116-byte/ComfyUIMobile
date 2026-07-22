@@ -9,14 +9,23 @@ class LanAddressTest {
     @Test fun normalizesPrivateAddressAndDefaultPort() {
         assertEquals("http://192.168.10.109:8188", LanAddress.normalize("192.168.10.109/"))
         assertEquals("http://10.0.0.2:9000", LanAddress.normalize("http://10.0.0.2:9000"))
+        assertEquals("http://100.64.0.10:18188", LanAddress.normalize("http://100.64.0.10:18188/"))
+        assertEquals("http://8.8.8.8:8188", LanAddress.normalize("8.8.8.8"))
+        assertEquals("http://comfy.example.com:18188", LanAddress.normalize("http://comfy.example.com:18188"))
     }
 
-    @Test fun rejectsPublicVirtualAndHttpsAddresses() {
-        listOf("8.8.8.8", "198.18.0.1", "https://192.168.1.2:8188").forEach { value ->
+    @Test fun acceptsPrivateVpnSharedAndPublicRanges() {
+        assertTrue(LanAddress.isTrustedHost("100.64.0.1"))
+        assertTrue(LanAddress.isTrustedHost("198.18.0.1"))
+        assertTrue(LanAddress.isTrustedHost("8.8.8.8"))
+        assertTrue(LanAddress.isTrustedHost("vpn-comfy.example"))
+    }
+
+    @Test fun rejectsHttpsAndMalformedAddresses() {
+        listOf("https://192.168.1.2:8188", "http://", "not a valid host").forEach { value ->
             assertTrue(runCatching { LanAddress.normalize(value) }.isFailure)
         }
-        assertFalse(LanAddress.isTrustedHost("172.32.0.1"))
-        assertFalse(LanAddress.isTrustedHost("example"))
+        assertFalse(LanAddress.isTrustedHost(""))
     }
 
     @Test fun createsCompleteSlash24Subnet() {

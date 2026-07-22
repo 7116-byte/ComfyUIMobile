@@ -265,7 +265,7 @@ private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar
         ) {
             Icon(Icons.Default.Wifi, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
             Text("ComfyUI 手机端", style = MaterialTheme.typography.headlineMedium)
-            Text("在可信局域网中连接电脑上的 ComfyUI。不会把提示词或工作流上传到云端。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("连接你信任的 ComfyUI 服务器。支持局域网、VPN 和手动填写的其他 HTTP 地址。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             OutlinedTextField(
                 value = state.serverInput,
                 onValueChange = viewModel::setServerInput,
@@ -308,7 +308,7 @@ private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar
 }
 
 private val connectionStepNames = listOf(
-    "检查局域网地址",
+    "检查地址格式",
     "读取服务器信息",
     "打开 ComfyUI 网页",
     "初始化前端",

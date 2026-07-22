@@ -137,7 +137,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update {
                     it.copy(
                         status = ConnectionStatus.CONNECTING,
-                        connectionMessage = "正在检查地址是否为可信局域网地址",
+                        connectionMessage = "正在检查服务器地址格式",
                         connectionStep = 1,
                         loading = true,
                         activeServer = null,
