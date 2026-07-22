@@ -177,6 +177,41 @@ class ComfyBridge(private val activity: Activity) {
         throw IllegalStateException("前端桥接超时：$lastError")
     }
 
+    suspend fun recreateForVisibleEditor(baseUrl: String) {
+        val origin = baseUrl.trimEnd('/')
+        val previous = withContext(Dispatchers.Main.immediate) {
+            allowedOrigin = origin
+            pageLoadError = null
+            lastBridgePhase = "正在创建可见网页"
+            val old = webView
+            val replacement = WebView(activity)
+            configureWebView(replacement)
+            webView = replacement
+            logWebViewRuntime("打开高级编辑")
+            old
+        }
+        // 让 Compose 先把新 WebView 以全屏尺寸挂载，再开始初始化 ComfyUI 画布。
+        delay(200)
+        withContext(Dispatchers.Main.immediate) {
+            previous.stopLoading()
+            previous.destroy()
+        }
+        loadServer(origin)
+        awaitReady()
+    }
+
+    suspend fun refreshVisibleViewport() = withContext(Dispatchers.Main.immediate) {
+        webView.onResume()
+        webView.requestLayout()
+        webView.invalidate()
+        webView.evaluateJavascript(
+            "window.dispatchEvent(new Event('resize'));" +
+                "window.__comfyMobileApp?.canvas?.resize?.();" +
+                "window.__comfyMobileApp?.canvas?.draw?.(true, true);",
+            null,
+        )
+    }
+
     suspend fun loadWorkflow(rawJson: String): WorkflowManifest {
         awaitReady()
         val encoded = Base64.getEncoder().encodeToString(rawJson.toByteArray(Charsets.UTF_8))

@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -136,6 +137,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -204,7 +206,7 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
     BackHandler(enabled = state.advancedEditor) { viewModel.finishAdvancedEditor() }
     Column(Modifier.fillMaxSize()) {
         if (state.advancedEditor) {
-            Surface(tonalElevation = 4.dp) {
+            Surface(tonalElevation = 4.dp, modifier = Modifier.statusBarsPadding()) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -213,7 +215,7 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
                         Text("ComfyUI 网页编辑", style = MaterialTheme.typography.titleMedium)
                         Text(state.activeServer?.baseUrl.orEmpty(), style = MaterialTheme.typography.bodySmall, maxLines = 1)
                     }
-                    TextButton(onClick = viewModel::finishAdvancedEditor) {
+                    TextButton(onClick = viewModel::finishAdvancedEditor, enabled = !state.loading) {
                         Icon(Icons.Default.Close, null)
                         Spacer(Modifier.width(4.dp))
                         Text("关闭并刷新参数")
@@ -241,6 +243,22 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
                     },
                     modifier = if (state.advancedEditor) Modifier.fillMaxSize() else Modifier.size(1.dp).alpha(0f),
                 )
+                if (state.advancedEditor && state.loading) {
+                    Surface(
+                        modifier = Modifier.align(Alignment.Center),
+                        shape = RoundedCornerShape(16.dp),
+                        tonalElevation = 6.dp,
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
+                            Text("正在打开 ComfyUI 网页…")
+                        }
+                    }
+                }
             }
         }
     }
@@ -779,7 +797,11 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
             }
         }
         Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(onClick = { viewModel.setAdvancedEditor(true) }, Modifier.weight(1f)) { Text("高级编辑") }
+            OutlinedButton(
+                onClick = viewModel::openAdvancedEditor,
+                modifier = Modifier.weight(1f),
+                enabled = state.bridgeReady && !state.loading && !state.generating,
+            ) { Text("高级编辑") }
             Button(
                 onClick = {
                     if (hasConfiguredLocalOutput) viewModel.generate()
@@ -868,6 +890,12 @@ private fun NodeParameterCard(
     multilineEditorStates: MutableMap<String, TextFieldValue>,
 ) {
     val title = node.title.ifBlank { node.type.ifBlank { "未命名节点" } }
+    var headerHeightPx by remember(node.id) { mutableIntStateOf(0) }
+    var inputMarkerHeightPx by remember(node.id) { mutableIntStateOf(0) }
+    var outputMarkerHeightPx by remember(node.id) { mutableIntStateOf(0) }
+    val density = LocalDensity.current
+    val inputMarkerTop = with(density) { ((headerHeightPx - inputMarkerHeightPx).coerceAtLeast(0) / 2f).toDp() }
+    val outputMarkerTop = with(density) { ((headerHeightPx - outputMarkerHeightPx).coerceAtLeast(0) / 2f).toDp() }
     Box(Modifier.fillMaxWidth().padding(horizontal = 7.dp)) {
         OutlinedCard(
             modifier = Modifier.fillMaxWidth(),
@@ -888,6 +916,7 @@ private fun NodeParameterCard(
                 Row(
                     Modifier
                         .fillMaxWidth()
+                        .onSizeChanged { headerHeightPx = it.height }
                         .combinedClickable(onClick = onToggle, onLongClick = onLongPress)
                         .padding(horizontal = 12.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -962,12 +991,14 @@ private fun NodeParameterCard(
         ConnectionMarkerDashes(
             node.inputMarkers,
             input = true,
-            modifier = Modifier.align(Alignment.TopStart).offset(x = (-7).dp, y = 12.dp),
+            onHeightChanged = { inputMarkerHeightPx = it },
+            modifier = Modifier.align(Alignment.TopStart).offset(x = (-7).dp, y = inputMarkerTop),
         )
         ConnectionMarkerDashes(
             node.outputMarkers,
             input = false,
-            modifier = Modifier.align(Alignment.TopEnd).offset(x = 7.dp, y = 12.dp),
+            onHeightChanged = { outputMarkerHeightPx = it },
+            modifier = Modifier.align(Alignment.TopEnd).offset(x = 7.dp, y = outputMarkerTop),
         )
     }
 }
@@ -990,10 +1021,11 @@ private fun ConnectionMarkerLabels(markers: List<WorkflowConnectionMarker>) {
 private fun ConnectionMarkerDashes(
     markers: List<WorkflowConnectionMarker>,
     input: Boolean,
+    onHeightChanged: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
-        modifier,
+        modifier.onSizeChanged { onHeightChanged(it.height) },
         verticalArrangement = Arrangement.spacedBy(3.dp),
         horizontalAlignment = if (input) Alignment.Start else Alignment.End,
     ) {

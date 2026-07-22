@@ -124,8 +124,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setServerInput(value: String) = _state.update { it.copy(serverInput = value) }
-    fun setAdvancedEditor(enabled: Boolean) = _state.update { it.copy(advancedEditor = enabled) }
     fun clearMessage() = _state.update { it.copy(error = null, notice = null) }
+
+    fun openAdvancedEditor() {
+        if (_state.value.loading || _state.value.generating || generationJob?.isActive == true) return
+        val document = _state.value.selectedWorkflow ?: return
+        val server = _state.value.activeServer ?: return
+        val activeBridge = bridge ?: return
+        _state.update { it.copy(advancedEditor = true, loading = true, error = null) }
+        viewModelScope.launch {
+            runCatching {
+                bridgeOperationMutex.withLock {
+                    val currentWorkflow = activeBridge.syncWorkflow(_state.value.fields)
+                    activeBridge.recreateForVisibleEditor(server.baseUrl)
+                    activeBridge.loadWorkflow(currentWorkflow)
+                    activeBridge.refreshVisibleViewport()
+                }
+            }.onSuccess {
+                _state.update { it.copy(loading = false, notice = "ComfyUI 网页已打开") }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                AppLogger.error("打开高级编辑失败", error)
+                _state.update {
+                    it.copy(
+                        advancedEditor = false,
+                        loading = false,
+                        error = "打开高级编辑失败：${error.message ?: error.javaClass.simpleName}",
+                    )
+                }
+            }
+        }
+    }
 
     fun connect(address: String = state.value.serverInput) {
         AppLogger.info("请求连接服务器：$address")
@@ -345,21 +374,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun finishAdvancedEditor() {
         val document = _state.value.selectedWorkflow
-        _state.update { it.copy(advancedEditor = false) }
+        if (_state.value.loading) return
+        _state.update { it.copy(advancedEditor = false, loading = document != null) }
         if (document == null) {
             return
         }
         viewModelScope.launch {
-            runOperation("高级编辑同步失败") {
-                val activeBridge = bridge ?: error("前端桥接不可用")
-                val raw = activeBridge.exportCurrentWorkflow()
-                val manifest = activeBridge.loadWorkflow(raw)
+            runCatching {
+                bridgeOperationMutex.withLock {
+                    val activeBridge = bridge ?: error("前端桥接不可用")
+                    val raw = activeBridge.exportCurrentWorkflow()
+                    raw to activeBridge.loadWorkflow(raw)
+                }
+            }.onSuccess { (raw, manifest) ->
                 _state.update {
                     it.copy(
                         selectedWorkflow = document.copy(rawJson = raw, fields = manifest.fields, nodes = manifest.nodes),
                         fields = manifest.fields,
                         nodeProblems = emptyMap(),
+                        loading = false,
                         notice = "已关闭 ComfyUI 网页并刷新工作流参数",
+                    )
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                AppLogger.error("高级编辑同步失败", error)
+                _state.update {
+                    it.copy(
+                        loading = false,
+                        error = "高级编辑同步失败：${error.message ?: error.javaClass.simpleName}",
                     )
                 }
             }
