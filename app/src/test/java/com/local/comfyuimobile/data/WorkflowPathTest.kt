@@ -1,5 +1,6 @@
 package com.local.comfyuimobile.data
 
+import com.local.comfyuimobile.model.WorkflowEntry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -18,5 +19,18 @@ class WorkflowPathTest {
             assertTrue(runCatching { WorkflowPath.fileName(value) }.isFailure)
         }
         assertTrue(runCatching { WorkflowPath.folder("../outside") }.isFailure)
+    }
+
+    @Test fun listsRootAndNestedFoldersForSaveAs() {
+        val entries = listOf(
+            WorkflowEntry("Krea2", "workflows/Krea2", isDirectory = true),
+            WorkflowEntry("角色", "workflows/Krea2/角色", isDirectory = true),
+            WorkflowEntry("a.json", "workflows/视频/短片/a.json", isDirectory = false),
+        )
+
+        assertEquals(
+            listOf("workflows", "workflows/Krea2", "workflows/Krea2/角色", "workflows/视频", "workflows/视频/短片"),
+            WorkflowPath.availableFolders(entries, "workflows/Krea2/当前.json"),
+        )
     }
 }

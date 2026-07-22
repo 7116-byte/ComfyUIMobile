@@ -58,4 +58,12 @@ class CachePolicyTest {
 
         assertTrue(eligible.size == 4)
     }
+
+    @Test fun detectsWhetherCurrentWorkflowHasConfiguredLocalOutput() {
+        assertTrue(CachePolicy.hasConfiguredOutput(listOf(rule), rule.serverUrl, setOf("SaveImage")))
+        assertFalse(CachePolicy.hasConfiguredOutput(listOf(rule), rule.serverUrl, setOf("PreviewImage")))
+        assertFalse(CachePolicy.hasConfiguredOutput(listOf(rule.copy(enabled = false)), rule.serverUrl, setOf("SaveImage")))
+        assertFalse(CachePolicy.hasConfiguredOutput(listOf(rule), "http://other:8188", setOf("SaveImage")))
+        assertFalse(CachePolicy.hasConfiguredOutput(listOf(rule), null, setOf("SaveImage")))
+    }
 }

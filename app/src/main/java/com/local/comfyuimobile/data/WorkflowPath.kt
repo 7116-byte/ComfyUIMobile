@@ -1,6 +1,21 @@
 package com.local.comfyuimobile.data
 
+import com.local.comfyuimobile.model.WorkflowEntry
+
 object WorkflowPath {
+    fun availableFolders(entries: List<WorkflowEntry>, currentWorkflowPath: String): List<String> = buildSet {
+        add("workflows")
+        entries.forEach { entry ->
+            var folder = if (entry.isDirectory) entry.path else entry.path.substringBeforeLast('/', "workflows")
+            while (folder == "workflows" || folder.startsWith("workflows/")) {
+                add(folder)
+                if (folder == "workflows") break
+                folder = folder.substringBeforeLast('/', "workflows")
+            }
+        }
+        add(currentWorkflowPath.substringBeforeLast('/', "workflows"))
+    }.sorted()
+
     fun fileName(input: String): String {
         val value = input.trim()
         require(value.isNotEmpty()) { "请输入工作流名称" }

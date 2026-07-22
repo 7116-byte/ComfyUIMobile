@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -118,6 +119,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -154,7 +156,9 @@ import coil.compose.AsyncImage
 import com.local.comfyuimobile.MainViewModel
 import com.local.comfyuimobile.bridge.ComfyBridge
 import com.local.comfyuimobile.bridge.FieldValidator
+import com.local.comfyuimobile.data.CachePolicy
 import com.local.comfyuimobile.data.WorkflowBrowser
+import com.local.comfyuimobile.data.WorkflowPath
 import com.local.comfyuimobile.model.AppUiState
 import com.local.comfyuimobile.model.ConnectionStatus
 import com.local.comfyuimobile.model.JobState
@@ -598,6 +602,11 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     var recentMenuExpanded by remember { mutableStateOf(false) }
     var saveAsDialog by remember { mutableStateOf(false) }
     var saveAsName by remember { mutableStateOf("") }
+    var saveAsFolder by remember(workflow.entry.path) {
+        mutableStateOf(workflow.entry.path.substringBeforeLast('/', "workflows"))
+    }
+    var confirmGenerateWithoutLocalOutput by remember { mutableStateOf(false) }
+    val multilineEditorStates = remember(workflow.entry.path) { mutableStateMapOf<String, TextFieldValue>() }
     val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val field = uploadField
         if (uri != null && field != null) viewModel.uploadField(field, uri)
@@ -608,6 +617,15 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         val fields = visibleFields[node.id].orEmpty().sortedBy { it.order }
         node to fields
     }
+    val workflowFolders = remember(state.workflows, workflow.entry.path) {
+        WorkflowPath.availableFolders(state.workflows, workflow.entry.path)
+    }
+    val outputNodeTypes = nodes.asSequence().map { it.first }.filter { it.isOutput }.map { it.type }.toSet()
+    val hasConfiguredLocalOutput = CachePolicy.hasConfiguredOutput(
+        state.cacheOutputRules,
+        state.activeServer?.baseUrl,
+        outputNodeTypes,
+    )
     val localProblems = FieldValidator.detailedProblems(state.fields)
     val localProblemsByNode = localProblems.groupBy { it.nodeId }.mapValues { (_, items) -> items.map { it.message } }
     val problemNodeIds = localProblemsByNode.keys + state.nodeProblems.keys
@@ -708,6 +726,7 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                     Box(
                         Modifier.weight(1f).fillMaxHeight().clickable {
                             saveAsName = workflow.entry.name.substringBeforeLast('.') + "-副本"
+                            saveAsFolder = workflow.entry.path.substringBeforeLast('/', "workflows")
                             saveAsDialog = true
                         },
                         contentAlignment = Alignment.Center,
@@ -755,13 +774,17 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                         uploadField = field
                         uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
                     },
+                    multilineEditorStates = multilineEditorStates,
                 )
             }
         }
         Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onClick = { viewModel.setAdvancedEditor(true) }, Modifier.weight(1f)) { Text("高级编辑") }
             Button(
-                onClick = viewModel::generate,
+                onClick = {
+                    if (hasConfiguredLocalOutput) viewModel.generate()
+                    else confirmGenerateWithoutLocalOutput = true
+                },
                 enabled = !state.generating && !state.loading && state.bridgeReady && localProblems.isEmpty(),
                 modifier = Modifier.weight(1f),
             ) {
@@ -789,10 +812,27 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     if (historyField != null) PromptHistoryDialog(historyField!!, state, viewModel) { historyField = null }
     if (layoutDialog) LayoutDialog(state.fields, viewModel) { layoutDialog = false }
     if (saveAsDialog) {
-        NameDialog("工作流另存为", saveAsName, { saveAsDialog = false }) {
-            viewModel.saveWorkflowAs(it)
+        SaveWorkflowAsDialog(
+            initialName = saveAsName,
+            initialFolder = saveAsFolder,
+            folders = workflowFolders,
+            onDismiss = { saveAsDialog = false },
+        ) { name, folder ->
+            viewModel.saveWorkflowAs(name, folder)
             saveAsDialog = false
         }
+    }
+    if (confirmGenerateWithoutLocalOutput) {
+        ConfirmDialog(
+            title = "尚未配置本地输出",
+            message = "当前工作流没有命中任何已启用的本地保存输出。继续生成后，结果仍会保留在 ComfyUI 云端媒体资产，但不会进入手机本地结果。请长按输出部件加入白名单。是否仍然生成？",
+            onDismiss = { confirmGenerateWithoutLocalOutput = false },
+            confirmLabel = "仍然生成",
+            onConfirm = {
+                confirmGenerateWithoutLocalOutput = false
+                viewModel.generate()
+            },
+        )
     }
     cacheNode?.let { node ->
         val cached = state.cacheOutputRules.any {
@@ -825,81 +865,93 @@ private fun NodeParameterCard(
     viewModel: MainViewModel,
     onHistory: (ParameterField) -> Unit,
     onUpload: (ParameterField) -> Unit,
+    multilineEditorStates: MutableMap<String, TextFieldValue>,
 ) {
     val title = node.title.ifBlank { node.type.ifBlank { "未命名节点" } }
-    OutlinedCard(
-        modifier = Modifier.fillMaxWidth(),
-        border = BorderStroke(
-            when {
-                problems.isNotEmpty() -> 2.dp
-                active -> 3.dp
-                else -> 1.dp
-            },
-            when {
-                problems.isNotEmpty() -> MaterialTheme.colorScheme.error
-                active -> Color(0xFF35C46A)
-                else -> MaterialTheme.colorScheme.outlineVariant
-            },
-        ),
-    ) {
-        Column {
-            Row(
-                Modifier.fillMaxWidth().combinedClickable(onClick = onToggle, onLongClick = onLongPress).padding(horizontal = 6.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                ConnectionMarkers(node.inputMarkers, input = true)
-                if (node.inputMarkers.isNotEmpty()) Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(title, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        buildString {
-                            if (node.type.isNotBlank() && node.type != title) append(node.type).append(" · ")
-                            append(fields.size).append(" 个设置")
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    if (cached) Text("本地保存白名单", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
-                    if (node.isOutput) Text("长按管理本地保存", style = MaterialTheme.typography.labelSmall)
-                    if (active) Text("正在执行", color = Color(0xFF35C46A), style = MaterialTheme.typography.labelMedium)
-                }
-                Spacer(Modifier.width(6.dp))
-                Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (expanded) "收起" else "展开")
-                if (node.outputMarkers.isNotEmpty()) Spacer(Modifier.width(8.dp))
-                ConnectionMarkers(node.outputMarkers, input = false)
-            }
-            if (expanded) {
-                HorizontalDivider()
-                Column(Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    problems.forEach { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-                    val hasSeedActions = node.type.contains("Seed (rgthree)", ignoreCase = true)
-                    if (fields.isEmpty() && !hasSeedActions) {
-                        Text("此部件没有可调整参数。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Box(Modifier.fillMaxWidth().padding(horizontal = 7.dp)) {
+        OutlinedCard(
+            modifier = Modifier.fillMaxWidth(),
+            border = BorderStroke(
+                when {
+                    problems.isNotEmpty() -> 2.dp
+                    active -> 3.dp
+                    else -> 1.dp
+                },
+                when {
+                    problems.isNotEmpty() -> MaterialTheme.colorScheme.error
+                    active -> Color(0xFF35C46A)
+                    else -> MaterialTheme.colorScheme.outlineVariant
+                },
+            ),
+        ) {
+            Column {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .combinedClickable(onClick = onToggle, onLongClick = onLongPress)
+                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ConnectionMarkerLabels(node.inputMarkers)
+                    if (node.inputMarkers.isNotEmpty()) Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(title, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            buildString {
+                                if (node.type.isNotBlank() && node.type != title) append(node.type).append(" · ")
+                                append(fields.size).append(" 个设置")
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        if (cached) Text("本地保存白名单", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
+                        if (node.isOutput) Text("长按管理本地保存", style = MaterialTheme.typography.labelSmall)
+                        if (active) Text("正在执行", color = Color(0xFF35C46A), style = MaterialTheme.typography.labelMedium)
                     }
-                    if (fields.isNotEmpty() || hasSeedActions) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.75f)),
-                        ) {
-                            Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                fields.forEachIndexed { index, field ->
-                                    ParameterEditor(field, viewModel, onHistory = { onHistory(field) }, onUpload = { onUpload(field) })
-                                    if (index < fields.lastIndex || hasSeedActions) HorizontalDivider()
-                                }
-                                if (hasSeedActions) {
-                                    Text("种子快捷操作", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
-                                    FilledTonalButton(
-                                        onClick = { viewModel.invokeSeedAction(node.id, "Randomize Each Time", "已设为每次生成随机") },
-                                        modifier = Modifier.fillMaxWidth(),
-                                    ) { Text("每次生成随机") }
-                                    FilledTonalButton(
-                                        onClick = { viewModel.invokeSeedAction(node.id, "New Fixed Random", "已生成新的固定种子") },
-                                        modifier = Modifier.fillMaxWidth(),
-                                    ) { Text("生成新的固定种子") }
-                                    OutlinedButton(
-                                        onClick = { viewModel.invokeSeedAction(node.id, "Use Last Queued Seed", "已使用上次排队种子") },
-                                        modifier = Modifier.fillMaxWidth(),
-                                    ) { Text("使用上次排队种子") }
+                    Spacer(Modifier.width(6.dp))
+                    Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (expanded) "收起" else "展开")
+                    if (node.outputMarkers.isNotEmpty()) Spacer(Modifier.width(8.dp))
+                    ConnectionMarkerLabels(node.outputMarkers)
+                }
+                if (expanded) {
+                    HorizontalDivider()
+                    Column(Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        problems.forEach { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                        val hasSeedActions = node.type.contains("Seed (rgthree)", ignoreCase = true)
+                        if (fields.isEmpty() && !hasSeedActions) {
+                            Text("此部件没有可调整参数。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (fields.isNotEmpty() || hasSeedActions) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.75f)),
+                            ) {
+                                Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    fields.forEachIndexed { index, field ->
+                                        ParameterEditor(
+                                            field,
+                                            viewModel,
+                                            onHistory = { onHistory(field) },
+                                            onUpload = { onUpload(field) },
+                                            multilineEditorStates = multilineEditorStates,
+                                        )
+                                        if (index < fields.lastIndex || hasSeedActions) HorizontalDivider()
+                                    }
+                                    if (hasSeedActions) {
+                                        Text("种子快捷操作", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
+                                        FilledTonalButton(
+                                            onClick = { viewModel.invokeSeedAction(node.id, "Randomize Each Time", "已设为每次生成随机") },
+                                            modifier = Modifier.fillMaxWidth(),
+                                        ) { Text("每次生成随机") }
+                                        FilledTonalButton(
+                                            onClick = { viewModel.invokeSeedAction(node.id, "New Fixed Random", "已生成新的固定种子") },
+                                            modifier = Modifier.fillMaxWidth(),
+                                        ) { Text("生成新的固定种子") }
+                                        OutlinedButton(
+                                            onClick = { viewModel.invokeSeedAction(node.id, "Use Last Queued Seed", "已使用上次排队种子") },
+                                            modifier = Modifier.fillMaxWidth(),
+                                        ) { Text("使用上次排队种子") }
+                                    }
                                 }
                             }
                         }
@@ -907,27 +959,53 @@ private fun NodeParameterCard(
                 }
             }
         }
+        ConnectionMarkerDashes(
+            node.inputMarkers,
+            Modifier.align(Alignment.TopStart).offset(x = (-7).dp, y = 12.dp),
+        )
+        ConnectionMarkerDashes(
+            node.outputMarkers,
+            Modifier.align(Alignment.TopEnd).offset(x = 7.dp, y = 12.dp),
+        )
     }
 }
 
 @Composable
-private fun ConnectionMarkers(markers: List<WorkflowConnectionMarker>, input: Boolean) {
+private fun ConnectionMarkerLabels(markers: List<WorkflowConnectionMarker>) {
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         markers.forEach { marker ->
-            val markerColor = remember(marker.color) {
-                runCatching { Color(android.graphics.Color.parseColor(marker.color)) }.getOrDefault(Color(0xFF9E9E9E))
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                if (input) Box(Modifier.size(10.dp).background(markerColor, CircleShape))
-                Text(marker.label, color = markerColor, style = MaterialTheme.typography.labelMedium)
-                if (!input) Box(Modifier.size(10.dp).background(markerColor, CircleShape))
-            }
+            Text(marker.label, color = connectionMarkerColor(marker.color), style = MaterialTheme.typography.labelMedium)
         }
     }
 }
 
 @Composable
-private fun ParameterEditor(field: ParameterField, viewModel: MainViewModel, onHistory: () -> Unit, onUpload: () -> Unit) {
+private fun ConnectionMarkerDashes(markers: List<WorkflowConnectionMarker>, modifier: Modifier = Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        markers.forEach { marker ->
+            Box(Modifier.width(14.dp).height(20.dp), contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier.width(14.dp).height(3.dp).background(
+                        connectionMarkerColor(marker.color),
+                        RoundedCornerShape(2.dp),
+                    ),
+                )
+            }
+        }
+    }
+}
+
+private fun connectionMarkerColor(value: String): Color =
+    runCatching { Color(android.graphics.Color.parseColor(value)) }.getOrDefault(Color(0xFF9E9E9E))
+
+@Composable
+private fun ParameterEditor(
+    field: ParameterField,
+    viewModel: MainViewModel,
+    onHistory: () -> Unit,
+    onUpload: () -> Unit,
+    multilineEditorStates: MutableMap<String, TextFieldValue>,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -973,7 +1051,7 @@ private fun ParameterEditor(field: ParameterField, viewModel: MainViewModel, onH
                     Spacer(Modifier.width(6.dp)); Text("选择并上传")
                 }
             }
-            ParameterKind.MULTILINE -> MultilineTextField(field, viewModel)
+            ParameterKind.MULTILINE -> MultilineTextField(field, viewModel, multilineEditorStates)
             ParameterKind.TEXT -> OutlinedTextField(
                 field.displayValue,
                 { viewModel.updateField(field.key, it) },
@@ -1018,22 +1096,34 @@ private fun NumberField(field: ParameterField, viewModel: MainViewModel) {
 }
 
 @Composable
-private fun MultilineTextField(field: ParameterField, viewModel: MainViewModel) {
-    var editorValue by rememberSaveable(field.key, stateSaver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(field.displayValue))
+private fun MultilineTextField(
+    field: ParameterField,
+    viewModel: MainViewModel,
+    editorStates: MutableMap<String, TextFieldValue>,
+) {
+    var editorValue by remember(field.key) {
+        mutableStateOf(
+            editorStates[field.key] ?: TextFieldValue(
+                text = field.displayValue,
+                selection = TextRange(field.displayValue.length),
+            ),
+        )
     }
     LaunchedEffect(field.displayValue) {
         if (field.displayValue != editorValue.text) {
-            editorValue = TextFieldValue(
+            val updated = TextFieldValue(
                 text = field.displayValue,
                 selection = TextRange(field.displayValue.length),
             )
+            editorValue = updated
+            editorStates[field.key] = updated
         }
     }
     OutlinedTextField(
         value = editorValue,
         onValueChange = { value ->
             editorValue = value
+            editorStates[field.key] = value
             if (value.text != field.displayValue) viewModel.updateField(field.key, value.text)
         },
         modifier = Modifier.fillMaxWidth().aspectRatio(2f),
@@ -1885,12 +1975,88 @@ private fun NameDialog(title: String, initial: String, onDismiss: () -> Unit, on
 }
 
 @Composable
-private fun ConfirmDialog(title: String, message: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+private fun SaveWorkflowAsDialog(
+    initialName: String,
+    initialFolder: String,
+    folders: List<String>,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String) -> Unit,
+) {
+    var name by remember(initialName) { mutableStateOf(initialName) }
+    var folder by remember(initialFolder) { mutableStateOf(initialFolder) }
+    var folderMenuExpanded by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("工作流另存为") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("名称") },
+                    singleLine = true,
+                )
+                Box(Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { folderMenuExpanded = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Default.Folder, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (folder == "workflows") "工作流根目录" else folder.removePrefix("workflows/"),
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                        )
+                        Icon(Icons.Default.ExpandMore, null)
+                    }
+                    DropdownMenu(
+                        expanded = folderMenuExpanded,
+                        onDismissRequest = { folderMenuExpanded = false },
+                    ) {
+                        folders.forEach { option ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(if (option == "workflows") "工作流根目录" else option.removePrefix("workflows/"))
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        if (option == folder) Icons.Default.CheckCircle else Icons.Default.Folder,
+                                        null,
+                                    )
+                                },
+                                onClick = {
+                                    folder = option
+                                    folderMenuExpanded = false
+                                },
+                            )
+                        }
+                    }
+                }
+                Text("保存位置：$folder", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(name, folder) }, enabled = name.isNotBlank()) { Text("另存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun ConfirmDialog(
+    title: String,
+    message: String,
+    onDismiss: () -> Unit,
+    confirmLabel: String = "确认",
+    onConfirm: () -> Unit,
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = { Text(message) },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("确认") } },
+        confirmButton = { TextButton(onClick = onConfirm) { Text(confirmLabel) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }

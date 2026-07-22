@@ -4,6 +4,16 @@ import com.local.comfyuimobile.model.CacheOutputRule
 import com.local.comfyuimobile.model.ResultMedia
 
 object CachePolicy {
+    fun hasConfiguredOutput(
+        rules: List<CacheOutputRule>,
+        serverUrl: String?,
+        outputNodeTypes: Set<String>,
+    ): Boolean = !serverUrl.isNullOrBlank() && rules.any { rule ->
+        rule.enabled &&
+            rule.serverUrl == serverUrl &&
+            rule.nodeType in outputNodeTypes
+    }
+
     fun shouldCache(
         media: ResultMedia,
         submittedJobIds: Set<String>,

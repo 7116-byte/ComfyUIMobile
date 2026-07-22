@@ -505,15 +505,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun saveWorkflowAs(name: String) {
+    fun saveWorkflowAs(name: String, folder: String) {
         if (workflowSaveJob?.isActive == true || generationJob?.isActive == true || _state.value.generating) return
         val document = _state.value.selectedWorkflow ?: return
         _state.update { it.copy(loading = true, error = null) }
         workflowSaveJob = viewModelScope.launch {
             runOperation("工作流另存失败") {
-                val folder = document.entry.path.substringBeforeLast('/', "workflows")
                 val fileName = WorkflowPath.fileName(name)
-                val destination = "$folder/$fileName"
+                val destination = "${WorkflowPath.folder(folder)}/$fileName"
                 require(destination != document.entry.path) { "另存名称不能与当前工作流相同" }
                 require(client.listWorkflows().none { it.path == destination }) { "同名工作流已存在，请换一个名称" }
 
