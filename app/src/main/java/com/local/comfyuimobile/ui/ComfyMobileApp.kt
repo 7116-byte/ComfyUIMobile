@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,6 +19,8 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -114,6 +117,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -180,8 +184,11 @@ import com.local.comfyuimobile.model.WorkflowNode
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.launch
 import kotlin.random.Random
+
+private const val IME_RELOCATION_SUPPRESSION_MILLIS = 700L
 
 private enum class MainPage(val label: String, val icon: ImageVector) {
     WORKFLOWS("工作流", Icons.Default.Folder),
@@ -591,6 +598,7 @@ private fun WorkflowRow(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     val workflow = state.selectedWorkflow
@@ -637,6 +645,18 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         state.workflows.firstOrNull { !it.isDirectory && it.path == path }
     }.let { entries -> listOf(workflow.entry) + entries.filterNot { it.path == workflow.entry.path } }
         .distinctBy { it.path }
+    val defaultBringIntoViewSpec = LocalBringIntoViewSpec.current
+    val suppressAutomaticRelocationUntil = remember(workflow.entry.path) { AtomicLong(0L) }
+    val parameterBringIntoViewSpec = remember(workflow.entry.path, defaultBringIntoViewSpec) {
+        object : BringIntoViewSpec {
+            override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float =
+                if (SystemClock.uptimeMillis() < suppressAutomaticRelocationUntil.get()) {
+                    0f
+                } else {
+                    defaultBringIntoViewSpec.calculateScrollDistance(offset, size, containerSize)
+                }
+        }
+    }
     LaunchedEffect(problemNodeIds) {
         if (problemNodeIds.isNotEmpty()) expandedNodeIds = expandedNodeIds + problemNodeIds
     }
@@ -745,37 +765,46 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                 }
             }
         }
-        Column(
-            Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+        CompositionLocalProvider(
+            LocalBringIntoViewSpec provides parameterBringIntoViewSpec,
         ) {
-            nodes.forEach { (node, fields) ->
-                key(node.id) {
-                    val nodeId = node.id
-                    NodeParameterCard(
-                        node = node,
-                        fields = fields,
-                        expanded = nodeId in expandedNodeIds,
-                        active = state.currentExecutingNodeId == nodeId,
-                        problems = localProblemsByNode[nodeId].orEmpty() + state.nodeProblems[nodeId].orEmpty(),
-                        cached = state.cacheOutputRules.any {
-                            it.enabled && it.serverUrl == state.activeServer?.baseUrl && it.nodeType == node.type
-                        },
-                        onToggle = {
-                            expandedNodeIds = if (nodeId in expandedNodeIds) expandedNodeIds - nodeId else expandedNodeIds + nodeId
-                        },
-                        onLongPress = if (node.isOutput) ({ cacheNode = node }) else null,
-                        viewModel = viewModel,
-                        onHistory = { historyField = it },
-                        onUpload = { field ->
-                            uploadField = field
-                            uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
-                        },
-                        multilineEditorStates = multilineEditorStates,
-                    )
+            Column(
+                Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                nodes.forEach { (node, fields) ->
+                    key(node.id) {
+                        val nodeId = node.id
+                        NodeParameterCard(
+                            node = node,
+                            fields = fields,
+                            expanded = nodeId in expandedNodeIds,
+                            active = state.currentExecutingNodeId == nodeId,
+                            problems = localProblemsByNode[nodeId].orEmpty() + state.nodeProblems[nodeId].orEmpty(),
+                            cached = state.cacheOutputRules.any {
+                                it.enabled && it.serverUrl == state.activeServer?.baseUrl && it.nodeType == node.type
+                            },
+                            onToggle = {
+                                expandedNodeIds = if (nodeId in expandedNodeIds) expandedNodeIds - nodeId else expandedNodeIds + nodeId
+                            },
+                            onLongPress = if (node.isOutput) ({ cacheNode = node }) else null,
+                            viewModel = viewModel,
+                            onHistory = { historyField = it },
+                            onUpload = { field ->
+                                uploadField = field
+                                uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
+                            },
+                            multilineEditorStates = multilineEditorStates,
+                            onMultilineFocusGained = {
+                                suppressAutomaticRelocationUntil.set(
+                                    SystemClock.uptimeMillis() + IME_RELOCATION_SUPPRESSION_MILLIS,
+                                )
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -871,6 +900,7 @@ private fun NodeParameterCard(
     onHistory: (ParameterField) -> Unit,
     onUpload: (ParameterField) -> Unit,
     multilineEditorStates: MutableMap<String, TextFieldValue>,
+    onMultilineFocusGained: () -> Unit,
 ) {
     val title = node.title.ifBlank { node.type.ifBlank { "未命名节点" } }
     val bringIntoViewRequester = remember(node.id) { BringIntoViewRequester() }
@@ -958,6 +988,7 @@ private fun NodeParameterCard(
                                             onHistory = { onHistory(field) },
                                             onUpload = { onUpload(field) },
                                             multilineEditorStates = multilineEditorStates,
+                                            onMultilineFocusGained = onMultilineFocusGained,
                                         )
                                         if (index < fields.lastIndex || hasSeedActions) HorizontalDivider()
                                     }
@@ -1053,6 +1084,7 @@ private fun ParameterEditor(
     onHistory: () -> Unit,
     onUpload: () -> Unit,
     multilineEditorStates: MutableMap<String, TextFieldValue>,
+    onMultilineFocusGained: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1099,7 +1131,12 @@ private fun ParameterEditor(
                     Spacer(Modifier.width(6.dp)); Text("选择并上传")
                 }
             }
-            ParameterKind.MULTILINE -> MultilineTextField(field, viewModel, multilineEditorStates)
+            ParameterKind.MULTILINE -> MultilineTextField(
+                field,
+                viewModel,
+                multilineEditorStates,
+                onFocusGained = onMultilineFocusGained,
+            )
             ParameterKind.TEXT -> OutlinedTextField(
                 field.displayValue,
                 { viewModel.updateField(field.key, it) },
@@ -1148,6 +1185,7 @@ private fun MultilineTextField(
     field: ParameterField,
     viewModel: MainViewModel,
     editorStates: MutableMap<String, TextFieldValue>,
+    onFocusGained: () -> Unit,
 ) {
     var editorValue by remember(field.key) {
         mutableStateOf(
@@ -1178,7 +1216,11 @@ private fun MultilineTextField(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(2f)
-            .onFocusChanged { focused = it.isFocused },
+            .onFocusChanged {
+                val gainedFocus = it.isFocused && !focused
+                focused = it.isFocused
+                if (gainedFocus) onFocusGained()
+            },
         enabled = !field.linked,
     )
 }
