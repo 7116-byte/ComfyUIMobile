@@ -6,7 +6,6 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -20,6 +19,8 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,11 +36,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
@@ -121,6 +120,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -136,11 +136,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -612,6 +610,7 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         mutableStateOf(workflow.entry.path.substringBeforeLast('/', "workflows"))
     }
     var confirmGenerateWithoutLocalOutput by remember { mutableStateOf(false) }
+    val multilineEditorStates = remember(workflow.entry.path) { mutableStateMapOf<String, TextFieldValue>() }
     val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val field = uploadField
         if (uri != null && field != null) viewModel.uploadField(field, uri)
@@ -638,14 +637,8 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         state.workflows.firstOrNull { !it.isDirectory && it.path == path }
     }.let { entries -> listOf(workflow.entry) + entries.filterNot { it.path == workflow.entry.path } }
         .distinctBy { it.path }
-    val listState = rememberLazyListState()
     LaunchedEffect(problemNodeIds) {
         if (problemNodeIds.isNotEmpty()) expandedNodeIds = expandedNodeIds + problemNodeIds
-    }
-    LaunchedEffect(state.currentExecutingNodeId, nodes.size) {
-        val nodeId = state.currentExecutingNodeId ?: return@LaunchedEffect
-        val index = nodes.indexOfFirst { it.first.id == nodeId }
-        if (index >= 0) listState.animateScrollToItem(index)
     }
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -752,34 +745,38 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                 }
             }
         }
-        LazyColumn(
-            Modifier.weight(1f),
-            state = listState,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+        Column(
+            Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            items(nodes, key = { it.first.id }) { (node, fields) ->
-                val nodeId = node.id
-                NodeParameterCard(
-                    node = node,
-                    fields = fields,
-                    expanded = nodeId in expandedNodeIds,
-                    active = state.currentExecutingNodeId == nodeId,
-                    problems = localProblemsByNode[nodeId].orEmpty() + state.nodeProblems[nodeId].orEmpty(),
-                    cached = state.cacheOutputRules.any {
-                        it.enabled && it.serverUrl == state.activeServer?.baseUrl && it.nodeType == node.type
-                    },
-                    onToggle = {
-                        expandedNodeIds = if (nodeId in expandedNodeIds) expandedNodeIds - nodeId else expandedNodeIds + nodeId
-                    },
-                    onLongPress = if (node.isOutput) ({ cacheNode = node }) else null,
-                    viewModel = viewModel,
-                    onHistory = { historyField = it },
-                    onUpload = { field ->
-                        uploadField = field
-                        uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
-                    },
-                )
+            nodes.forEach { (node, fields) ->
+                key(node.id) {
+                    val nodeId = node.id
+                    NodeParameterCard(
+                        node = node,
+                        fields = fields,
+                        expanded = nodeId in expandedNodeIds,
+                        active = state.currentExecutingNodeId == nodeId,
+                        problems = localProblemsByNode[nodeId].orEmpty() + state.nodeProblems[nodeId].orEmpty(),
+                        cached = state.cacheOutputRules.any {
+                            it.enabled && it.serverUrl == state.activeServer?.baseUrl && it.nodeType == node.type
+                        },
+                        onToggle = {
+                            expandedNodeIds = if (nodeId in expandedNodeIds) expandedNodeIds - nodeId else expandedNodeIds + nodeId
+                        },
+                        onLongPress = if (node.isOutput) ({ cacheNode = node }) else null,
+                        viewModel = viewModel,
+                        onHistory = { historyField = it },
+                        onUpload = { field ->
+                            uploadField = field
+                            uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
+                        },
+                        multilineEditorStates = multilineEditorStates,
+                    )
+                }
             }
         }
         Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -873,15 +870,28 @@ private fun NodeParameterCard(
     viewModel: MainViewModel,
     onHistory: (ParameterField) -> Unit,
     onUpload: (ParameterField) -> Unit,
+    multilineEditorStates: MutableMap<String, TextFieldValue>,
 ) {
     val title = node.title.ifBlank { node.type.ifBlank { "未命名节点" } }
+    val bringIntoViewRequester = remember(node.id) { BringIntoViewRequester() }
+    LaunchedEffect(active) {
+        if (active) {
+            kotlinx.coroutines.delay(50)
+            bringIntoViewRequester.bringIntoView()
+        }
+    }
     var headerHeightPx by remember(node.id) { mutableIntStateOf(0) }
     var inputMarkerHeightPx by remember(node.id) { mutableIntStateOf(0) }
     var outputMarkerHeightPx by remember(node.id) { mutableIntStateOf(0) }
     val density = LocalDensity.current
     val inputMarkerTop = with(density) { ((headerHeightPx - inputMarkerHeightPx).coerceAtLeast(0) / 2f).toDp() }
     val outputMarkerTop = with(density) { ((headerHeightPx - outputMarkerHeightPx).coerceAtLeast(0) / 2f).toDp() }
-    Box(Modifier.fillMaxWidth().padding(horizontal = 7.dp)) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 7.dp)
+            .bringIntoViewRequester(bringIntoViewRequester),
+    ) {
         OutlinedCard(
             modifier = Modifier.fillMaxWidth(),
             border = BorderStroke(
@@ -947,6 +957,7 @@ private fun NodeParameterCard(
                                             viewModel,
                                             onHistory = { onHistory(field) },
                                             onUpload = { onUpload(field) },
+                                            multilineEditorStates = multilineEditorStates,
                                         )
                                         if (index < fields.lastIndex || hasSeedActions) HorizontalDivider()
                                     }
@@ -1041,6 +1052,7 @@ private fun ParameterEditor(
     viewModel: MainViewModel,
     onHistory: () -> Unit,
     onUpload: () -> Unit,
+    multilineEditorStates: MutableMap<String, TextFieldValue>,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1087,7 +1099,7 @@ private fun ParameterEditor(
                     Spacer(Modifier.width(6.dp)); Text("选择并上传")
                 }
             }
-            ParameterKind.MULTILINE -> MultilineTextField(field, viewModel)
+            ParameterKind.MULTILINE -> MultilineTextField(field, viewModel, multilineEditorStates)
             ParameterKind.TEXT -> OutlinedTextField(
                 field.displayValue,
                 { viewModel.updateField(field.key, it) },
@@ -1135,103 +1147,40 @@ private fun NumberField(field: ParameterField, viewModel: MainViewModel) {
 private fun MultilineTextField(
     field: ParameterField,
     viewModel: MainViewModel,
+    editorStates: MutableMap<String, TextFieldValue>,
 ) {
-    var editorOpen by remember(field.key) { mutableStateOf(false) }
-    Box(Modifier.fillMaxWidth().aspectRatio(2f)) {
-        OutlinedTextField(
-            value = field.displayValue,
-            onValueChange = {},
-            modifier = Modifier.fillMaxSize(),
-            enabled = !field.linked,
-            readOnly = true,
-        )
-        if (!field.linked) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .clickable { editorOpen = true },
-            )
-        }
-    }
-    if (editorOpen) {
-        MultilineEditorDialog(
-            title = field.label,
-            initialValue = field.displayValue,
-            onDismiss = { editorOpen = false },
-            onConfirm = { value ->
-                viewModel.updateField(field.key, value)
-                editorOpen = false
-            },
-        )
-    }
-}
-
-@Composable
-private fun MultilineEditorDialog(
-    title: String,
-    initialValue: String,
-    onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit,
-) {
-    var editorValue by remember(initialValue) {
+    var editorValue by remember(field.key) {
         mutableStateOf(
-            TextFieldValue(
-                text = initialValue,
-                selection = TextRange(initialValue.length),
+            editorStates[field.key] ?: TextFieldValue(
+                text = field.displayValue,
+                selection = TextRange(field.displayValue.length),
             ),
         )
     }
-    val focusRequester = remember { FocusRequester() }
-    val keyboardController = LocalSoftwareKeyboardController.current
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            decorFitsSystemWindows = false,
-        ),
-    ) {
-        val view = LocalView.current
-        DisposableEffect(view) {
-            val window = (view.parent as? DialogWindowProvider)?.window
-            window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-            onDispose { }
-        }
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = MaterialTheme.colorScheme.background,
-        ) {
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .navigationBarsPadding(),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    TextButton(onClick = onDismiss) { Text("取消") }
-                    Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, maxLines = 1)
-                    Button(onClick = { onConfirm(editorValue.text) }) { Text("完成") }
-                }
-                OutlinedTextField(
-                    value = editorValue,
-                    onValueChange = { editorValue = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                        .focusRequester(focusRequester),
-                )
-            }
-        }
-        LaunchedEffect(Unit) {
-            kotlinx.coroutines.delay(150)
-            focusRequester.requestFocus()
-            keyboardController?.show()
+    var focused by remember(field.key) { mutableStateOf(false) }
+    LaunchedEffect(field.displayValue, focused) {
+        if (!focused && field.displayValue != editorValue.text) {
+            val updated = TextFieldValue(
+                text = field.displayValue,
+                selection = TextRange(field.displayValue.length),
+            )
+            editorValue = updated
+            editorStates[field.key] = updated
         }
     }
+    OutlinedTextField(
+        value = editorValue,
+        onValueChange = { value ->
+            editorValue = value
+            editorStates[field.key] = value
+            if (value.text != field.displayValue) viewModel.updateField(field.key, value.text)
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(2f)
+            .onFocusChanged { focused = it.isFocused },
+        enabled = !field.linked,
+    )
 }
 
 @Composable
