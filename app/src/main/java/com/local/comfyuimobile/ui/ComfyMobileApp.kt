@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
@@ -619,7 +620,12 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     }
     var confirmGenerateWithoutLocalOutput by remember { mutableStateOf(false) }
     val multilineEditorStates = remember(workflow.entry.path) { mutableStateMapOf<String, TextFieldValue>() }
-    val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val imageUploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        val field = uploadField
+        if (uri != null && field != null) viewModel.uploadField(field, uri)
+        uploadField = null
+    }
+    val videoUploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         val field = uploadField
         if (uri != null && field != null) viewModel.uploadField(field, uri)
         uploadField = null
@@ -795,7 +801,15 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                             onHistory = { historyField = it },
                             onUpload = { field ->
                                 uploadField = field
-                                uploadLauncher.launch(if (field.kind == ParameterKind.VIDEO) arrayOf("video/*") else arrayOf("image/*"))
+                                if (field.kind == ParameterKind.VIDEO) {
+                                    videoUploadLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly),
+                                    )
+                                } else {
+                                    imageUploadLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                    )
+                                }
                             },
                             multilineEditorStates = multilineEditorStates,
                             onMultilineFocusGained = {
@@ -1128,7 +1142,8 @@ private fun ParameterEditor(
                 )
                 FilledTonalButton(onClick = onUpload, enabled = !field.linked) {
                     Icon(if (field.kind == ParameterKind.VIDEO) Icons.Default.VideoFile else Icons.Default.UploadFile, null)
-                    Spacer(Modifier.width(6.dp)); Text("选择并上传")
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (field.kind == ParameterKind.VIDEO) "从视频相册选择并上传" else "从相册选择并上传")
                 }
             }
             ParameterKind.MULTILINE -> MultilineTextField(
