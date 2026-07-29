@@ -597,13 +597,82 @@ class ComfyBridge(private val activity: Activity) {
             const loadedIds = new Set((rootGraph?._nodes || []).map(node => String(node.id)));
             const missing = (workflow.nodes || []).filter(node => !loadedIds.has(String(node.id))).map(node => node.type);
             if (missing.length) return JSON.stringify({ok:false, error:'缺失节点：' + [...new Set(missing)].join(', ')});
-            const activeNodes = (rootGraph?._nodes || []).filter(node => ![2, 4].includes(Number(node.mode ?? 0)));
+            const allNodes = rootGraph?._nodes || [];
+            const allNodeById = new Map(allNodes.map(node => [String(node.id), node]));
+            const activeNodes = allNodes.filter(node => ![2, 4].includes(Number(node.mode ?? 0)));
             const nodeById = new Map(activeNodes.map(node => [String(node.id), node]));
+            const linkValue = (link, property, fallbackIndex) => link?.[property] ?? link?.[fallbackIndex];
             const getLink = (id) => rootGraph?.links?.get?.(id) ?? rootGraph?.links?.[id];
-            const parentIds = (node) => (node.inputs || []).map(input => {
+            const typeValues = (value) => (Array.isArray(value) ? value : [value])
+              .map(item => String(item || '').toUpperCase())
+              .filter(Boolean);
+            const typesMatch = (inputType, outputType) => {
+              const inputs = typeValues(inputType);
+              const outputs = typeValues(outputType);
+              if (!inputs.length || !outputs.length) return true;
+              return inputs.includes('*') || outputs.includes('*') || inputs.some(type => outputs.includes(type));
+            };
+            const bypassInputsForOutput = (node, outputSlot) => {
+              const linkedInputs = (node.inputs || [])
+                .map((input, index) => ({input, index}))
+                .filter(item => item.input?.link != null);
+              if (!linkedInputs.length) return [];
+              const outputType = node.outputs?.[outputSlot]?.type;
+              const compatible = linkedInputs.filter(item => typesMatch(item.input?.type, outputType));
+              const sameSlot = compatible.find(item => item.index === outputSlot);
+              if (sameSlot) return [sameSlot];
+              if (compatible.length === 1) return compatible;
+              if (compatible.length > 1) return [compatible[Math.min(outputSlot, compatible.length - 1)]];
+              return linkedInputs.length === 1 ? linkedInputs : [];
+            };
+            const resolveActiveOrigins = (link, visiting = new Set()) => {
+              if (link == null) return [];
+              const originId = String(linkValue(link, 'origin_id', 1));
+              const originSlot = Number(linkValue(link, 'origin_slot', 2) ?? 0);
+              const origin = allNodeById.get(originId);
+              if (!origin) return [];
+              const mode = Number(origin.mode ?? 0);
+              if (mode === 2) return [];
+              if (mode !== 4) {
+                return [{
+                  originId,
+                  originSlot,
+                  type:String(linkValue(link, 'type', 5) || origin.outputs?.[originSlot]?.type || '')
+                }];
+              }
+              const visitKey = originId + ':' + originSlot;
+              if (visiting.has(visitKey)) return [];
+              const next = new Set(visiting);
+              next.add(visitKey);
+              return bypassInputsForOutput(origin, originSlot).flatMap(item =>
+                resolveActiveOrigins(getLink(item.input.link), next)
+              );
+            };
+            const resolveInputOrigins = (node, input, inputIndex) => {
+              if (typeof node.resolveInput === 'function') {
+                try {
+                  const resolved = node.resolveInput(inputIndex);
+                  if (resolved?.widgetInfo) return [];
+                  if (resolved != null) {
+                    const originId = String(resolved.origin_id ?? resolved.originId ?? resolved[1]);
+                    if (allNodeById.has(originId)) {
+                      return [{
+                        originId,
+                        originSlot:Number(resolved.origin_slot ?? resolved.originSlot ?? resolved[2] ?? 0),
+                        type:String(resolved.type ?? resolved[5] ?? input?.type ?? '')
+                      }];
+                    }
+                  }
+                } catch (_) {
+                  // Older/custom LiteGraph nodes may not implement the official resolver completely.
+                }
+              }
               const link = input.link == null ? null : getLink(input.link);
-              return link == null ? null : String(link.origin_id ?? link.originId ?? link[1]);
-            }).filter(id => id && nodeById.has(id));
+              return resolveActiveOrigins(link);
+            };
+            const parentIds = (node) => [...new Set((node.inputs || []).flatMap((input, inputIndex) => {
+              return resolveInputOrigins(node, input, inputIndex).map(origin => origin.originId);
+            }).filter(id => id && nodeById.has(id)))];
             const isOutputNode = (node) => {
               const data = node.constructor?.nodeData || node.nodeData || {};
               return data.output_node === true || data.outputNode === true || /(?:Save|Preview|Output)/i.test(String(node.comfyClass || node.type || ''));
@@ -644,14 +713,15 @@ class ComfyBridge(private val activity: Activity) {
             const displayOrderById = new Map(displayNodes.map((node, index) => [String(node.id), index]));
             const inputMarkersByNode = new Map();
             const outputMarkersByNode = new Map();
-            const rawLinks = rootGraph?.links;
-            const allLinks = rawLinks instanceof Map ? [...rawLinks.values()] : Object.values(rawLinks || {});
-            const linkValue = (link, property, fallbackIndex) => link?.[property] ?? link?.[fallbackIndex];
-            const relevantLinks = allLinks.filter(link => {
-              const originId = String(linkValue(link, 'origin_id', 1));
-              const targetId = String(linkValue(link, 'target_id', 3));
-              return executionIds.has(originId) && executionIds.has(targetId);
-            });
+            const relevantLinks = activeNodes.flatMap(node => (node.inputs || []).flatMap((input, targetSlot) => {
+              return resolveInputOrigins(node, input, targetSlot).map(origin => ({
+                origin_id:origin.originId,
+                origin_slot:origin.originSlot,
+                target_id:String(node.id),
+                target_slot:targetSlot,
+                type:String(input.type || origin.type || '')
+              }));
+            })).filter(link => executionIds.has(link.origin_id) && executionIds.has(link.target_id));
             const linkGroups = new Map();
             for (const link of relevantLinks) {
               const originId = String(linkValue(link, 'origin_id', 1));
