@@ -53,17 +53,26 @@ class JobMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = try {
-        handleStartCommand(intent, startId)
-    } catch (error: Throwable) {
-        AppLogger.error("后台任务服务启动失败", error)
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val promptId = intent?.getStringExtra(EXTRA_PROMPT_ID).orEmpty()
-        monitors.remove(promptId)?.cancel()
-        workflowNames.remove(promptId)
-        runCatching { releaseBackgroundLocks() }
-        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
-        stopSelf(startId)
-        START_NOT_STICKY
+        val workflowName = intent?.getStringExtra(EXTRA_WORKFLOW_NAME).orEmpty().ifBlank {
+            workflowNames[promptId].orEmpty().ifBlank { "ComfyUI 工作流" }
+        }
+        return try {
+            // startForegroundService() 启动后必须立刻建立前台通知。日志、锁和任务恢复均放在其后，
+            // 避免系统在进程繁忙或锁获取变慢时抛出 ForegroundServiceDidNotStartInTimeException。
+            startForeground(FOREGROUND_ID, notification("正在准备后台任务", workflowName, true))
+            AppLogger.info("后台前台通知已建立：任务=${promptId.ifBlank { "待恢复" }}")
+            handleStartCommand(intent, startId)
+        } catch (error: Throwable) {
+            AppLogger.error("后台任务服务启动失败，任务=${promptId.ifBlank { "未知" }}", error)
+            monitors.remove(promptId)?.cancel()
+            workflowNames.remove(promptId)
+            runCatching { releaseBackgroundLocks() }
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            stopSelf(startId)
+            START_NOT_STICKY
+        }
     }
 
     private fun handleStartCommand(intent: Intent?, startId: Int): Int {
@@ -93,8 +102,8 @@ class JobMonitorService : Service() {
         }
         workflowNames[promptId] = workflowName
         AppLogger.info("后台开始监控任务：$promptId，工作流=$workflowName")
-        holdBackgroundLocks()
         startForeground(FOREGROUND_ID, notification("正在生成", workflowName, true))
+        holdBackgroundLocks()
         monitors.remove(promptId)?.cancel()
         val monitor = scope.launch(start = CoroutineStart.LAZY) {
             var consecutivePollFailures = 0

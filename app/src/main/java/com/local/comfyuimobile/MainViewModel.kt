@@ -20,6 +20,7 @@ import com.local.comfyuimobile.data.AppPreferences
 import com.local.comfyuimobile.data.AppLogger
 import com.local.comfyuimobile.data.LocalResultCache
 import com.local.comfyuimobile.data.PromptHistory
+import com.local.comfyuimobile.data.RecentWorkflows
 import com.local.comfyuimobile.data.WorkflowPolicy
 import com.local.comfyuimobile.data.WorkflowPath
 import com.local.comfyuimobile.model.AppUiState
@@ -291,7 +292,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun selectWorkflow(entry: WorkflowEntry) {
+    fun selectWorkflow(entry: WorkflowEntry, recordAsOpened: Boolean = false) {
         if (entry.isDirectory) return
         AppLogger.info("加载工作流：${entry.path}")
         parameterRefreshJob?.cancel()
@@ -310,9 +311,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         notice = "已加载 ${entry.name}",
                     )
                 }
-                preferences.setRecentWorkflow(entry.path)
+                if (recordAsOpened) {
+                    updateRecentWorkflowState(entry.path)
+                    preferences.setRecentWorkflow(entry.path)
+                }
             }
         }
+    }
+
+    fun recordSelectedWorkflowOpened() {
+        val path = _state.value.selectedWorkflow?.entry?.path ?: return
+        updateRecentWorkflowState(path)
+        viewModelScope.launch { preferences.setRecentWorkflow(path) }
     }
 
     fun updateField(key: String, value: String) {
@@ -699,7 +709,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         notice = "已从${if (isImage) "图片" else "文件"}导入 $candidateName",
                     )
                 }
-                preferences.setRecentWorkflow(entry.path)
             }
         }
     }
@@ -1294,6 +1303,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateFieldLayout(key: String, transform: (ParameterField) -> ParameterField) {
         _state.update { ui -> ui.copy(fields = ui.fields.map { if (it.key == key) transform(it) else it }) }
+    }
+
+    private fun updateRecentWorkflowState(path: String, replacedPath: String? = null) {
+        _state.update { ui ->
+            ui.copy(
+                recentWorkflowPaths = RecentWorkflows.add(
+                    current = ui.recentWorkflowPaths,
+                    path = path,
+                    replacedPath = replacedPath,
+                ),
+            )
+        }
     }
 
     private fun refreshParametersAfterWorkflowSwitch() {

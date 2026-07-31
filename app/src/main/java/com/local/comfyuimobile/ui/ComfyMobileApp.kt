@@ -166,6 +166,7 @@ import com.local.comfyuimobile.AdvancedEditorActivity
 import com.local.comfyuimobile.bridge.ComfyBridge
 import com.local.comfyuimobile.bridge.FieldValidator
 import com.local.comfyuimobile.data.CachePolicy
+import com.local.comfyuimobile.data.RecentWorkflows
 import com.local.comfyuimobile.data.WorkflowBrowser
 import com.local.comfyuimobile.data.WorkflowPath
 import com.local.comfyuimobile.model.AppUiState
@@ -524,7 +525,7 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
             }
         }
         Text(
-            "单击选择工作流，选择后点击“打开参数”",
+            "单击工作流只预读取参数，不会跳转；读取完成后点击上方“打开参数”",
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -534,7 +535,10 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Button(onClick = onOpenParameters) { Text("打开参数") }
+                Button(onClick = {
+                    viewModel.recordSelectedWorkflowOpened()
+                    onOpenParameters()
+                }) { Text("打开参数") }
                 OutlinedButton(onClick = {
                     dialogText = state.selectedWorkflow.entry.name.substringBeforeLast('.')
                     duplicateDialog = true
@@ -647,9 +651,8 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     val localProblems = FieldValidator.detailedProblems(state.fields)
     val localProblemsByNode = localProblems.groupBy { it.nodeId }.mapValues { (_, items) -> items.map { it.message } }
     val problemNodeIds = localProblemsByNode.keys + state.nodeProblems.keys
-    val recentWorkflows = state.recentWorkflowPaths.mapNotNull { path ->
-        state.workflows.firstOrNull { !it.isDirectory && it.path == path }
-    }.let { entries -> listOf(workflow.entry) + entries.filterNot { it.path == workflow.entry.path } }
+    val recentWorkflows = RecentWorkflows.resolveEntries(state.recentWorkflowPaths, state.workflows)
+        .let { entries -> listOf(workflow.entry) + entries.filterNot { it.path == workflow.entry.path } }
         .distinctBy { it.path }
     val defaultBringIntoViewSpec = LocalBringIntoViewSpec.current
     val suppressAutomaticRelocationUntil = remember(workflow.entry.path) { AtomicLong(0L) }
@@ -724,7 +727,9 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                                 },
                                 onClick = {
                                     recentMenuExpanded = false
-                                    if (entry.path != workflow.entry.path) viewModel.selectWorkflow(entry)
+                                    if (entry.path != workflow.entry.path) {
+                                        viewModel.selectWorkflow(entry, recordAsOpened = true)
+                                    }
                                 },
                             )
                         }
