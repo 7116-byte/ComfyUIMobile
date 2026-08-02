@@ -740,12 +740,15 @@ class ComfyBridge(private val activity: Activity) {
               }
               const loadFromRemote = !persistedWorkflow.isLoaded;
               if (loadFromRemote) await persistedWorkflow.load();
-              const persistedState = persistedWorkflow.activeState;
-              if (!persistedState) {
+              if (!persistedWorkflow.activeState) {
                 return JSON.stringify({ok:false, error:'服务器工作流内容尚未加载：' + serverWorkflowPath});
               }
+              // The supplied JSON is the App's single working copy. Associate it
+              // with the real ComfyUI workflow tab, but never replace it with a
+              // stale server/browser draft while parameters or advanced edits are
+              // still unsaved on the phone.
               await app.loadGraphData(
-                persistedState,
+                workflow,
                 true,
                 true,
                 persistedWorkflow,
@@ -765,8 +768,8 @@ class ComfyBridge(private val activity: Activity) {
                 });
               }
 
-              // Apply values changed in the phone form only after ComfyUI has
-              // opened the real persisted graph, so its links and subgraphs stay intact.
+              // Re-run widget callbacks after opening the exact working graph so
+              // custom controls and group bypassers reflect the supplied values.
               const openedGraph = app.rootGraph || app.graph;
               const openedNodes = new Map((openedGraph?._nodes || []).map(node => [String(node.id), node]));
               const cloneValue = (value) => {

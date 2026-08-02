@@ -87,6 +87,9 @@ data class WorkflowDocument(
     val rawJson: String,
     val fields: List<ParameterField>,
     val nodes: List<WorkflowNode> = emptyList(),
+    val serverUrl: String = "",
+    val baseModified: Double = entry.modified,
+    val hasUnsavedChanges: Boolean = false,
 )
 
 enum class JobState { RUNNING, PENDING, SUCCESS, ERROR, CANCELLED, UNKNOWN }
@@ -194,6 +197,8 @@ data class AppUiState(
     val advancedEditor: Boolean = false,
     val workflowOverwriteRequired: Boolean = false,
     val workflowOverwriteReason: String = "",
+    val workflowDraftConflictRequired: Boolean = false,
+    val workflowDraftConflictReason: String = "",
     val error: String? = null,
     val notice: String? = null,
     val updateInfo: UpdateInfo? = null,

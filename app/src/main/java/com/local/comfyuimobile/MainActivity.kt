@@ -72,6 +72,11 @@ class MainActivity : ComponentActivity() {
         handleJobNotification(intent)
     }
 
+    override fun onStop() {
+        viewModel.persistCurrentWorkflowDraft()
+        super.onStop()
+    }
+
     override fun onDestroy() {
         if (receiverRegistered) unregisterReceiver(downloadReceiver)
         if (localResultsReceiverRegistered) unregisterReceiver(localResultsReceiver)

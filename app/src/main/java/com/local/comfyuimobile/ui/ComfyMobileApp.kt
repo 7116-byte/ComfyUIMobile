@@ -702,9 +702,14 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                         Column(Modifier.weight(1f)) {
                             Text(workflow.entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 1)
                             Text(
-                                "${nodes.size} 个流程部件 · ${state.fields.count { it.visible }} 个参数",
+                                "${nodes.size} 个流程部件 · ${state.fields.count { it.visible }} 个参数" +
+                                    if (workflow.hasUnsavedChanges) " · 本地草稿" else "",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = if (workflow.hasUnsavedChanges) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
                                 maxLines = 1,
                             )
                         }
@@ -869,6 +874,19 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         if (firstProblem != null) {
             Text(firstProblem, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         }
+    }
+    if (state.workflowDraftConflictRequired) {
+        WorkflowDraftConflictDialog(
+            message = state.workflowDraftConflictReason,
+            onKeepLocal = viewModel::dismissWorkflowDraftConflict,
+            onLoadServer = viewModel::discardLocalWorkflowDraft,
+            onSaveAs = {
+                viewModel.dismissWorkflowDraftConflict()
+                saveAsName = workflow.entry.name.substringBeforeLast('.') + "-本地草稿"
+                saveAsFolder = workflow.entry.path.substringBeforeLast('/', "workflows")
+                saveAsDialog = true
+            },
+        )
     }
     if (state.workflowOverwriteRequired) {
         ConfirmDialog(
@@ -2225,6 +2243,29 @@ private fun SaveWorkflowAsDialog(
             TextButton(onClick = { onConfirm(name, folder) }, enabled = name.isNotBlank()) { Text("另存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun WorkflowDraftConflictDialog(
+    message: String,
+    onKeepLocal: () -> Unit,
+    onLoadServer: () -> Unit,
+    onSaveAs: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onKeepLocal,
+        title = { Text("本地草稿与服务器版本冲突") },
+        text = { Text(message) },
+        confirmButton = {
+            TextButton(onClick = onKeepLocal) { Text("继续手机草稿") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onLoadServer) { Text("读取服务器版") }
+                TextButton(onClick = onSaveAs) { Text("另存") }
+            }
+        },
     )
 }
 
