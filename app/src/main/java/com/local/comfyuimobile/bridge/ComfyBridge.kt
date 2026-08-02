@@ -198,7 +198,7 @@ class ComfyBridge(private val activity: Activity) {
     ): WorkflowManifest {
         awaitReady()
         val encoded = Base64.getEncoder().encodeToString(rawJson.toByteArray(Charsets.UTF_8))
-        val encodedPath = normalizeServerWorkflowPath(workflowPath)
+        val encodedPath = frontendWorkflowStorePath(workflowPath)
             ?.let { Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)) }
         val response = evaluate(workflowManifestScript(encoded, encodedPath, forceLinksVisible))
         val root = JSONObject(response)
@@ -617,7 +617,76 @@ class ComfyBridge(private val activity: Activity) {
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedWorkflow'), c => c.charCodeAt(0)));
             const workflow = JSON.parse(text);
             const serverWorkflowPath = ${encodedWorkflowPath?.let { "new TextDecoder().decode(Uint8Array.from(atob('$it'), c => c.charCodeAt(0)))" } ?: "''"};
-            await app.loadGraphData(workflow, true, false, serverWorkflowPath || null);
+            if (serverWorkflowPath) {
+              // Follow the same path as ComfyUI's workflow sidebar: resolve the
+              // persisted ComfyWorkflow first and pass that object to loadGraphData.
+              const workflowStore = app.extensionManager?.workflow;
+              if (!workflowStore?.getWorkflowByPath || !workflowStore?.syncWorkflows) {
+                return JSON.stringify({ok:false, error:'当前 ComfyUI 前端未提供官方工作流打开接口'});
+              }
+              await workflowStore.syncWorkflows();
+              const persistedWorkflow = workflowStore.getWorkflowByPath(serverWorkflowPath);
+              if (!persistedWorkflow) {
+                return JSON.stringify({ok:false, error:'服务器工作流列表中找不到：' + serverWorkflowPath});
+              }
+              const loadFromRemote = !persistedWorkflow.isLoaded;
+              if (loadFromRemote) await persistedWorkflow.load();
+              const persistedState = persistedWorkflow.activeState;
+              if (!persistedState) {
+                return JSON.stringify({ok:false, error:'服务器工作流内容尚未加载：' + serverWorkflowPath});
+              }
+              await app.loadGraphData(
+                persistedState,
+                true,
+                true,
+                persistedWorkflow,
+                {
+                  checkForRerouteMigration:false,
+                  deferWarnings:true,
+                  skipAssetScans:!loadFromRemote
+                }
+              );
+
+              // Apply values changed in the phone form only after ComfyUI has
+              // opened the real persisted graph, so its links and subgraphs stay intact.
+              const openedGraph = app.rootGraph || app.graph;
+              const openedNodes = new Map((openedGraph?._nodes || []).map(node => [String(node.id), node]));
+              const cloneValue = (value) => {
+                if (value == null || typeof value !== 'object') return value;
+                try { return structuredClone(value); }
+                catch (_) { return JSON.parse(JSON.stringify(value)); }
+              };
+              for (const sourceNode of workflow.nodes || []) {
+                const targetNode = openedNodes.get(String(sourceNode.id));
+                if (!targetNode || !Array.isArray(sourceNode.widgets_values)) continue;
+                sourceNode.widgets_values.forEach((sourceValue, index) => {
+                  const widget = targetNode.widgets?.[index];
+                  if (!widget) return;
+                  const nextValue = cloneValue(sourceValue);
+                  const groupToggle = widget.value && typeof widget.value === 'object' &&
+                    typeof widget.value.toggled === 'boolean';
+                  const nextToggle = typeof nextValue === 'boolean'
+                    ? nextValue
+                    : (typeof nextValue?.toggled === 'boolean' ? nextValue.toggled : null);
+                  if (groupToggle && nextToggle != null) {
+                    if (widget.value.toggled !== nextToggle) {
+                      if (typeof widget.toggle === 'function') widget.toggle(nextToggle);
+                      else if (typeof widget.doModeChange === 'function') widget.doModeChange(nextToggle);
+                      else widget.value.toggled = nextToggle;
+                    }
+                  } else {
+                    widget.value = nextValue;
+                    try { widget.callback?.(nextValue, app.canvas, targetNode); } catch (_) {}
+                  }
+                });
+              }
+              if (workflow.extra?.comfyMobile) {
+                openedGraph.extra = openedGraph.extra || {};
+                openedGraph.extra.comfyMobile = cloneValue(workflow.extra.comfyMobile);
+              }
+            } else {
+              await app.loadGraphData(workflow, true, false, null);
+            }
             const rootGraph = app.rootGraph || app.graph;
             if ($forceLinksVisible && app.canvas) {
               const configuredMode = Number(app.ui?.settings?.getSettingValue?.('Comfy.LinkRenderMode'));
@@ -1079,6 +1148,10 @@ class ComfyBridge(private val activity: Activity) {
             ?.trimStart('/')
             ?.replace(Regex("^workflows/", RegexOption.IGNORE_CASE), "")
             ?.takeIf(String::isNotBlank)
+
+        internal fun frontendWorkflowStorePath(value: String?): String? = normalizeServerWorkflowPath(value)
+            ?.let { path -> if (path.endsWith(".json", ignoreCase = true)) path else "$path.json" }
+            ?.let { path -> "workflows/$path" }
 
         private val READY_SCRIPT = """
             (async () => {

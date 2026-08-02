@@ -29,4 +29,16 @@ class AdvancedEditorSessionTest {
         )
         assertNull(ComfyBridge.normalizeServerWorkflowPath("  "))
     }
+
+    @Test fun buildsExactPersistedWorkflowStorePath() {
+        assertEquals(
+            "workflows/KREA2/example.json",
+            ComfyBridge.frontendWorkflowStorePath("/workflows\\KREA2\\example.json"),
+        )
+        assertEquals(
+            "workflows/KREA2/example.json",
+            ComfyBridge.frontendWorkflowStorePath("KREA2/example"),
+        )
+        assertNull(ComfyBridge.frontendWorkflowStorePath("  "))
+    }
 }
