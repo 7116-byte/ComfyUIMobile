@@ -36,6 +36,7 @@ import com.local.comfyuimobile.model.ResultMedia
 import com.local.comfyuimobile.model.WorkflowDocument
 import com.local.comfyuimobile.model.WorkflowEntry
 import com.local.comfyuimobile.model.WorkflowNode
+import com.local.comfyuimobile.network.ActiveJobRecovery
 import com.local.comfyuimobile.network.ComfyClient
 import com.local.comfyuimobile.network.ExecutionNodeResolver
 import com.local.comfyuimobile.network.LanAddress
@@ -64,6 +65,7 @@ import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application
@@ -87,7 +89,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var workflowSaveJob: Job? = null
     private var visibleNodeJob: Job? = null
     private val bridgeOperationMutex = Mutex()
-    private val monitoredJobIds = mutableSetOf<String>()
+    private val monitoredJobIds = ConcurrentHashMap.newKeySet<String>()
+    private val awaitingQueueJobIds = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var pendingReconnectNodeId: String? = null
     private var visibleNodeChangedAt = 0L
     @Volatile private var lastUpdateCheck: Long = 0L
 
@@ -214,6 +218,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun disconnect() {
         reconnectJob?.cancel()
         client.closeWebSocket()
+        awaitingQueueJobIds.clear()
+        pendingReconnectNodeId = null
         _state.update {
             it.copy(
                 status = ConnectionStatus.DISCONNECTED,
@@ -303,11 +309,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val manifest = (bridge ?: error("前端桥接不可用")).loadWorkflow(raw)
                 val document = WorkflowDocument(entry, raw, manifest.fields, manifest.nodes)
                 _state.update {
+                    val activeNode = ExecutionNodeResolver.resolve(it.currentExecutingNodeId, manifest.nodes)
                     it.copy(
                         selectedWorkflow = document,
                         fields = manifest.fields,
                         loading = false,
                         nodeProblems = emptyMap(),
+                        currentExecutingNodeId = activeNode,
+                        generationMessage = if (it.activeJobId != null && activeNode != null) {
+                            executionMessage(activeNode, manifest.nodes, it.generationProgress)
+                        } else {
+                            it.generationMessage
+                        },
                         notice = "已加载 ${entry.name}",
                     )
                 }
@@ -479,6 +492,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _state.update { it.copy(nodeProblems = error.nodeProblems) }
                     throw error
                 }
+                awaitingQueueJobIds.add(response.promptId)
                 val submitted = _state.value.submittedJobIds + response.promptId
                 preferences.saveSubmittedJobs(submitted)
                 var history = _state.value.promptHistory
@@ -1032,6 +1046,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "execution_start" -> {
                 val id = data.optString("prompt_id")
                 if (id.isNotBlank()) {
+                    markJobObserved(id)
+                    pendingReconnectNodeId = null
                     updateJob(id) { it.copy(state = JobState.RUNNING, progress = 0f, currentNode = null) }
                     if (id in _state.value.submittedJobIds) {
                         visibleNodeJob?.cancel()
@@ -1057,6 +1073,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val value = data.optDouble("value")
                 val max = data.optDouble("max")
                 if (id.isNotBlank() && max > 0) {
+                    markJobObserved(id)
                     val progress = (value / max).toFloat()
                     updateJob(id) { it.copy(progress = progress) }
                     updateMonitor(id, (progress * 100).toInt(), null)
@@ -1073,6 +1090,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             "progress_state" -> {
                 ProgressStateParser.parse(data)?.let { update ->
+                    markJobObserved(update.promptId)
                     val nodeId = resolveVisibleNode(update.nodeId)
                     updateJob(update.promptId) { it.copy(progress = update.progress, currentNode = nodeId, state = JobState.RUNNING) }
                     updateMonitor(update.promptId, (update.progress * 100).toInt(), nodeId)
@@ -1082,13 +1100,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             "executing" -> {
-                val id = data.optTextOrEmpty("prompt_id")
+                val eventPromptId = data.optTextOrEmpty("prompt_id")
                 val runtimeNode = data.optTextOrEmpty("display_node_id")
                     .ifBlank { data.optTextOrEmpty("display_node") }
                     .ifBlank { data.optTextOrEmpty("node_id") }
                     .ifBlank { data.optTextOrEmpty("node") }
+                val id = ActiveJobRecovery.resolveEventPromptId(
+                    eventPromptId = eventPromptId,
+                    activeJobId = _state.value.activeJobId,
+                    jobs = _state.value.jobs,
+                ).orEmpty()
+                if (id.isBlank() && runtimeNode.isNotBlank()) {
+                    // ComfyUI 重连补发当前节点时不带 prompt_id；等 /queue 恢复任务 ID 后再应用。
+                    pendingReconnectNodeId = runtimeNode
+                    AppLogger.info("已收到重连当前部件，等待关联运行任务：部件=$runtimeNode")
+                    return
+                }
                 val node = resolveVisibleNode(runtimeNode).orEmpty()
                 if (id.isNotBlank()) {
+                    markJobObserved(id)
+                    pendingReconnectNodeId = null
                     val previousState = _state.value.jobs.firstOrNull { it.id == id }?.state
                     val wasFailed = previousState in setOf(JobState.ERROR, JobState.CANCELLED)
                     updateJob(id) {
@@ -1122,6 +1153,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "execution_success" -> {
                 val id = data.optTextOrEmpty("prompt_id")
                 if (id.isNotBlank()) {
+                    markJobObserved(id)
                     updateJob(id) { it.copy(state = JobState.SUCCESS, progress = 1f, currentNode = null) }
                     if (id in _state.value.submittedJobIds) {
                         finishVisibleExecution(id)
@@ -1139,6 +1171,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val nodeId = resolveVisibleNode(data.optTextOrEmpty("node_id")).orEmpty()
                 val detail = data.optTextOrEmpty("exception_message").ifBlank { if (type == "execution_interrupted") "任务已中断" else "服务器执行失败" }
                 if (id.isNotBlank()) {
+                    markJobObserved(id)
                     updateJob(id) { it.copy(state = if (type == "execution_interrupted") JobState.CANCELLED else JobState.ERROR, currentNode = nodeId.ifBlank { null }, message = detail) }
                     if (id in _state.value.submittedJobIds) {
                         _state.update {
@@ -1183,34 +1216,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     submittedByApp = fresh.id in submitted,
                 )
             }
-        }.onSuccess { jobs ->
-            val activeAppJobs = jobs.filter {
+        }.onSuccess { fetchedJobs ->
+            fetchedJobs.forEach { markJobObserved(it.id) }
+            val activeAppJobs = fetchedJobs.filter {
                 it.submittedByApp && it.state in setOf(JobState.RUNNING, JobState.PENDING)
             }
-            val currentActiveId = _state.value.activeJobId
-            val recovered = activeAppJobs.firstOrNull { it.id == currentActiveId }
-                ?: activeAppJobs.firstOrNull { it.state == JobState.RUNNING }
-                ?: activeAppJobs.firstOrNull()
+            val awaiting = awaitingQueueJobIds.toSet()
+            val reconnectRuntimeNode = pendingReconnectNodeId
+            var reconnectNodeApplied = false
             _state.update { ui ->
-                if (recovered == null) {
-                    ui.copy(jobs = jobs)
-                } else {
-                    val resolvedNode = ExecutionNodeResolver.resolve(recovered.currentNode, ui.selectedWorkflow?.nodes.orEmpty())
-                    ui.copy(
-                        jobs = jobs,
-                        activeJobId = recovered.id,
-                        currentExecutingNodeId = resolvedNode,
-                        generationProgress = recovered.progress,
-                        generationMessage = when {
-                            recovered.state == JobState.PENDING -> "已接管此前提交的任务，正在等待服务器执行"
-                            resolvedNode != null -> {
-                                val title = ui.selectedWorkflow?.nodes?.firstOrNull { it.id == resolvedNode }?.title
-                                "已接管运行中的任务：${title ?: "部件 $resolvedNode"}"
-                            }
-                            else -> "已接管此前提交的运行中任务"
+                // 网络刷新期间 WebSocket 仍可能推进节点；再次与最新 UI 状态合并，不能倒退绿框和进度。
+                val jobs = fetchedJobs.map { fresh ->
+                    val live = ui.jobs.firstOrNull { it.id == fresh.id }
+                    fresh.copy(
+                        progress = if (fresh.state in setOf(JobState.RUNNING, JobState.PENDING)) {
+                            live?.progress ?: fresh.progress
+                        } else {
+                            fresh.progress
+                        },
+                        currentNode = if (fresh.state == JobState.RUNNING) {
+                            live?.currentNode ?: fresh.currentNode
+                        } else {
+                            null
                         },
                     )
                 }
+                val selection = ActiveJobRecovery.select(ui.activeJobId, jobs, awaiting)
+                val active = selection.job ?: return@update ui.copy(jobs = jobs)
+                val sameActiveJob = ui.activeJobId == active.id
+                val recoveredRuntimeNode = reconnectRuntimeNode.takeIf { active.state == JobState.RUNNING }
+                val resolvedNode = ExecutionNodeResolver.resolve(
+                    ActiveJobRecovery.currentNodeId(recoveredRuntimeNode, active.currentNode),
+                    ui.selectedWorkflow?.nodes.orEmpty(),
+                ) ?: if (sameActiveJob) ui.currentExecutingNodeId else null
+                val progress = active.progress ?: if (sameActiveJob) ui.generationProgress else null
+                val updatedJobs = jobs.map { job ->
+                    if (job.id == active.id && resolvedNode != null) {
+                        job.copy(currentNode = resolvedNode, progress = progress)
+                    } else {
+                        job
+                    }
+                }
+                if (recoveredRuntimeNode != null) reconnectNodeApplied = true
+                ui.copy(
+                    jobs = updatedJobs,
+                    activeJobId = active.id,
+                    currentExecutingNodeId = resolvedNode,
+                    generationProgress = progress,
+                    generationMessage = when {
+                        resolvedNode != null -> executionMessage(
+                            resolvedNode,
+                            ui.selectedWorkflow?.nodes.orEmpty(),
+                            progress,
+                        )
+                        sameActiveJob && ui.generationMessage.isNotBlank() -> ui.generationMessage
+                        active.state == JobState.PENDING -> "已经加入队列，等待服务器执行"
+                        else -> "服务器已经开始生成，等待当前部件状态"
+                    },
+                    notice = if (selection.isTakeover) {
+                        "已继续跟踪任务：${active.id.take(8)}"
+                    } else {
+                        ui.notice
+                    },
+                )
+            }
+            if (reconnectNodeApplied && pendingReconnectNodeId == reconnectRuntimeNode) {
+                pendingReconnectNodeId = null
             }
             activeAppJobs.forEach { job ->
                 startMonitor(
@@ -1332,10 +1403,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (ui.selectedWorkflow?.entry?.path != document.entry.path) {
                         ui.copy(loading = false)
                     } else {
+                        val activeNode = ExecutionNodeResolver.resolve(
+                            ui.currentExecutingNodeId,
+                            manifest.nodes,
+                        )
                         ui.copy(
                             selectedWorkflow = document.copy(rawJson = raw, fields = manifest.fields, nodes = manifest.nodes),
                             fields = manifest.fields,
                             loading = false,
+                            currentExecutingNodeId = activeNode,
+                            generationMessage = if (ui.activeJobId != null && activeNode != null) {
+                                executionMessage(activeNode, manifest.nodes, ui.generationProgress)
+                            } else {
+                                ui.generationMessage
+                            },
                             notice = "已切换工作流程并刷新可设置节点",
                         )
                     }
@@ -1351,20 +1432,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun markJobObserved(promptId: String) {
+        if (promptId.isNotBlank()) awaitingQueueJobIds.remove(promptId)
+    }
+
     private fun resolveVisibleNode(runtimeNodeId: String?): String? =
         ExecutionNodeResolver.resolve(runtimeNodeId, _state.value.selectedWorkflow?.nodes.orEmpty())
+
+    private fun executionMessage(
+        nodeId: String,
+        nodes: List<WorkflowNode>,
+        progress: Float?,
+    ): String {
+        val title = nodes.firstOrNull { it.id == nodeId }?.title
+        val percent = progress?.let { " · ${(it * 100).toInt()}%" }.orEmpty()
+        return "正在执行：${title ?: "部件 $nodeId"}$percent"
+    }
 
     private fun showVisibleExecutingNode(promptId: String, nodeId: String?, progress: Float? = null) {
         val resolvedNodeId = resolveVisibleNode(nodeId) ?: return
         val applyUpdate = {
-            val title = _state.value.selectedWorkflow?.nodes?.firstOrNull { it.id == resolvedNodeId }?.title
-            val percent = progress?.let { " · ${(it * 100).toInt()}%" }.orEmpty()
             _state.update { ui ->
                 if (promptId !in ui.submittedJobIds) ui else ui.copy(
                     activeJobId = promptId,
                     currentExecutingNodeId = resolvedNodeId,
                     generationProgress = progress ?: ui.generationProgress,
-                    generationMessage = "正在执行：${title ?: "部件 $resolvedNodeId"}$percent",
+                    generationMessage = executionMessage(
+                        resolvedNodeId,
+                        ui.selectedWorkflow?.nodes.orEmpty(),
+                        progress,
+                    ),
                 )
             }
             visibleNodeChangedAt = SystemClock.elapsedRealtime()
@@ -1374,13 +1471,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (current == null || current == resolvedNodeId) {
             visibleNodeJob?.cancel()
             if (current == resolvedNodeId) {
-                val title = _state.value.selectedWorkflow?.nodes?.firstOrNull { it.id == resolvedNodeId }?.title
-                val percent = progress?.let { " · ${(it * 100).toInt()}%" }.orEmpty()
                 _state.update { ui ->
                     ui.copy(
                         activeJobId = promptId,
                         generationProgress = progress ?: ui.generationProgress,
-                        generationMessage = "正在执行：${title ?: "部件 $resolvedNodeId"}$percent",
+                        generationMessage = executionMessage(
+                            resolvedNodeId,
+                            ui.selectedWorkflow?.nodes.orEmpty(),
+                            progress,
+                        ),
                     )
                 }
             } else {
