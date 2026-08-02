@@ -3,6 +3,7 @@ package com.local.comfyuimobile.bridge
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -38,6 +39,7 @@ import kotlin.coroutines.resumeWithException
 
 class ComfyBridge(private val activity: Activity) {
     private data class PendingImageImport(val uri: Uri, val mimeType: String)
+    private class PageTransitionException(message: String) : IllegalStateException(message)
 
     var webView: WebView by mutableStateOf(WebView(activity))
         private set
@@ -46,6 +48,7 @@ class ComfyBridge(private val activity: Activity) {
     @Volatile private var pageLoadError: String? = null
     @Volatile private var lastBridgePhase: String = "尚未执行前端脚本"
     @Volatile private var rendererEpoch: Int = 0
+    @Volatile private var pageEpoch: Int = 0
     private val pendingImageImports = ConcurrentHashMap<String, PendingImageImport>()
     private val pendingEvaluations = ConcurrentHashMap<String, CancellableContinuation<String>>()
 
@@ -64,6 +67,12 @@ class ComfyBridge(private val activity: Activity) {
         target.settings.allowFileAccess = false
         target.settings.allowContentAccess = false
         target.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                pageEpoch += 1
+                pageLoadError = null
+                super.onPageStarted(view, url, favicon)
+            }
+
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                 val token = request.url.pathSegments
                     .takeIf { it.size == 2 && it[0] == IMAGE_IMPORT_PATH }
@@ -191,17 +200,49 @@ class ComfyBridge(private val activity: Activity) {
         )
     }
 
+    suspend fun awaitVisibleViewport(timeoutMillis: Long = 10_000L) {
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        var width = 0
+        var height = 0
+        while (System.currentTimeMillis() < deadline) {
+            val viewport = withContext(Dispatchers.Main.immediate) {
+                Triple(webView.width, webView.height, webView.isShown)
+            }
+            width = viewport.first
+            height = viewport.second
+            if (width > 0 && height > 0 && viewport.third) return
+            delay(50)
+        }
+        throw IllegalStateException("高级编辑画布尚未显示：${width}×${height}")
+    }
+
     suspend fun loadWorkflow(
         rawJson: String,
         workflowPath: String? = null,
-        forceLinksVisible: Boolean = false,
+        repairWebViewLinks: Boolean = false,
     ): WorkflowManifest {
-        awaitReady()
         val encoded = Base64.getEncoder().encodeToString(rawJson.toByteArray(Charsets.UTF_8))
         val encodedPath = frontendWorkflowStorePath(workflowPath)
             ?.let { Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)) }
-        val response = evaluate(workflowManifestScript(encoded, encodedPath, forceLinksVisible))
-        return parseWorkflowManifest(rawJson, response)
+        val script = workflowManifestScript(encoded, encodedPath, repairWebViewLinks)
+        var transitionError: PageTransitionException? = null
+        var response: String? = null
+        repeat(3) { attempt ->
+            if (response != null) return@repeat
+            awaitReady()
+            response = try {
+                evaluate(script)
+            } catch (error: PageTransitionException) {
+                transitionError = error
+                AppLogger.info("工作流加载时 ComfyUI 页面发生切换，正在重试 ${attempt + 1}/3")
+                delay(300)
+                null
+            }
+        }
+        val resolved = response ?: throw (
+            transitionError ?: IllegalStateException("ComfyUI 页面尚未稳定，无法加载工作流")
+        )
+        return parseWorkflowManifest(rawJson, resolved)
     }
 
     suspend fun snapshotCurrentWorkflow(): Pair<String, WorkflowManifest> {
@@ -212,7 +253,7 @@ class ComfyBridge(private val activity: Activity) {
             workflowManifestScript(
                 encodedWorkflow = encoded,
                 encodedWorkflowPath = null,
-                forceLinksVisible = false,
+                repairWebViewLinks = false,
                 inspectCurrentGraph = true,
             ),
         )
@@ -223,20 +264,18 @@ class ComfyBridge(private val activity: Activity) {
         val root = JSONObject(response)
         if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "工作流解析失败"))
         root.optJSONObject("diagnostics")
-            ?.takeIf { it.optBoolean("forceLinksVisible") }
+            ?.takeIf { it.optBoolean("repairWebViewLinks") }
             ?.let { diagnostics ->
-                val settingMode = diagnostics.opt("configuredLinkMode")
-                    .takeUnless { it == null || it == JSONObject.NULL }
-                    ?.toString()
-                    ?: "未知"
                 val canvasMode = diagnostics.opt("canvasLinkMode")
                     .takeUnless { it == null || it == JSONObject.NULL }
                     ?.toString()
                     ?: "未知"
                 AppLogger.info(
-                    "高级编辑连线检查：源工作流=${diagnostics.optInt("sourceLinkCount")} 条，" +
+                    "高级编辑连线诊断：源工作流=${diagnostics.optInt("sourceLinkCount")} 条，" +
                         "画布已载入=${diagnostics.optInt("loadedLinkCount")} 条，" +
-                        "前端设置模式=$settingMode，画布模式=$canvasMode",
+                        "当前已绘制=${diagnostics.optInt("renderedPathCount")} 条，" +
+                        "画布模式=$canvasMode，Vue 节点=${diagnostics.optBoolean("vueNodesMode")}，" +
+                        "兼容绘制=${diagnostics.optBoolean("linkFallbackInstalled")}",
                 )
             }
         val layout = parseLayout(rawJson)
@@ -481,6 +520,7 @@ class ComfyBridge(private val activity: Activity) {
 
     private suspend fun evaluate(script: String, timeoutMillis: Long = 120_000L): String = withContext(Dispatchers.Main.immediate) {
         val expectedRendererEpoch = rendererEpoch
+        val expectedPageEpoch = pageEpoch
         val token = UUID.randomUUID().toString()
         val quotedToken = JSONObject.quote(token)
         val kickoff = """
@@ -504,14 +544,39 @@ class ComfyBridge(private val activity: Activity) {
               return 'started';
             })()
         """.trimIndent()
-        val started = try {
-            evaluateImmediate(kickoff)
-        } catch (throwable: Throwable) {
+        val kickoffDeadline = System.currentTimeMillis() + timeoutMillis.coerceAtMost(10_000L)
+        var started = ""
+        var currentUrl = webView.url.orEmpty().ifBlank { "about:blank" }
+        var currentProgress = webView.progress
+        while (System.currentTimeMillis() < kickoffDeadline && started != "started") {
             if (rendererEpoch != expectedRendererEpoch) throw rendererGoneException()
-            throw throwable
+            if (pageEpoch != expectedPageEpoch) {
+                throw PageTransitionException("ComfyUI 页面在脚本启动前发生了切换")
+            }
+            currentUrl = webView.url.orEmpty().ifBlank { "about:blank" }
+            currentProgress = webView.progress
+            if (currentUrl.startsWith(allowedOrigin) && currentUrl != "about:blank" && currentProgress >= 100) {
+                started = try {
+                    evaluateImmediate(kickoff)
+                } catch (throwable: Throwable) {
+                    if (rendererEpoch != expectedRendererEpoch) throw rendererGoneException()
+                    if (pageEpoch != expectedPageEpoch) {
+                        throw PageTransitionException("ComfyUI 页面在脚本启动时发生了切换")
+                    }
+                    throw throwable
+                }
+            }
+            if (started != "started") delay(100)
         }
         if (rendererEpoch != expectedRendererEpoch) throw rendererGoneException()
-        if (started != "started") throw IllegalStateException("ComfyUI 页面正在加载")
+        if (pageEpoch != expectedPageEpoch) {
+            throw PageTransitionException("ComfyUI 页面在脚本启动后发生了切换")
+        }
+        if (started != "started") {
+            throw PageTransitionException(
+                "ComfyUI 页面尚未稳定：地址 $currentUrl，加载进度 $currentProgress%",
+            )
+        }
 
         val poll = """
             (() => {
@@ -530,10 +595,16 @@ class ComfyBridge(private val activity: Activity) {
         try {
             while (System.currentTimeMillis() < deadline) {
                 if (rendererEpoch != expectedRendererEpoch) throw rendererGoneException()
+                if (pageEpoch != expectedPageEpoch) {
+                    throw PageTransitionException("ComfyUI 页面在前端操作期间发生了切换")
+                }
                 val raw = try {
                     evaluateImmediate(poll)
                 } catch (throwable: Throwable) {
                     if (rendererEpoch != expectedRendererEpoch) throw rendererGoneException()
+                    if (pageEpoch != expectedPageEpoch) {
+                        throw PageTransitionException("ComfyUI 页面在读取前端结果时发生了切换")
+                    }
                     throw throwable
                 }
                 if (raw.isNotEmpty()) {
@@ -644,7 +715,7 @@ class ComfyBridge(private val activity: Activity) {
     private fun workflowManifestScript(
         encodedWorkflow: String,
         encodedWorkflowPath: String?,
-        forceLinksVisible: Boolean,
+        repairWebViewLinks: Boolean,
         inspectCurrentGraph: Boolean = false,
     ) = """
         (async () => {
@@ -736,30 +807,41 @@ class ComfyBridge(private val activity: Activity) {
               }
             }
             const rootGraph = app.rootGraph || app.graph;
-            const settings = app.ui?.settings;
-            let configuredLinkMode = Number(settings?.getSettingValue?.('Comfy.LinkRenderMode'));
-            if ($forceLinksVisible && app.canvas) {
-              // ComfyUI observes Comfy.LinkRenderMode and writes it back to the
-              // canvas. Changing only canvas.links_render_mode is therefore
-              // temporary: the next reactive update hides the links again.
-              const visibleMode = Number.isFinite(configuredLinkMode) && configuredLinkMode >= 0
-                ? configuredLinkMode
-                : 2;
-              if (!Number.isFinite(configuredLinkMode) || configuredLinkMode < 0) {
-                if (typeof settings?.setSettingValueAsync === 'function') {
-                  await settings.setSettingValueAsync('Comfy.LinkRenderMode', visibleMode);
-                } else if (typeof settings?.setSettingValue === 'function') {
-                  settings.setSettingValue('Comfy.LinkRenderMode', visibleMode);
-                }
+            let linkFallbackInstalled = false;
+            if ($repairWebViewLinks && app.canvas && typeof app.canvas.drawConnections === 'function') {
+              // Android WebView can leave ComfyUI's Vue slot-layout sync pending
+              // after loadGraphData. The graph still contains every link, but
+              // drawConnections exits before painting any of them. Keep the
+              // user's link style untouched and fall back to LiteGraph's own
+              // slot positions only for a frame where zero paths were painted.
+              const canvas = app.canvas;
+              if (!canvas.__comfyMobileOriginalDrawConnections) {
+                const originalDrawConnections = canvas.drawConnections;
+                canvas.__comfyMobileOriginalDrawConnections = originalDrawConnections;
+                canvas.drawConnections = function(context) {
+                  originalDrawConnections.call(this, context);
+                  const graphLinks = this.graph?.links ?? this.graph?._links;
+                  const graphLinkCount = graphLinks instanceof Map
+                    ? graphLinks.size
+                    : Object.keys(graphLinks || {}).length;
+                  const renderedCount = Number(this.renderedPaths?.size || 0);
+                  const liteGraph = window.LiteGraph;
+                  if (Number(this.links_render_mode) !== -1 && graphLinkCount > 0 &&
+                      renderedCount === 0 && liteGraph?.vueNodesMode === true) {
+                    const previousVueMode = liteGraph.vueNodesMode;
+                    try {
+                      liteGraph.vueNodesMode = false;
+                      originalDrawConnections.call(this, context);
+                    } finally {
+                      liteGraph.vueNodesMode = previousVueMode;
+                    }
+                  }
+                };
               }
-              // Let the setting watcher and Vue node slots settle first, then
-              // apply the same visible mode once more and redraw both layers.
+              linkFallbackInstalled = true;
               await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
               await new Promise(resolve => setTimeout(resolve, 100));
-              configuredLinkMode = Number(settings?.getSettingValue?.('Comfy.LinkRenderMode'));
-              app.canvas.links_render_mode = Number.isFinite(configuredLinkMode) && configuredLinkMode >= 0
-                ? configuredLinkMode
-                : visibleMode;
+              app.canvas.resize?.();
               app.canvas.setDirty?.(true, true);
               app.canvas.draw?.(true, true);
             }
@@ -769,9 +851,10 @@ class ComfyBridge(private val activity: Activity) {
             const sourceLinkCount = Array.isArray(workflow.links)
               ? workflow.links.length
               : Object.keys(workflow.links || {}).length;
-            const loadedLinkCount = rootGraph?.links instanceof Map
-              ? rootGraph.links.size
-              : Object.keys(rootGraph?.links || {}).length;
+            const rootLinks = rootGraph?.links ?? rootGraph?._links;
+            const loadedLinkCount = rootLinks instanceof Map
+              ? rootLinks.size
+              : Object.keys(rootLinks || {}).length;
             if (sourceLinkCount > 0 && loadedLinkCount === 0) {
               return JSON.stringify({ok:false, error:'工作流原有 ' + sourceLinkCount + ' 条连线，但高级编辑画布没有载入连线'});
             }
@@ -1049,11 +1132,13 @@ class ComfyBridge(private val activity: Activity) {
               fields,
               nodes,
               diagnostics:{
-                forceLinksVisible:$forceLinksVisible,
+                repairWebViewLinks:$repairWebViewLinks,
                 sourceLinkCount,
                 loadedLinkCount,
-                configuredLinkMode:Number(settings?.getSettingValue?.('Comfy.LinkRenderMode')),
-                canvasLinkMode:Number(app.canvas?.links_render_mode)
+                renderedPathCount:Number(app.canvas?.renderedPaths?.size || 0),
+                canvasLinkMode:Number(app.canvas?.links_render_mode),
+                vueNodesMode:window.LiteGraph?.vueNodesMode === true,
+                linkFallbackInstalled
               }
             });
           } catch (error) {

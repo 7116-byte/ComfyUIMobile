@@ -350,10 +350,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runOperation("工作流加载失败") {
                 _state.update { it.copy(loading = true, error = null, selectedWorkflow = null, fields = emptyList()) }
                 val raw = client.readWorkflow(entry.path)
-                val manifest = (bridge ?: error("前端桥接不可用")).loadWorkflow(
-                    rawJson = raw,
-                    workflowPath = entry.path,
-                )
+                val manifest = bridgeOperationMutex.withLock {
+                    (bridge ?: error("前端桥接不可用")).loadWorkflow(
+                        rawJson = raw,
+                        workflowPath = entry.path,
+                    )
+                }
                 val document = WorkflowDocument(entry, raw, manifest.fields, manifest.nodes)
                 _state.update {
                     val activeNode = ExecutionNodeResolver.resolve(it.currentExecutingNodeId, manifest.nodes)

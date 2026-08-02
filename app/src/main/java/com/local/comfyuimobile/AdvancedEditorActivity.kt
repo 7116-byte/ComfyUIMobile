@@ -59,10 +59,11 @@ class AdvancedEditorActivity : ComponentActivity() {
             runCatching {
                 bridge.loadServer(serverUrl)
                 bridge.awaitReady()
+                bridge.awaitVisibleViewport()
                 bridge.loadWorkflow(
                     rawJson = workflowJson,
                     workflowPath = workflowPath,
-                    forceLinksVisible = true,
+                    repairWebViewLinks = true,
                 )
                 bridge.refreshVisibleViewport()
             }.onSuccess {
