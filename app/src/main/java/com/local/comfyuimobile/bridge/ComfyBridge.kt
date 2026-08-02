@@ -40,6 +40,7 @@ import kotlin.coroutines.resumeWithException
 class ComfyBridge(private val activity: Activity) {
     private data class PendingImageImport(val uri: Uri, val mimeType: String)
     private class PageTransitionException(message: String) : IllegalStateException(message)
+    private class JavascriptContextUnavailableException(message: String) : IllegalStateException(message)
 
     var webView: WebView by mutableStateOf(WebView(activity))
         private set
@@ -49,6 +50,7 @@ class ComfyBridge(private val activity: Activity) {
     @Volatile private var lastBridgePhase: String = "尚未执行前端脚本"
     @Volatile private var rendererEpoch: Int = 0
     @Volatile private var pageEpoch: Int = 0
+    @Volatile private var finishedPageEpoch: Int = -1
     private val pendingImageImports = ConcurrentHashMap<String, PendingImageImport>()
     private val pendingEvaluations = ConcurrentHashMap<String, CancellableContinuation<String>>()
 
@@ -69,8 +71,19 @@ class ComfyBridge(private val activity: Activity) {
         target.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 pageEpoch += 1
+                finishedPageEpoch = -1
                 pageLoadError = null
+                AppLogger.info("ComfyUI 网页开始加载：轮次=$pageEpoch，地址=${url.orEmpty()}")
                 super.onPageStarted(view, url, favicon)
+            }
+
+            override fun onPageFinished(view: WebView, url: String?) {
+                finishedPageEpoch = pageEpoch
+                AppLogger.info(
+                    "ComfyUI 网页完成加载：轮次=$pageEpoch，进度=${view.progress}%，" +
+                        "已挂载=${view.isAttachedToWindow}，地址=${url.orEmpty()}",
+                )
+                super.onPageFinished(view, url)
             }
 
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
@@ -150,23 +163,36 @@ class ComfyBridge(private val activity: Activity) {
         withContext(Dispatchers.Main.immediate) {
             allowedOrigin = origin
             pageLoadError = null
+            webView.onResume()
+            webView.resumeTimers()
             if (webView.url.orEmpty().startsWith(origin)) webView.reload() else webView.loadUrl("$origin/")
         }
 
         val deadline = System.currentTimeMillis() + timeoutMillis
         var currentUrl = "about:blank"
         var progress = 0
+        var attached = false
         while (System.currentTimeMillis() < deadline) {
             pageLoadError?.let { throw IllegalStateException(it) }
             val pageState = withContext(Dispatchers.Main.immediate) {
-                webView.url.orEmpty() to webView.progress
+                Triple(webView.url.orEmpty(), webView.progress, webView.isAttachedToWindow)
             }
             currentUrl = pageState.first.ifBlank { "about:blank" }
             progress = pageState.second
-            if (currentUrl.startsWith(origin) && currentUrl != "about:blank" && progress >= 100) return
+            attached = pageState.third
+            if (
+                isPageReadyForScripts(
+                    currentUrl = currentUrl,
+                    allowedOrigin = origin,
+                    progress = progress,
+                    pageEpoch = pageEpoch,
+                    finishedPageEpoch = finishedPageEpoch,
+                    attached = attached,
+                )
+            ) return
             delay(100)
         }
-        throw IllegalStateException("网页加载超时：当前地址 $currentUrl，进度 $progress%")
+        throw IllegalStateException("网页加载超时：当前地址 $currentUrl，进度 $progress%，网页已挂载=$attached")
     }
 
     suspend fun awaitReady(timeoutMillis: Long = 90_000L) {
@@ -225,24 +251,42 @@ class ComfyBridge(private val activity: Activity) {
         val encodedPath = frontendWorkflowStorePath(workflowPath)
             ?.let { Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)) }
         val script = workflowManifestScript(encoded, encodedPath, repairWebViewLinks)
-        var transitionError: PageTransitionException? = null
+        var lastError: Throwable? = null
         var response: String? = null
         repeat(3) { attempt ->
             if (response != null) return@repeat
-            awaitReady()
             response = try {
+                awaitReady()
                 evaluate(script)
             } catch (error: PageTransitionException) {
-                transitionError = error
+                lastError = error
                 AppLogger.info("工作流加载时 ComfyUI 页面发生切换，正在重试 ${attempt + 1}/3")
-                delay(300)
+                delay(500)
+                null
+            } catch (error: JavascriptContextUnavailableException) {
+                lastError = error
+                if (attempt < 2) {
+                    AppLogger.info("ComfyUI 页面已加载但脚本无响应，正在自动重载前端 ${attempt + 1}/2")
+                    runCatching { reloadFrontend() }
+                        .onFailure { reloadError ->
+                            lastError = reloadError
+                            AppLogger.error("ComfyUI 前端自动重载失败", reloadError)
+                        }
+                }
                 null
             }
         }
         val resolved = response ?: throw (
-            transitionError ?: IllegalStateException("ComfyUI 页面尚未稳定，无法加载工作流")
+            lastError ?: IllegalStateException("ComfyUI 页面尚未稳定，无法加载工作流")
         )
         return parseWorkflowManifest(rawJson, resolved)
+    }
+
+    private suspend fun reloadFrontend() {
+        val origin = allowedOrigin.takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("尚未连接 ComfyUI 服务器")
+        loadServer(origin, timeoutMillis = 45_000L)
+        awaitReady(timeoutMillis = 60_000L)
     }
 
     suspend fun snapshotCurrentWorkflow(): Pair<String, WorkflowManifest> {
@@ -519,6 +563,8 @@ class ComfyBridge(private val activity: Activity) {
     }
 
     private suspend fun evaluate(script: String, timeoutMillis: Long = 120_000L): String = withContext(Dispatchers.Main.immediate) {
+        webView.onResume()
+        webView.resumeTimers()
         val expectedRendererEpoch = rendererEpoch
         val expectedPageEpoch = pageEpoch
         val token = UUID.randomUUID().toString()
@@ -526,7 +572,11 @@ class ComfyBridge(private val activity: Activity) {
         val kickoff = """
             (() => {
               window.__comfyMobileResults = window.__comfyMobileResults || Object.create(null);
+              window.__comfyMobileRunning = window.__comfyMobileRunning || Object.create(null);
               window.__comfyMobileCurrentPhase = '';
+              if (window.__comfyMobileResults[$quotedToken]) return 'started';
+              if (window.__comfyMobileRunning[$quotedToken]) return 'started';
+              window.__comfyMobileRunning[$quotedToken] = true;
               setTimeout(() => {
                 (async () => {
                   try {
@@ -538,6 +588,8 @@ class ComfyBridge(private val activity: Activity) {
                     window.__comfyMobileResults[$quotedToken] = {
                       error: String(error?.stack || error)
                     };
+                  } finally {
+                    delete window.__comfyMobileRunning[$quotedToken];
                   }
                 })();
               }, 250);
@@ -548,6 +600,8 @@ class ComfyBridge(private val activity: Activity) {
         var started = ""
         var currentUrl = webView.url.orEmpty().ifBlank { "about:blank" }
         var currentProgress = webView.progress
+        var currentAttached = webView.isAttachedToWindow
+        var currentFinished = finishedPageEpoch == pageEpoch
         while (System.currentTimeMillis() < kickoffDeadline && started != "started") {
             if (rendererEpoch != expectedRendererEpoch) throw rendererGoneException()
             if (pageEpoch != expectedPageEpoch) {
@@ -555,7 +609,18 @@ class ComfyBridge(private val activity: Activity) {
             }
             currentUrl = webView.url.orEmpty().ifBlank { "about:blank" }
             currentProgress = webView.progress
-            if (currentUrl.startsWith(allowedOrigin) && currentUrl != "about:blank" && currentProgress >= 100) {
+            currentAttached = webView.isAttachedToWindow
+            currentFinished = finishedPageEpoch == expectedPageEpoch
+            if (
+                isPageReadyForScripts(
+                    currentUrl = currentUrl,
+                    allowedOrigin = allowedOrigin,
+                    progress = currentProgress,
+                    pageEpoch = expectedPageEpoch,
+                    finishedPageEpoch = finishedPageEpoch,
+                    attached = currentAttached,
+                )
+            ) {
                 started = try {
                     evaluateImmediate(kickoff)
                 } catch (throwable: Throwable) {
@@ -573,8 +638,9 @@ class ComfyBridge(private val activity: Activity) {
             throw PageTransitionException("ComfyUI 页面在脚本启动后发生了切换")
         }
         if (started != "started") {
-            throw PageTransitionException(
-                "ComfyUI 页面尚未稳定：地址 $currentUrl，加载进度 $currentProgress%",
+            throw JavascriptContextUnavailableException(
+                "ComfyUI 页面脚本没有响应：地址 $currentUrl，加载进度 $currentProgress%，" +
+                    "页面完成=$currentFinished，网页已挂载=$currentAttached",
             )
         }
 
@@ -589,7 +655,7 @@ class ComfyBridge(private val activity: Activity) {
               return JSON.stringify({phase, result});
             })()
         """.trimIndent()
-        val cleanup = "delete window.__comfyMobileResults?.[$quotedToken]"
+        val cleanup = "delete window.__comfyMobileResults?.[$quotedToken]; delete window.__comfyMobileRunning?.[$quotedToken]"
         val deadline = System.currentTimeMillis() + timeoutMillis
         var reportedPhase = ""
         try {
@@ -1320,6 +1386,18 @@ class ComfyBridge(private val activity: Activity) {
         internal fun frontendWorkflowStorePath(value: String?): String? = normalizeServerWorkflowPath(value)
             ?.let { path -> if (path.endsWith(".json", ignoreCase = true)) path else "$path.json" }
             ?.let { path -> "workflows/$path" }
+
+        internal fun isPageReadyForScripts(
+            currentUrl: String,
+            allowedOrigin: String,
+            progress: Int,
+            pageEpoch: Int,
+            finishedPageEpoch: Int,
+            attached: Boolean,
+        ): Boolean =
+            allowedOrigin.isNotBlank() && currentUrl != "about:blank" &&
+                currentUrl.startsWith(allowedOrigin) && progress >= 100 &&
+                pageEpoch == finishedPageEpoch && attached
 
         private val READY_SCRIPT = """
             (async () => {

@@ -244,11 +244,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 setConnectionStep(2, "地址检查通过，正在读取服务器版本和显卡信息")
                 val (stats, profile) = client.probe(normalized)
 
-                setConnectionStep(3, "服务器接口正常，正在打开 ComfyUI 网页")
-                activeBridge.loadServer(normalized)
+                bridgeOperationMutex.withLock {
+                    setConnectionStep(3, "服务器接口正常，正在打开 ComfyUI 网页")
+                    activeBridge.loadServer(normalized)
 
-                setConnectionStep(4, "网页已经打开，正在初始化 ComfyUI 前端")
-                activeBridge.awaitReady()
+                    setConnectionStep(4, "网页已经打开，正在初始化 ComfyUI 前端")
+                    activeBridge.awaitReady()
+                }
 
                 setConnectionStep(5, "前端已经就绪，正在读取节点定义")
                 client.features()
@@ -565,8 +567,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runOperation("种子操作失败") {
                 val activeBridge = bridge ?: error("前端桥接不可用")
-                val raw = activeBridge.invokeWidgetButton(nodeId, actionToken)
-                val manifest = activeBridge.loadWorkflow(raw, workflowPath = document.entry.path)
+                val (raw, manifest) = bridgeOperationMutex.withLock {
+                    val updatedRaw = activeBridge.invokeWidgetButton(nodeId, actionToken)
+                    updatedRaw to activeBridge.loadWorkflow(updatedRaw, workflowPath = document.entry.path)
+                }
                 _state.update {
                     it.copy(
                         selectedWorkflow = document.copy(
@@ -964,10 +968,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val entry = client.writeWorkflow("workflows/$candidateName", json.toString(), overwrite = false)
                 refreshWorkflowsInternal()
-                val manifest = (bridge ?: error("前端桥接不可用")).loadWorkflow(
-                    rawJson = json.toString(),
-                    workflowPath = entry.path,
-                )
+                val manifest = bridgeOperationMutex.withLock {
+                    (bridge ?: error("前端桥接不可用")).loadWorkflow(
+                        rawJson = json.toString(),
+                        workflowPath = entry.path,
+                    )
+                }
                 _state.update {
                     it.copy(
                         selectedWorkflow = WorkflowDocument(
@@ -1307,9 +1313,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val stats = runCatching { client.systemStats() }.getOrNull() ?: continue
                 val restored = runCatching {
                     val activeBridge = bridge ?: error("前端桥接不可用")
-                    activeBridge.loadServer(server.baseUrl, timeoutMillis = 20_000L)
-                    activeBridge.awaitReady(timeoutMillis = 45_000L)
-                    restoreWorkingCopyAfterReconnect(activeBridge, server.baseUrl)
+                    bridgeOperationMutex.withLock {
+                        activeBridge.loadServer(server.baseUrl, timeoutMillis = 20_000L)
+                        activeBridge.awaitReady(timeoutMillis = 45_000L)
+                        restoreWorkingCopyAfterReconnect(activeBridge, server.baseUrl, bridgeLocked = true)
+                    }
                 }.onFailure { error ->
                     if (error !is CancellationException) AppLogger.error("重连后恢复本地工作副本失败", error)
                 }.isSuccess
@@ -1736,8 +1744,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val activeBridge = bridge ?: error("前端桥接不可用")
                 val snapshot = _state.value.fields
                 _state.update { it.copy(loading = true, error = null) }
-                val raw = activeBridge.syncWorkflow(snapshot)
-                val manifest = activeBridge.loadWorkflow(raw, workflowPath = document.entry.path)
+                val (raw, manifest) = bridgeOperationMutex.withLock {
+                    val updatedRaw = activeBridge.syncWorkflow(snapshot)
+                    updatedRaw to activeBridge.loadWorkflow(updatedRaw, workflowPath = document.entry.path)
+                }
                 _state.update { ui ->
                     if (ui.selectedWorkflow?.entry?.path != document.entry.path) {
                         ui.copy(loading = false)
@@ -1918,8 +1928,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             runCatching {
                 val activeBridge = bridge ?: error("前端桥接不可用")
-                activeBridge.awaitReady()
-                restoreWorkingCopyAfterReconnect(activeBridge, server.baseUrl)
+                bridgeOperationMutex.withLock {
+                    activeBridge.awaitReady()
+                    restoreWorkingCopyAfterReconnect(activeBridge, server.baseUrl, bridgeLocked = true)
+                }
             }.onSuccess {
                 _state.update {
                     it.copy(
@@ -1934,7 +1946,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun restoreWorkingCopyAfterReconnect(activeBridge: ComfyBridge, serverUrl: String) {
+    private suspend fun restoreWorkingCopyAfterReconnect(
+        activeBridge: ComfyBridge,
+        serverUrl: String,
+        bridgeLocked: Boolean = false,
+    ) {
         val document = _state.value.selectedWorkflow ?: return
         if (WorkflowDraftStore.normalizeServer(document.serverUrl) != WorkflowDraftStore.normalizeServer(serverUrl)) return
 
@@ -1942,11 +1958,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val serverChanged = current == null || WorkflowPolicy.hasModifiedConflict(document.baseModified, current.modified)
         val loadServerVersion = !document.hasUnsavedChanges && current != null && serverChanged
         val raw = if (loadServerVersion) client.readWorkflow(current.path) else document.rawJson
-        val manifest = bridgeOperationMutex.withLock {
+        val manifest = if (bridgeLocked) {
             activeBridge.loadWorkflow(
                 rawJson = raw,
                 workflowPath = current?.path,
             )
+        } else {
+            bridgeOperationMutex.withLock {
+                activeBridge.loadWorkflow(
+                    rawJson = raw,
+                    workflowPath = current?.path,
+                )
+            }
         }
         val fields = if (document.hasUnsavedChanges && !loadServerVersion) {
             WorkflowDraftFields.restore(manifest.fields, WorkflowDraftFields.capture(_state.value.fields))

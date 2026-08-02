@@ -3,7 +3,9 @@ package com.local.comfyuimobile.bridge
 import com.local.comfyuimobile.model.WorkflowManifest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AdvancedEditorSessionTest {
@@ -44,5 +46,37 @@ class AdvancedEditorSessionTest {
             ComfyBridge.frontendWorkflowStorePath("KREA2/example"),
         )
         assertNull(ComfyBridge.frontendWorkflowStorePath("  "))
+    }
+
+    @Test fun waitsForAttachedFinishedPageBeforeRunningBridgeScripts() {
+        val ready = ComfyBridge.isPageReadyForScripts(
+            currentUrl = "http://192.168.10.109:8188/",
+            allowedOrigin = "http://192.168.10.109:8188",
+            progress = 100,
+            pageEpoch = 4,
+            finishedPageEpoch = 4,
+            attached = true,
+        )
+        assertTrue(ready)
+        assertFalse(
+            ComfyBridge.isPageReadyForScripts(
+                currentUrl = "http://192.168.10.109:8188/",
+                allowedOrigin = "http://192.168.10.109:8188",
+                progress = 100,
+                pageEpoch = 4,
+                finishedPageEpoch = 3,
+                attached = true,
+            ),
+        )
+        assertFalse(
+            ComfyBridge.isPageReadyForScripts(
+                currentUrl = "http://192.168.10.109:8188/",
+                allowedOrigin = "http://192.168.10.109:8188",
+                progress = 100,
+                pageEpoch = 4,
+                finishedPageEpoch = 4,
+                attached = false,
+            ),
+        )
     }
 }
