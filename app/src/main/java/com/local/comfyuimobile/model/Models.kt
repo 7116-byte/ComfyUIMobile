@@ -95,10 +95,18 @@ data class JobSummary(
     val id: String,
     val state: JobState,
     val workflowName: String = "",
+    val workflowPath: String = "",
     val progress: Float? = null,
     val currentNode: String? = null,
     val submittedByApp: Boolean = false,
     val message: String = "",
+)
+
+enum class AppDestination { PARAMETERS, RESULTS }
+
+data class AppNavigationRequest(
+    val id: Long,
+    val destination: AppDestination,
 )
 
 enum class MediaKind { IMAGE, VIDEO }
@@ -174,6 +182,7 @@ data class AppUiState(
     val currentExecutingNodeId: String? = null,
     val generationProgress: Float? = null,
     val generationMessage: String = "",
+    val navigationRequest: AppNavigationRequest? = null,
     val promptHistory: List<String> = emptyList(),
     val submittedJobIds: Set<String> = emptySet(),
     val autoSaveResults: Boolean = false,

@@ -24,6 +24,7 @@ import com.local.comfyuimobile.data.RecentWorkflows
 import com.local.comfyuimobile.data.WorkflowPolicy
 import com.local.comfyuimobile.data.WorkflowPath
 import com.local.comfyuimobile.model.AppUiState
+import com.local.comfyuimobile.model.AppNavigationRequest
 import com.local.comfyuimobile.model.CacheOutputRule
 import com.local.comfyuimobile.model.ConnectionStatus
 import com.local.comfyuimobile.model.JobState
@@ -45,6 +46,7 @@ import com.local.comfyuimobile.network.ResultParser
 import com.local.comfyuimobile.network.PromptSubmissionException
 import com.local.comfyuimobile.network.ProgressStateParser
 import com.local.comfyuimobile.service.JobMonitorService
+import com.local.comfyuimobile.service.JobNotificationNavigation
 import com.local.comfyuimobile.update.UpdateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -92,6 +94,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val monitoredJobIds = ConcurrentHashMap.newKeySet<String>()
     private val awaitingQueueJobIds = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var pendingReconnectNodeId: String? = null
+    @Volatile private var pendingNotificationWorkflowPath: String? = null
     private var visibleNodeChangedAt = 0L
     @Volatile private var lastUpdateCheck: Long = 0L
 
@@ -127,6 +130,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun attachBridge(value: ComfyBridge) {
         bridge = value
+    }
+
+    fun openJobNotification(
+        baseUrl: String,
+        workflowPath: String,
+        promptId: String,
+        completed: Boolean,
+    ) {
+        AppLogger.info(
+            "打开任务通知：任务=${promptId.ifBlank { "未知" }}，完成=$completed，工作流=${workflowPath.ifBlank { "未知" }}",
+        )
+        _state.update {
+            it.copy(
+                navigationRequest = AppNavigationRequest(
+                    id = SystemClock.elapsedRealtimeNanos(),
+                    destination = JobNotificationNavigation.destination(completed),
+                ),
+            )
+        }
+        workflowPath.trim().takeIf(String::isNotBlank)?.let { pendingNotificationWorkflowPath = it }
+
+        val normalized = runCatching { LanAddress.normalize(baseUrl) }.getOrNull()
+        val current = _state.value
+        if (normalized == null) {
+            if (current.status == ConnectionStatus.CONNECTED) restoreNotificationWorkflow()
+            return
+        }
+        if (current.activeServer?.baseUrl == normalized && current.status == ConnectionStatus.CONNECTED) {
+            restoreNotificationWorkflow()
+            return
+        }
+        if (current.status == ConnectionStatus.CONNECTING && current.serverInput == normalized) return
+        connect(normalized)
+    }
+
+    fun consumeNavigationRequest(id: Long) {
+        _state.update { state ->
+            if (state.navigationRequest?.id == id) state.copy(navigationRequest = null) else state
+        }
     }
 
     fun setServerInput(value: String) = _state.update { it.copy(serverInput = value) }
@@ -211,6 +253,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 openSocket()
                 refreshAll()
+                restoreNotificationWorkflow()
             }
         }
     }
@@ -220,6 +263,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         client.closeWebSocket()
         awaitingQueueJobIds.clear()
         pendingReconnectNodeId = null
+        pendingNotificationWorkflowPath = null
         _state.update {
             it.copy(
                 status = ConnectionStatus.DISCONNECTED,
@@ -514,7 +558,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 AppLogger.info("生成任务已加入队列：${response.promptId}")
-                startMonitor(response.promptId, workflow.entry.name)
+                startMonitor(response.promptId, workflow.entry.name, workflow.entry.path)
                 refreshTasksInternal()
             }
         }.also { job ->
@@ -736,13 +780,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(localResults = local) }
     }
 
-    fun onLocalResultsSaved(count: Int, failed: Boolean) = viewModelScope.launch {
+    fun onLocalResultsSaved(count: Int, failed: Boolean, localSaveRequested: Boolean) = viewModelScope.launch {
         val local = localResultCache.load()
         _state.update {
             it.copy(
                 localResults = local,
-                generationMessage = if (failed) "生成完成，但部分本地作品保存失败" else "生成完成，本地已保存 $count 项",
-                notice = if (failed) "部分本地作品保存失败，可保持连接后重新生成" else "本地已完整保存 $count 项",
+                generationMessage = when {
+                    localSaveRequested && failed -> "生成完成，但本地作品保存失败"
+                    localSaveRequested -> "本地保存完成，共 $count 项"
+                    else -> "生成完成"
+                },
+                notice = when {
+                    localSaveRequested && failed -> "本地作品保存失败，可保持连接后重试"
+                    localSaveRequested -> "本地保存完成，共 $count 项"
+                    else -> "生成完成"
+                },
             )
         }
     }
@@ -1289,6 +1341,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     job.workflowName.ifBlank {
                         _state.value.selectedWorkflow?.entry?.name ?: "ComfyUI 工作流"
                     },
+                    job.workflowPath.ifBlank {
+                        _state.value.selectedWorkflow?.entry?.path.orEmpty()
+                    },
                 )
             }
         }
@@ -1336,12 +1391,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun startMonitor(promptId: String, workflowName: String) {
+    private fun startMonitor(promptId: String, workflowName: String, workflowPath: String) {
         if (!monitoredJobIds.add(promptId)) return
         val intent = Intent(app, JobMonitorService::class.java)
             .putExtra(JobMonitorService.EXTRA_BASE_URL, client.serverUrl())
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
             .putExtra(JobMonitorService.EXTRA_WORKFLOW_NAME, workflowName)
+            .putExtra(JobMonitorService.EXTRA_WORKFLOW_PATH, workflowPath)
         runCatching { ContextCompat.startForegroundService(app, intent) }
             .onFailure { error ->
                 monitoredJobIds.remove(promptId)
@@ -1374,6 +1430,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateFieldLayout(key: String, transform: (ParameterField) -> ParameterField) {
         _state.update { ui -> ui.copy(fields = ui.fields.map { if (it.key == key) transform(it) else it }) }
+    }
+
+    private fun restoreNotificationWorkflow() {
+        val path = pendingNotificationWorkflowPath?.takeIf(String::isNotBlank) ?: return
+        if (_state.value.selectedWorkflow?.entry?.path == path) {
+            pendingNotificationWorkflowPath = null
+            return
+        }
+        val entry = _state.value.workflows.firstOrNull { !it.isDirectory && it.path == path }
+            ?: WorkflowEntry(
+                name = path.substringAfterLast('/'),
+                path = path,
+                isDirectory = false,
+            )
+        pendingNotificationWorkflowPath = null
+        selectWorkflow(entry, recordAsOpened = true)
     }
 
     private fun updateRecentWorkflowState(path: String, replacedPath: String? = null) {
@@ -1506,7 +1578,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     currentExecutingNodeId = null,
                     generationProgress = 1f,
                     generationMessage = "生成完成，正在后台保存本地作品",
-                    notice = "生成完成：${promptId.take(8)}",
                 )
             }
         }

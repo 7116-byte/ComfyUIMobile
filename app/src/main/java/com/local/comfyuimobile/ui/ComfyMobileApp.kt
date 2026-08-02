@@ -53,6 +53,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
@@ -169,6 +170,7 @@ import com.local.comfyuimobile.data.CachePolicy
 import com.local.comfyuimobile.data.RecentWorkflows
 import com.local.comfyuimobile.data.WorkflowBrowser
 import com.local.comfyuimobile.data.WorkflowPath
+import com.local.comfyuimobile.model.AppDestination
 import com.local.comfyuimobile.model.AppUiState
 import com.local.comfyuimobile.model.ConnectionStatus
 import com.local.comfyuimobile.model.JobState
@@ -388,11 +390,19 @@ private fun ServerCard(profile: ServerProfile, onClick: () -> Unit, onDelete: ((
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState) {
-    var page by remember { mutableStateOf(MainPage.WORKFLOWS) }
+    var page by rememberSaveable { mutableStateOf(MainPage.WORKFLOWS) }
     var settings by remember { mutableStateOf(false) }
     var resultSource by rememberSaveable { mutableStateOf(ResultSource.LOCAL) }
     var resultLayout by rememberSaveable { mutableStateOf(ResultLayout.ALBUMS) }
     var resultAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(state.navigationRequest?.id) {
+        val request = state.navigationRequest ?: return@LaunchedEffect
+        page = when (request.destination) {
+            AppDestination.PARAMETERS -> MainPage.PARAMETERS
+            AppDestination.RESULTS -> MainPage.RESULTS
+        }
+        viewModel.consumeNavigationRequest(request.id)
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -608,7 +618,7 @@ private fun WorkflowRow(
 private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     val workflow = state.selectedWorkflow
     if (workflow == null) {
-        EmptyState(Icons.Default.Tune, "请先在工作流页选择一个工作流")
+        ParameterHistoryScreen(state, viewModel)
         return
     }
     var expandedNodeIds by remember(workflow.entry.path) { mutableStateOf(emptySet<String>()) }
@@ -1243,6 +1253,61 @@ private fun MultilineTextField(
             },
         enabled = !field.linked,
     )
+}
+
+@Composable
+private fun ParameterHistoryScreen(state: AppUiState, viewModel: MainViewModel) {
+    val recentWorkflows = RecentWorkflows.resolveEntries(state.recentWorkflowPaths, state.workflows)
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(Icons.Default.History, null, Modifier.size(42.dp), tint = MaterialTheme.colorScheme.primary)
+        Text("最近打开的工作流", style = MaterialTheme.typography.titleLarge)
+        Text(
+            "点选一项即可恢复参数；也可以回到“工作流”页选择其他文件。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (recentWorkflows.isEmpty()) {
+            OutlinedCard(Modifier.fillMaxWidth()) {
+                Text(
+                    "暂无历史记录，请先在工作流页打开一个工作流。",
+                    Modifier.padding(16.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            recentWorkflows.forEach { entry ->
+                OutlinedCard(
+                    Modifier.fillMaxWidth().clickable {
+                        viewModel.selectWorkflow(entry, recordAsOpened = true)
+                    },
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Icon(Icons.Default.History, null, tint = MaterialTheme.colorScheme.primary)
+                        Column(Modifier.weight(1f)) {
+                            Text(entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 1)
+                            Text(
+                                entry.path.substringBeforeLast('/', "workflows"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, "打开参数")
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
             viewModel.onLocalResultsSaved(
                 count = intent.getIntExtra(JobMonitorService.EXTRA_SAVED_COUNT, 0),
                 failed = intent.getBooleanExtra(JobMonitorService.EXTRA_SAVE_FAILED, false),
+                localSaveRequested = intent.getBooleanExtra(JobMonitorService.EXTRA_LOCAL_SAVE_REQUESTED, false),
             )
         }
     }
@@ -61,7 +62,14 @@ class MainActivity : ComponentActivity() {
                 ComfyMobileApp(viewModel, bridge)
             }
         }
+        handleJobNotification(intent)
         viewModel.checkUpdate(manual = false)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleJobNotification(intent)
     }
 
     override fun onDestroy() {
@@ -81,6 +89,16 @@ class MainActivity : ComponentActivity() {
         val filter = IntentFilter(JobMonitorService.ACTION_LOCAL_RESULTS_UPDATED)
         ContextCompat.registerReceiver(this, localResultsReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         localResultsReceiverRegistered = true
+    }
+
+    private fun handleJobNotification(intent: Intent?) {
+        if (intent?.action != JobMonitorService.ACTION_OPEN_JOB) return
+        viewModel.openJobNotification(
+            baseUrl = intent.getStringExtra(JobMonitorService.EXTRA_BASE_URL).orEmpty(),
+            workflowPath = intent.getStringExtra(JobMonitorService.EXTRA_WORKFLOW_PATH).orEmpty(),
+            promptId = intent.getStringExtra(JobMonitorService.EXTRA_PROMPT_ID).orEmpty(),
+            completed = intent.getBooleanExtra(JobMonitorService.EXTRA_OPEN_COMPLETED, false),
+        )
     }
 
     private fun requestRuntimePermissions() {

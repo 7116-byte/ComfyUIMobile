@@ -1,5 +1,7 @@
 <resources>
     <string name="app_name">ComfyUI Mobile</string>
     <string name="monitor_channel">ComfyUI 生成任务</string>
+    <string name="completion_channel">本地保存完成提醒</string>
+    <string name="completion_channel_description">本地作品保存完成或最终保存失败时弹出提醒</string>
     <string name="update_channel">软件更新</string>
 </resources>
