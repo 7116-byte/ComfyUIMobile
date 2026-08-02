@@ -350,7 +350,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runOperation("工作流加载失败") {
                 _state.update { it.copy(loading = true, error = null, selectedWorkflow = null, fields = emptyList()) }
                 val raw = client.readWorkflow(entry.path)
-                val manifest = (bridge ?: error("前端桥接不可用")).loadWorkflow(raw)
+                val manifest = (bridge ?: error("前端桥接不可用")).loadWorkflow(
+                    rawJson = raw,
+                    workflowPath = entry.path,
+                )
                 val document = WorkflowDocument(entry, raw, manifest.fields, manifest.nodes)
                 _state.update {
                     val activeNode = ExecutionNodeResolver.resolve(it.currentExecutingNodeId, manifest.nodes)
@@ -446,37 +449,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             AdvancedEditorSession.clear()
             return
         }
-        val raw = AdvancedEditorSession.consumeOutput()
-        if (raw.isNullOrBlank()) {
+        val result = AdvancedEditorSession.consumeOutput()
+        if (result == null) {
             _state.update { it.copy(loading = false, error = "高级编辑没有返回工作流内容") }
             return
         }
-        viewModelScope.launch {
-            runCatching {
-                bridgeOperationMutex.withLock {
-                    val activeBridge = bridge ?: error("前端桥接不可用")
-                    raw to activeBridge.loadWorkflow(raw)
-                }
-            }.onSuccess { (raw, manifest) ->
-                _state.update {
-                    it.copy(
-                        selectedWorkflow = document.copy(rawJson = raw, fields = manifest.fields, nodes = manifest.nodes),
-                        fields = manifest.fields,
-                        nodeProblems = emptyMap(),
-                        loading = false,
-                        notice = "已关闭 ComfyUI 网页并刷新工作流参数",
-                    )
-                }
-            }.onFailure { error ->
-                if (error is CancellationException) throw error
-                AppLogger.error("高级编辑同步失败", error)
-                _state.update {
-                    it.copy(
-                        loading = false,
-                        error = "高级编辑同步失败：${error.message ?: error.javaClass.simpleName}",
-                    )
-                }
-            }
+        _state.update {
+            it.copy(
+                selectedWorkflow = document.copy(
+                    rawJson = result.workflowJson,
+                    fields = result.manifest.fields,
+                    nodes = result.manifest.nodes,
+                ),
+                fields = result.manifest.fields,
+                nodeProblems = emptyMap(),
+                loading = false,
+                notice = "已直接读取网页当前工作流并刷新参数",
+            )
         }
     }
 
@@ -744,7 +733,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val json = JSONObject(raw)
                 require(json.optJSONArray("nodes") != null) { "不是 ComfyUI 画布工作流 JSON" }
-                val manifest = (bridge ?: error("前端桥接不可用")).loadWorkflow(json.toString())
                 val sourceName = filename.substringAfterLast('/').substringAfterLast('\\')
                 val targetName = if (isImage) sourceName.substringBeforeLast('.', sourceName) else sourceName
                 val safeName = WorkflowPath.fileName(targetName)
@@ -758,6 +746,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val entry = client.writeWorkflow("workflows/$candidateName", json.toString(), overwrite = false)
                 refreshWorkflowsInternal()
+                val manifest = (bridge ?: error("前端桥接不可用")).loadWorkflow(
+                    rawJson = json.toString(),
+                    workflowPath = entry.path,
+                )
                 _state.update {
                     it.copy(
                         selectedWorkflow = WorkflowDocument(entry, json.toString(), manifest.fields, manifest.nodes),

@@ -177,9 +177,9 @@ class AdvancedEditorActivity : ComponentActivity() {
         progress.visibility = View.VISIBLE
         closeButton.isEnabled = false
         lifecycleScope.launch {
-            runCatching { bridge.exportCurrentWorkflow() }
-                .onSuccess { workflowJson ->
-                    AdvancedEditorSession.complete(workflowJson)
+            runCatching { bridge.snapshotCurrentWorkflow() }
+                .onSuccess { (workflowJson, manifest) ->
+                    AdvancedEditorSession.complete(workflowJson, manifest)
                     setResult(Activity.RESULT_OK)
                     finish()
                 }

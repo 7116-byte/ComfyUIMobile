@@ -1,5 +1,6 @@
 package com.local.comfyuimobile.bridge
 
+import com.local.comfyuimobile.model.WorkflowManifest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -16,8 +17,11 @@ class AdvancedEditorSessionTest {
         assertEquals("{\"nodes\":[]}", AdvancedEditorSession.input())
         assertEquals("workflows/KREA2/中文工作流.json", AdvancedEditorSession.inputPath())
 
-        AdvancedEditorSession.complete("{\"nodes\":[1]}")
-        assertEquals("{\"nodes\":[1]}", AdvancedEditorSession.consumeOutput())
+        val manifest = WorkflowManifest(emptyList(), emptyList())
+        AdvancedEditorSession.complete("{\"nodes\":[1]}", manifest)
+        val result = AdvancedEditorSession.consumeOutput()
+        assertEquals("{\"nodes\":[1]}", result?.workflowJson)
+        assertEquals(manifest, result?.manifest)
         assertNull(AdvancedEditorSession.input())
         assertNull(AdvancedEditorSession.inputPath())
     }

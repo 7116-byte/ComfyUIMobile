@@ -201,6 +201,25 @@ class ComfyBridge(private val activity: Activity) {
         val encodedPath = frontendWorkflowStorePath(workflowPath)
             ?.let { Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)) }
         val response = evaluate(workflowManifestScript(encoded, encodedPath, forceLinksVisible))
+        return parseWorkflowManifest(rawJson, response)
+    }
+
+    suspend fun snapshotCurrentWorkflow(): Pair<String, WorkflowManifest> {
+        awaitReady()
+        val rawJson = exportCurrentWorkflow()
+        val encoded = Base64.getEncoder().encodeToString(rawJson.toByteArray(Charsets.UTF_8))
+        val response = evaluate(
+            workflowManifestScript(
+                encodedWorkflow = encoded,
+                encodedWorkflowPath = null,
+                forceLinksVisible = false,
+                inspectCurrentGraph = true,
+            ),
+        )
+        return rawJson to parseWorkflowManifest(rawJson, response)
+    }
+
+    private fun parseWorkflowManifest(rawJson: String, response: String): WorkflowManifest {
         val root = JSONObject(response)
         if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "工作流解析失败"))
         val layout = parseLayout(rawJson)
@@ -609,6 +628,7 @@ class ComfyBridge(private val activity: Activity) {
         encodedWorkflow: String,
         encodedWorkflowPath: String?,
         forceLinksVisible: Boolean,
+        inspectCurrentGraph: Boolean = false,
     ) = """
         (async () => {
           try {
@@ -617,7 +637,8 @@ class ComfyBridge(private val activity: Activity) {
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedWorkflow'), c => c.charCodeAt(0)));
             const workflow = JSON.parse(text);
             const serverWorkflowPath = ${encodedWorkflowPath?.let { "new TextDecoder().decode(Uint8Array.from(atob('$it'), c => c.charCodeAt(0)))" } ?: "''"};
-            if (serverWorkflowPath) {
+            if (!$inspectCurrentGraph) {
+              if (serverWorkflowPath) {
               // Follow the same path as ComfyUI's workflow sidebar: resolve the
               // persisted ComfyWorkflow first and pass that object to loadGraphData.
               const workflowStore = app.extensionManager?.workflow;
@@ -646,6 +667,15 @@ class ComfyBridge(private val activity: Activity) {
                   skipAssetScans:!loadFromRemote
                 }
               );
+              await new Promise(resolve => setTimeout(resolve, 250));
+              const activeWorkflowPath = workflowStore.activeWorkflow?.path || '';
+              if (activeWorkflowPath !== serverWorkflowPath) {
+                return JSON.stringify({
+                  ok:false,
+                  error:'ComfyUI 打开的工作流标签不匹配：期望 ' + serverWorkflowPath +
+                    '，实际 ' + (activeWorkflowPath || '未命名工作流')
+                });
+              }
 
               // Apply values changed in the phone form only after ComfyUI has
               // opened the real persisted graph, so its links and subgraphs stay intact.
@@ -684,8 +714,9 @@ class ComfyBridge(private val activity: Activity) {
                 openedGraph.extra = openedGraph.extra || {};
                 openedGraph.extra.comfyMobile = cloneValue(workflow.extra.comfyMobile);
               }
-            } else {
-              await app.loadGraphData(workflow, true, false, null);
+              } else {
+                await app.loadGraphData(workflow, true, false, null);
+              }
             }
             const rootGraph = app.rootGraph || app.graph;
             if ($forceLinksVisible && app.canvas) {
@@ -1158,12 +1189,37 @@ class ComfyBridge(private val activity: Activity) {
               try {
                 const app = window.comfyAPI?.app?.app;
                 if (!(app?.rootGraph || app?.graph)) return JSON.stringify({ok:false,error:'工作流画布尚未就绪'});
+                const workspace = app.extensionManager;
+                if (!app.vueAppReady || !workspace) {
+                  return JSON.stringify({ok:false,error:'ComfyUI 网页应用尚未就绪'});
+                }
+                if (workspace.spinner === true) {
+                  delete window.__comfyMobileReadySince;
+                  delete window.__comfyMobileReadyKey;
+                  return JSON.stringify({ok:false,error:'ComfyUI 正在恢复工作流标签'});
+                }
                 const settings = app?.ui?.settings;
                 const locale = settings?.getSettingValue?.('Comfy.Locale');
                 if (settings && locale !== 'zh') {
+                  delete window.__comfyMobileReadySince;
+                  delete window.__comfyMobileReadyKey;
                   if (typeof settings?.setSettingValueAsync === 'function') await settings.setSettingValueAsync('Comfy.Locale', 'zh');
                   else settings?.setSettingValue?.('Comfy.Locale', 'zh');
-                  await new Promise(resolve => setTimeout(resolve, 300));
+                  return JSON.stringify({ok:false,error:'正在切换 ComfyUI 网页语言'});
+                }
+                const workflowStore = workspace.workflow;
+                if (!workflowStore?.getWorkflowByPath || !workflowStore?.syncWorkflows) {
+                  return JSON.stringify({ok:false,error:'ComfyUI 工作流仓库尚未就绪'});
+                }
+                const readyKey = String(workflowStore.activeWorkflow?.path || '') + ':' +
+                  String(workflowStore.workflows?.length || 0);
+                if (window.__comfyMobileReadyKey !== readyKey) {
+                  window.__comfyMobileReadyKey = readyKey;
+                  window.__comfyMobileReadySince = Date.now();
+                  return JSON.stringify({ok:false,error:'正在等待 ComfyUI 工作流状态稳定'});
+                }
+                if (Date.now() - Number(window.__comfyMobileReadySince || 0) < 750) {
+                  return JSON.stringify({ok:false,error:'正在等待 ComfyUI 工作流状态稳定'});
                 }
                 window.__comfyMobileApp = app;
                 return JSON.stringify({ok:true});
