@@ -222,6 +222,23 @@ class ComfyBridge(private val activity: Activity) {
     private fun parseWorkflowManifest(rawJson: String, response: String): WorkflowManifest {
         val root = JSONObject(response)
         if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "工作流解析失败"))
+        root.optJSONObject("diagnostics")
+            ?.takeIf { it.optBoolean("forceLinksVisible") }
+            ?.let { diagnostics ->
+                val settingMode = diagnostics.opt("configuredLinkMode")
+                    .takeUnless { it == null || it == JSONObject.NULL }
+                    ?.toString()
+                    ?: "未知"
+                val canvasMode = diagnostics.opt("canvasLinkMode")
+                    .takeUnless { it == null || it == JSONObject.NULL }
+                    ?.toString()
+                    ?: "未知"
+                AppLogger.info(
+                    "高级编辑连线检查：源工作流=${diagnostics.optInt("sourceLinkCount")} 条，" +
+                        "画布已载入=${diagnostics.optInt("loadedLinkCount")} 条，" +
+                        "前端设置模式=$settingMode，画布模式=$canvasMode",
+                )
+            }
         val layout = parseLayout(rawJson)
         val fieldsJson = root.optJSONArray("fields") ?: JSONArray()
         val fields = buildList {
@@ -719,11 +736,32 @@ class ComfyBridge(private val activity: Activity) {
               }
             }
             const rootGraph = app.rootGraph || app.graph;
+            const settings = app.ui?.settings;
+            let configuredLinkMode = Number(settings?.getSettingValue?.('Comfy.LinkRenderMode'));
             if ($forceLinksVisible && app.canvas) {
-              const configuredMode = Number(app.ui?.settings?.getSettingValue?.('Comfy.LinkRenderMode'));
-              if (configuredMode === -1 || Number(app.canvas.links_render_mode) === -1) {
-                app.canvas.links_render_mode = 2;
+              // ComfyUI observes Comfy.LinkRenderMode and writes it back to the
+              // canvas. Changing only canvas.links_render_mode is therefore
+              // temporary: the next reactive update hides the links again.
+              const visibleMode = Number.isFinite(configuredLinkMode) && configuredLinkMode >= 0
+                ? configuredLinkMode
+                : 2;
+              if (!Number.isFinite(configuredLinkMode) || configuredLinkMode < 0) {
+                if (typeof settings?.setSettingValueAsync === 'function') {
+                  await settings.setSettingValueAsync('Comfy.LinkRenderMode', visibleMode);
+                } else if (typeof settings?.setSettingValue === 'function') {
+                  settings.setSettingValue('Comfy.LinkRenderMode', visibleMode);
+                }
               }
+              // Let the setting watcher and Vue node slots settle first, then
+              // apply the same visible mode once more and redraw both layers.
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+              await new Promise(resolve => setTimeout(resolve, 100));
+              configuredLinkMode = Number(settings?.getSettingValue?.('Comfy.LinkRenderMode'));
+              app.canvas.links_render_mode = Number.isFinite(configuredLinkMode) && configuredLinkMode >= 0
+                ? configuredLinkMode
+                : visibleMode;
+              app.canvas.setDirty?.(true, true);
+              app.canvas.draw?.(true, true);
             }
             const loadedIds = new Set((rootGraph?._nodes || []).map(node => String(node.id)));
             const missing = (workflow.nodes || []).filter(node => !loadedIds.has(String(node.id))).map(node => node.type);
@@ -1006,7 +1044,18 @@ class ComfyBridge(private val activity: Activity) {
                   });
                 }
             }
-            return JSON.stringify({ok:true, fields, nodes});
+            return JSON.stringify({
+              ok:true,
+              fields,
+              nodes,
+              diagnostics:{
+                forceLinksVisible:$forceLinksVisible,
+                sourceLinkCount,
+                loadedLinkCount,
+                configuredLinkMode:Number(settings?.getSettingValue?.('Comfy.LinkRenderMode')),
+                canvasLinkMode:Number(app.canvas?.links_render_mode)
+              }
+            });
           } catch (error) {
             return JSON.stringify({ok:false, error:'工作流解析错误：' + String(error?.stack || error)});
           }
