@@ -9,14 +9,35 @@ object ParameterClassifier {
         "batch_size", "steps", "cfg", "denoise", "sampler_name", "scheduler", "image", "video",
     )
 
-    fun kind(nodeType: String, name: String, widgetType: String, value: Any?, options: List<String>): ParameterKind {
+    fun kind(
+        nodeType: String,
+        name: String,
+        widgetType: String,
+        value: Any?,
+        options: List<String>,
+        dataType: String = "",
+        minimum: Double? = null,
+        maximum: Double? = null,
+        step: Double? = null,
+        precision: Int? = null,
+    ): ParameterKind {
         val token = "$nodeType $name $widgetType".lowercase()
         if (token.contains("image") && (token.contains("upload") || name.equals("image", true))) return ParameterKind.IMAGE
         if (token.contains("video") && (token.contains("upload") || name.equals("video", true))) return ParameterKind.VIDEO
         if (options.isNotEmpty() || widgetType.contains("combo", true)) return ParameterKind.COMBO
         if (value is Boolean || widgetType.contains("toggle", true)) return ParameterKind.BOOLEAN
-        if (value is Int || value is Long || widgetType.equals("number", true) && !value.toString().contains('.')) return ParameterKind.INTEGER
-        if (value is Number || widgetType.contains("slider", true)) return ParameterKind.DECIMAL
+        when (dataType.trim().uppercase()) {
+            "FLOAT", "DOUBLE", "NUMBER" -> return ParameterKind.DECIMAL
+            "INT", "INTEGER" -> return ParameterKind.INTEGER
+        }
+        if (
+            precision?.let { it > 0 } == true ||
+            listOfNotNull(minimum, maximum, step).any(::hasFractionalPart)
+        ) return ParameterKind.DECIMAL
+        if (value is Float || value is Double) return ParameterKind.DECIMAL
+        if (value is Byte || value is Short || value is Int || value is Long) return ParameterKind.INTEGER
+        if (widgetType.contains("slider", true)) return ParameterKind.DECIMAL
+        if (widgetType.equals("number", true) && value?.toString()?.toLongOrNull() != null) return ParameterKind.INTEGER
         if (value is String) {
             return if (token.contains("multiline") || token.contains("cliptextencode") || name.equals("text", true)) {
                 ParameterKind.MULTILINE
@@ -26,6 +47,8 @@ object ParameterClassifier {
         }
         return ParameterKind.UNSUPPORTED
     }
+
+    private fun hasFractionalPart(value: Double): Boolean = value.isFinite() && value % 1.0 != 0.0
 
     fun section(nodeType: String, name: String, kind: ParameterKind): ParameterSection {
         val normalized = name.lowercase()

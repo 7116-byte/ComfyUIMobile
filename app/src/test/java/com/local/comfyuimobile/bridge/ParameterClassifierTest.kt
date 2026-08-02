@@ -14,6 +14,23 @@ class ParameterClassifierTest {
         assertEquals(ParameterKind.INTEGER, ParameterClassifier.kind("EmptyLatentImage", "width", "number", 1024, emptyList()))
     }
 
+    @Test fun keepsFloatInputsDecimalEvenWhenCurrentValueIsWhole() {
+        assertEquals(
+            ParameterKind.DECIMAL,
+            ParameterClassifier.kind(
+                nodeType = "LoraLoaderModelOnly",
+                name = "strength_model",
+                widgetType = "number",
+                value = 0,
+                options = emptyList(),
+                dataType = "FLOAT",
+                minimum = -100.0,
+                maximum = 100.0,
+                step = 0.01,
+            ),
+        )
+    }
+
     @Test fun putsPromptMediaAndSamplerFieldsInPrimarySection() {
         assertEquals(ParameterSection.PRIMARY, ParameterClassifier.section("CLIPTextEncode", "text", ParameterKind.MULTILINE))
         assertEquals(ParameterSection.PRIMARY, ParameterClassifier.section("KSampler", "control_after_generate", ParameterKind.COMBO))

@@ -222,10 +222,15 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
     LaunchedEffect(state.advancedEditor) {
         if (state.advancedEditor) {
             advancedEditorLauncher.launch(
-                Intent(context, AdvancedEditorActivity::class.java).putExtra(
-                    AdvancedEditorActivity.EXTRA_SERVER_URL,
-                    state.activeServer?.baseUrl.orEmpty(),
-                ),
+                Intent(context, AdvancedEditorActivity::class.java)
+                    .putExtra(
+                        AdvancedEditorActivity.EXTRA_SERVER_URL,
+                        state.activeServer?.baseUrl.orEmpty(),
+                    )
+                    .putExtra(
+                        AdvancedEditorActivity.EXTRA_WORKFLOW_PATH,
+                        state.selectedWorkflow?.entry?.path.orEmpty(),
+                    ),
             )
         }
     }

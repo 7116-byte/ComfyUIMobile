@@ -191,10 +191,16 @@ class ComfyBridge(private val activity: Activity) {
         )
     }
 
-    suspend fun loadWorkflow(rawJson: String): WorkflowManifest {
+    suspend fun loadWorkflow(
+        rawJson: String,
+        workflowPath: String? = null,
+        forceLinksVisible: Boolean = false,
+    ): WorkflowManifest {
         awaitReady()
         val encoded = Base64.getEncoder().encodeToString(rawJson.toByteArray(Charsets.UTF_8))
-        val response = evaluate(workflowManifestScript(encoded))
+        val encodedPath = normalizeServerWorkflowPath(workflowPath)
+            ?.let { Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)) }
+        val response = evaluate(workflowManifestScript(encoded, encodedPath, forceLinksVisible))
         val root = JSONObject(response)
         if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "工作流解析失败"))
         val layout = parseLayout(rawJson)
@@ -209,7 +215,21 @@ class ComfyBridge(private val activity: Activity) {
                 val nodeType = item.optString("nodeType")
                 val name = item.optString("name")
                 val widgetType = item.optString("widgetType")
-                val kind = ParameterClassifier.kind(nodeType, name, widgetType, value, options)
+                val minimum = item.optNullableDouble("min")
+                val maximum = item.optNullableDouble("max")
+                val step = item.optNullableDouble("step")
+                val kind = ParameterClassifier.kind(
+                    nodeType = nodeType,
+                    name = name,
+                    widgetType = widgetType,
+                    value = value,
+                    options = options,
+                    dataType = item.optString("dataType"),
+                    minimum = minimum,
+                    maximum = maximum,
+                    step = step,
+                    precision = item.optInt("precision", -1).takeIf { it >= 0 },
+                )
                 val stored = layout.optJSONObject(key)
                 val label = stored?.optString("label").takeUnless { it.isNullOrBlank() }
                     ?: ParameterClassifier.label(item.optString("nodeTitle"), name, item.optString("label", name))
@@ -243,9 +263,9 @@ class ComfyBridge(private val activity: Activity) {
                             else -> value.toString()
                         },
                         options = options,
-                        minimum = item.optNullableDouble("min"),
-                        maximum = item.optNullableDouble("max"),
-                        step = item.optNullableDouble("step"),
+                        minimum = minimum,
+                        maximum = maximum,
+                        step = step,
                         linked = item.optBoolean("linked"),
                         visible = stored?.optBoolean("visible", true) ?: true,
                         section = section,
@@ -585,18 +605,38 @@ class ComfyBridge(private val activity: Activity) {
         })()
     """.trimIndent()
 
-    private fun workflowManifestScript(encodedWorkflow: String) = """
+    private fun workflowManifestScript(
+        encodedWorkflow: String,
+        encodedWorkflowPath: String?,
+        forceLinksVisible: Boolean,
+    ) = """
         (async () => {
           try {
             const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
             if (!app) return JSON.stringify({ok:false, error:'ComfyUI 前端对象尚未就绪'});
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedWorkflow'), c => c.charCodeAt(0)));
             const workflow = JSON.parse(text);
-            await app.loadGraphData(workflow, true, false);
+            const serverWorkflowPath = ${encodedWorkflowPath?.let { "new TextDecoder().decode(Uint8Array.from(atob('$it'), c => c.charCodeAt(0)))" } ?: "''"};
+            await app.loadGraphData(workflow, true, false, serverWorkflowPath || null);
             const rootGraph = app.rootGraph || app.graph;
+            if ($forceLinksVisible && app.canvas) {
+              const configuredMode = Number(app.ui?.settings?.getSettingValue?.('Comfy.LinkRenderMode'));
+              if (configuredMode === -1 || Number(app.canvas.links_render_mode) === -1) {
+                app.canvas.links_render_mode = 2;
+              }
+            }
             const loadedIds = new Set((rootGraph?._nodes || []).map(node => String(node.id)));
             const missing = (workflow.nodes || []).filter(node => !loadedIds.has(String(node.id))).map(node => node.type);
             if (missing.length) return JSON.stringify({ok:false, error:'缺失节点：' + [...new Set(missing)].join(', ')});
+            const sourceLinkCount = Array.isArray(workflow.links)
+              ? workflow.links.length
+              : Object.keys(workflow.links || {}).length;
+            const loadedLinkCount = rootGraph?.links instanceof Map
+              ? rootGraph.links.size
+              : Object.keys(rootGraph?.links || {}).length;
+            if (sourceLinkCount > 0 && loadedLinkCount === 0) {
+              return JSON.stringify({ok:false, error:'工作流原有 ' + sourceLinkCount + ' 条连线，但高级编辑画布没有载入连线'});
+            }
             const allNodes = rootGraph?._nodes || [];
             const allNodeById = new Map(allNodes.map(node => [String(node.id), node]));
             const activeNodes = allNodes.filter(node => ![2, 4].includes(Number(node.mode ?? 0)));
@@ -804,6 +844,12 @@ class ComfyBridge(private val activity: Activity) {
             for (const [nodeOrder, node] of displayNodes.entries()) {
                 const nodeKey = String(node.id);
                 const controller = isController(node);
+                const nodeData = node.constructor?.nodeData || node.nodeData || {};
+                const inputDefinitions = {
+                  ...(nodeData.input?.required || {}),
+                  ...(nodeData.input?.optional || {}),
+                  ...(nodeData.input?.hidden || {}),
+                };
                 nodes.push({
                   id: nodeKey,
                   title: node.title || node.type || '',
@@ -820,6 +866,13 @@ class ComfyBridge(private val activity: Activity) {
                 for (const [widgetIndex, widget] of widgets.entries()) {
                   if (!widget?.name || widget.type === 'button' || widget.type === 'hidden' || widget.type === 'converted-widget' || widget.hidden === true) continue;
                   const input = (node.inputs || []).find(i => i.widget?.name === widget.name || i.name === widget.name);
+                  const inputSpec = inputDefinitions[widget.name];
+                  const declaredType = Array.isArray(inputSpec) ? inputSpec[0] : inputSpec?.type;
+                  const inputOptions = Array.isArray(inputSpec) ? inputSpec[1] : inputSpec;
+                  const numericOption = (name) => {
+                    const candidate = widget.options?.[name] ?? inputOptions?.[name];
+                    return Number.isFinite(candidate) ? candidate : null;
+                  };
                   const values = Array.isArray(widget.options?.values) ? widget.options.values.map(String) : [];
                   let value = widget.value;
                   const groupToggle = value && typeof value === 'object' && typeof value.toggled === 'boolean' &&
@@ -840,13 +893,15 @@ class ComfyBridge(private val activity: Activity) {
                     name: widget.name,
                     label: groupToggle && rawLabel.startsWith('Enable ') ? '启用：' + rawLabel.slice(7) : rawLabel,
                     widgetType: groupToggle ? 'toggle' : String(widget.type || typeof value),
+                    dataType: typeof declaredType === 'string' ? declaredType : '',
                     widgetIndex,
                     refreshesWorkflow: groupToggle,
                     value,
                     values,
-                    min: Number.isFinite(widget.options?.min) ? widget.options.min : null,
-                    max: Number.isFinite(widget.options?.max) ? widget.options.max : null,
-                    step: Number.isFinite(widget.options?.step) ? widget.options.step : null,
+                    min: numericOption('min'),
+                    max: numericOption('max'),
+                    step: numericOption('step'),
+                    precision: numericOption('precision'),
                     linked: input?.link != null,
                   });
                 }
@@ -1017,6 +1072,13 @@ class ComfyBridge(private val activity: Activity) {
     companion object {
         private const val IMAGE_IMPORT_PATH = "__comfy_mobile_import"
         private val SUPPORTED_WORKFLOW_IMAGE_TYPES = setOf("image/png", "image/webp", "image/avif")
+
+        internal fun normalizeServerWorkflowPath(value: String?): String? = value
+            ?.trim()
+            ?.replace('\\', '/')
+            ?.trimStart('/')
+            ?.replace(Regex("^workflows/", RegexOption.IGNORE_CASE), "")
+            ?.takeIf(String::isNotBlank)
 
         private val READY_SCRIPT = """
             (async () => {

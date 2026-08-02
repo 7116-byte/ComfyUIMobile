@@ -47,7 +47,10 @@ class AdvancedEditorActivity : ComponentActivity() {
 
         val serverUrl = intent.getStringExtra(EXTRA_SERVER_URL).orEmpty()
         val workflowJson = AdvancedEditorSession.input()
-        if (serverUrl.isBlank() || workflowJson.isNullOrBlank()) {
+        val workflowPath = intent.getStringExtra(EXTRA_WORKFLOW_PATH)
+            .orEmpty()
+            .ifBlank { AdvancedEditorSession.inputPath().orEmpty() }
+        if (serverUrl.isBlank() || workflowJson.isNullOrBlank() || workflowPath.isBlank()) {
             showError("缺少服务器地址或当前工作流，无法打开高级编辑。")
             return
         }
@@ -56,7 +59,11 @@ class AdvancedEditorActivity : ComponentActivity() {
             runCatching {
                 bridge.loadServer(serverUrl)
                 bridge.awaitReady()
-                bridge.loadWorkflow(workflowJson)
+                bridge.loadWorkflow(
+                    rawJson = workflowJson,
+                    workflowPath = workflowPath,
+                    forceLinksVisible = true,
+                )
                 bridge.refreshVisibleViewport()
             }.onSuccess {
                 pageReady = true
@@ -90,7 +97,9 @@ class AdvancedEditorActivity : ComponentActivity() {
             setTextColor(Color.WHITE)
         })
         titleBlock.addView(TextView(this).apply {
-            text = intent.getStringExtra(EXTRA_SERVER_URL).orEmpty()
+            text = intent.getStringExtra(EXTRA_WORKFLOW_PATH)
+                .orEmpty()
+                .ifBlank { AdvancedEditorSession.inputPath().orEmpty() }
             textSize = 12f
             setTextColor(Color.LTGRAY)
             maxLines = 1
@@ -209,5 +218,6 @@ class AdvancedEditorActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_SERVER_URL = "server_url"
+        const val EXTRA_WORKFLOW_PATH = "workflow_path"
     }
 }

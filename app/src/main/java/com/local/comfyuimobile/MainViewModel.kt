@@ -176,7 +176,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openAdvancedEditor() {
         if (_state.value.loading || _state.value.generating || generationJob?.isActive == true) return
-        _state.value.selectedWorkflow ?: return
+        val document = _state.value.selectedWorkflow ?: return
         _state.value.activeServer ?: return
         val activeBridge = bridge ?: return
         _state.update { it.copy(loading = true, error = null) }
@@ -184,7 +184,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 bridgeOperationMutex.withLock {
                     val currentWorkflow = activeBridge.syncWorkflow(_state.value.fields)
-                    AdvancedEditorSession.begin(currentWorkflow)
+                    AdvancedEditorSession.begin(currentWorkflow, document.entry.path)
                 }
             }.onSuccess {
                 _state.update { it.copy(advancedEditor = true, loading = false) }
