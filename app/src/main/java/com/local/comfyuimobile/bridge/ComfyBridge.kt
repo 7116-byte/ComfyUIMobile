@@ -38,6 +38,19 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 class ComfyBridge(private val activity: Activity) {
+    data class LinkRepairReport(
+        val paintedBeforeRefresh: Int,
+        val paintedAfterRefresh: Int,
+        val paintedAfterRepair: Int,
+        val linkPixelVisibleBefore: Int,
+        val linkPixelVisibleAfter: Int,
+        val linkPixelVisibleRepaired: Int,
+        val repairMode: String,
+    ) {
+        val failed: Boolean
+            get() = paintedAfterRepair >= 0 && paintedAfterRepair == 0
+    }
+
     private data class PendingImageImport(val uri: Uri, val mimeType: String)
     private class PageTransitionException(message: String) : IllegalStateException(message)
     private class JavascriptContextUnavailableException(message: String) : IllegalStateException(message)
@@ -51,6 +64,8 @@ class ComfyBridge(private val activity: Activity) {
     @Volatile private var rendererEpoch: Int = 0
     @Volatile private var pageEpoch: Int = 0
     @Volatile private var finishedPageEpoch: Int = -1
+    @Volatile var lastLinkRepairReport: LinkRepairReport? = null
+        private set
     private val pendingImageImports = ConcurrentHashMap<String, PendingImageImport>()
     private val pendingEvaluations = ConcurrentHashMap<String, CancellableContinuation<String>>()
 
@@ -322,7 +337,19 @@ class ComfyBridge(private val activity: Activity) {
                         "重绘前=${diagnostics.optInt("paintedBeforeRefresh", -1)} 条，" +
                         "重绘后=${diagnostics.optInt("paintedAfterRefresh", -1)} 条，" +
                         "修复后=${diagnostics.optInt("paintedAfterRepair", -1)} 条，" +
-                        "修复方式=${diagnostics.optString("linkRepairMode", "none")}",
+                        "修复方式=${diagnostics.optString("linkRepairMode", "none")}，" +
+                        "像素可见=${diagnostics.optInt("linkPixelVisibleBefore", -1)}/" +
+                        "${diagnostics.optInt("linkPixelVisibleAfter", -1)}/" +
+                        "${diagnostics.optInt("linkPixelVisibleRepaired", -1)}",
+                )
+                lastLinkRepairReport = LinkRepairReport(
+                    paintedBeforeRefresh = diagnostics.optInt("paintedBeforeRefresh", -1),
+                    paintedAfterRefresh = diagnostics.optInt("paintedAfterRefresh", -1),
+                    paintedAfterRepair = diagnostics.optInt("paintedAfterRepair", -1),
+                    linkPixelVisibleBefore = diagnostics.optInt("linkPixelVisibleBefore", -1),
+                    linkPixelVisibleAfter = diagnostics.optInt("linkPixelVisibleAfter", -1),
+                    linkPixelVisibleRepaired = diagnostics.optInt("linkPixelVisibleRepaired", -1),
+                    repairMode = diagnostics.optString("linkRepairMode", "none"),
                 )
             }
         val layout = parseLayout(rawJson)
@@ -946,9 +973,9 @@ class ComfyBridge(private val activity: Activity) {
               // (pendingSlotSync stays true), so drawConnections() exits before
               // painting any links; a stale WebView-local Comfy.LinkRenderMode
               // of -1 hides them the same way. The graph itself still holds
-              // every link. Re-run the same resize+redraw the Activity performs
-              // after loading, detect the vanish, repair by mechanism, and
-              // report the exact state in the diagnostics.
+              // every link. Force one redraw after loading, detect the vanish
+              // (and whether the front canvas actually composites the link
+              // pixels), repair by mechanism, and report the exact state.
               const canvas = app.canvas;
               const liteGraph = window.LiteGraph;
               const graphLinksRef = rootGraph?.links ?? rootGraph?._links;
@@ -956,19 +983,62 @@ class ComfyBridge(private val activity: Activity) {
                 ? graphLinksRef.size
                 : Object.keys(graphLinksRef || {}).length;
               const countPainted = () => Number(canvas?.renderedPaths?.size || 0);
+              const sampleLinkPixel = () => {
+                try {
+                  const frontCtx = canvas.ctx;
+                  const ds = canvas.ds;
+                  const dpr = window.devicePixelRatio || 1;
+                  if (!frontCtx || typeof frontCtx.getImageData !== 'function') return -1;
+                  const toDevice = (p) => [
+                    Math.round((p[0] * ds.scale + ds.offset[0]) * dpr),
+                    Math.round((p[1] * ds.scale + ds.offset[1]) * dpr)
+                  ];
+                  const brightAt = (x, y) => {
+                    if (x < 0 || y < 0 || x >= canvas.canvas.width || y >= canvas.canvas.height) return 0;
+                    const data = frontCtx.getImageData(x, y, 1, 1).data;
+                    if (data[3] === 0) return 0;
+                    return (data[0] >= 60 || data[1] >= 60 || data[2] >= 60) ? 1 : 0;
+                  };
+                  for (const path of [...(canvas.renderedPaths || [])]) {
+                    const startNode = rootGraph?.getNodeById?.(path.origin_id);
+                    const endNode = rootGraph?.getNodeById?.(path.target_id);
+                    const startPos = startNode?.getOutputPos?.(path.origin_slot);
+                    const endPos = endNode?.getInputPos?.(path.target_slot);
+                    if (!startPos || !endPos) continue;
+                    for (let fraction = 0.1; fraction < 1.0; fraction += 0.1) {
+                      const [dx, dy] = toDevice([
+                        startPos[0] + (endPos[0] - startPos[0]) * fraction,
+                        startPos[1] + (endPos[1] - startPos[1]) * fraction
+                      ]);
+                      for (let oy = -2; oy <= 2; oy += 2) {
+                        for (let ox = -2; ox <= 2; ox += 2) {
+                          if (brightAt(dx + ox, dy + oy)) return 1;
+                        }
+                      }
+                    }
+                  }
+                  return 0;
+                } catch (_) {
+                  return -1;
+                }
+              };
               let paintedBefore = -1;
               let paintedAfter = -1;
               let paintedRepaired = -1;
+              let linkPixelVisibleBefore = -1;
+              let linkPixelVisibleAfter = -1;
+              let linkPixelVisibleRepaired = -1;
               let repairMode = 'none';
               if (graphLinkCount > 0) {
                 await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
                 await new Promise(resolve => setTimeout(resolve, 120));
                 paintedBefore = countPainted();
-                canvas.resize?.();
+                linkPixelVisibleBefore = paintedBefore > 0 ? sampleLinkPixel() : -1;
                 canvas.setDirty?.(true, true);
                 canvas.draw?.(true, true);
                 await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
                 paintedAfter = countPainted();
+                linkPixelVisibleAfter = paintedAfter > 0 ? sampleLinkPixel() : -1;
                 if (paintedAfter === 0) {
                   const settings = app.ui?.settings;
                   const settingMode = Number(settings?.getSettingValue?.('Comfy.LinkRenderMode'));
@@ -986,14 +1056,12 @@ class ComfyBridge(private val activity: Activity) {
                     repairMode = 'linkMode';
                   } else if (liteGraph?.vueNodesMode === true) {
                     const previousVueMode = liteGraph.vueNodesMode;
-                    try {
-                      liteGraph.vueNodesMode = false;
-                      canvas.setDirty?.(true, true);
-                      canvas.draw?.(true, true);
-                      repairMode = 'vueFallback';
-                    } finally {
-                      liteGraph.vueNodesMode = previousVueMode;
-                    }
+                    const vueDomPresent = document.querySelectorAll('[data-node-id]').length > 0;
+                    liteGraph.vueNodesMode = false;
+                    canvas.setDirty?.(true, true);
+                    canvas.draw?.(true, true);
+                    if (vueDomPresent) liteGraph.vueNodesMode = previousVueMode;
+                    repairMode = 'vueFallback';
                   } else {
                     canvas.setDirty?.(true, true);
                     canvas.draw?.(true, true);
@@ -1001,12 +1069,13 @@ class ComfyBridge(private val activity: Activity) {
                   }
                   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
                   paintedRepaired = countPainted();
+                  linkPixelVisibleRepaired = paintedRepaired > 0 ? sampleLinkPixel() : -1;
                 }
               }
-              // Persistent guard while editing: the Activity runs the same
-              // resize+redraw again after loadWorkflow returns, so a frame that
-              // painted links before but paints zero now gets repaired in place
-              // (no recursion - only the original drawConnections is re-run).
+              // Persistent guard while editing: any later redraw (including the
+              // Activity's post-load refresh) can hit the same WebView state.
+              // A frame that painted links before but paints zero now gets
+              // repaired in place on every frame until the state is healthy.
               if (graphLinkCount > 0 && !canvas.__comfyMobileLinkGuardInstalled) {
                 const originalDrawConnections = canvas.drawConnections;
                 canvas.__comfyMobileLinkGuardInstalled = true;
@@ -1017,22 +1086,28 @@ class ComfyBridge(private val activity: Activity) {
                   if (count === 0) return;
                   const rendered = Number(this.renderedPaths?.size || 0);
                   const last = Number(this.__comfyMobileLastRendered || 0);
-                  this.__comfyMobileLastRendered = rendered;
-                  if (rendered !== 0 || last === 0) return;
+                  if (rendered !== 0) {
+                    this.__comfyMobileLastRendered = rendered;
+                    return;
+                  }
+                  if (last === 0) {
+                    this.__comfyMobileLastRendered = 0;
+                    return;
+                  }
                   if (Number(this.links_render_mode) === -1) {
                     this.links_render_mode = 2;
                     originalDrawConnections.call(this, context);
-                    return;
-                  }
-                  if (window.LiteGraph?.vueNodesMode === true) {
+                  } else if (window.LiteGraph?.vueNodesMode === true) {
                     const previousVueMode = window.LiteGraph.vueNodesMode;
+                    const vueDomPresent = document.querySelectorAll('[data-node-id]').length > 0;
+                    window.LiteGraph.vueNodesMode = false;
                     try {
-                      window.LiteGraph.vueNodesMode = false;
                       originalDrawConnections.call(this, context);
                     } finally {
-                      window.LiteGraph.vueNodesMode = previousVueMode;
+                      if (vueDomPresent) window.LiteGraph.vueNodesMode = previousVueMode;
                     }
                   }
+                  this.__comfyMobileLastRendered = Number(this.renderedPaths?.size || 0);
                 };
                 if (repairMode === 'none') repairMode = 'guard';
               }
@@ -1040,6 +1115,9 @@ class ComfyBridge(private val activity: Activity) {
                 paintedBefore,
                 paintedAfter,
                 paintedRepaired,
+                linkPixelVisibleBefore,
+                linkPixelVisibleAfter,
+                linkPixelVisibleRepaired,
                 repairMode,
                 graphLinkCount
               };
@@ -1327,6 +1405,9 @@ class ComfyBridge(private val activity: Activity) {
                 paintedBeforeRefresh:Number(window.__comfyMobileLinkRepair?.paintedBefore ?? -1),
                 paintedAfterRefresh:Number(window.__comfyMobileLinkRepair?.paintedAfter ?? -1),
                 paintedAfterRepair:Number(window.__comfyMobileLinkRepair?.paintedRepaired ?? -1),
+                linkPixelVisibleBefore:Number(window.__comfyMobileLinkRepair?.linkPixelVisibleBefore ?? -1),
+                linkPixelVisibleAfter:Number(window.__comfyMobileLinkRepair?.linkPixelVisibleAfter ?? -1),
+                linkPixelVisibleRepaired:Number(window.__comfyMobileLinkRepair?.linkPixelVisibleRepaired ?? -1),
                 linkRepairMode:String(window.__comfyMobileLinkRepair?.repairMode || 'none')
               }
             });

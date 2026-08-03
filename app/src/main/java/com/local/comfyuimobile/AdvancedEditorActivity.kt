@@ -65,11 +65,27 @@ class AdvancedEditorActivity : ComponentActivity() {
                     workflowPath = workflowPath,
                     nativeWorkflowOpen = true,
                 )
-                bridge.refreshVisibleViewport()
             }.onSuccess {
                 pageReady = true
                 progress.visibility = View.GONE
-                message.visibility = View.GONE
+                val report = bridge.lastLinkRepairReport
+                if (report != null && report.repairMode != "none") {
+                    val text = "高级编辑连线检测：重绘前=${report.paintedBeforeRefresh}，" +
+                        "重绘后=${report.paintedAfterRefresh}，修复后=${report.paintedAfterRepair}，" +
+                        "像素可见=${report.linkPixelVisibleBefore}/${report.linkPixelVisibleAfter}/" +
+                        "${report.linkPixelVisibleRepaired}（方式=${report.repairMode}）"
+                    if (report.failed) {
+                        showError("连线仍未显示：$text")
+                    } else {
+                        message.text = text
+                        message.visibility = View.VISIBLE
+                        message.postDelayed({
+                            if (pageReady) message.visibility = View.GONE
+                        }, 5000L)
+                    }
+                } else {
+                    message.visibility = View.GONE
+                }
             }.onFailure { error ->
                 AppLogger.error("高级编辑网页加载失败", error)
                 showError("ComfyUI 网页加载失败：\n${error.message ?: error.javaClass.simpleName}")
