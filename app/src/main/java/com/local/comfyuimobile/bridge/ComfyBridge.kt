@@ -304,8 +304,19 @@ class ComfyBridge(private val activity: Activity) {
         awaitReady(timeoutMillis = 60_000L)
     }
 
-    suspend fun snapshotCurrentWorkflow(): Pair<String, WorkflowManifest> {
+    suspend fun snapshotCurrentWorkflow(expectedPath: String? = null): Pair<String, WorkflowManifest> {
         awaitReady()
+        if (expectedPath != null) {
+            val encodedPath = frontendWorkflowStorePath(expectedPath)
+                ?.let { Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)) }
+            if (encodedPath != null) {
+                val response = evaluate(ensureActiveWorkflowScript(encodedPath))
+                val root = JSONObject(response)
+                if (!root.optBoolean("ok")) {
+                    throw IllegalStateException(root.optString("error", "恢复被编辑的工作流失败"))
+                }
+            }
+        }
         val rawJson = exportCurrentWorkflow()
         val encoded = Base64.getEncoder().encodeToString(rawJson.toByteArray(Charsets.UTF_8))
         val response = evaluate(
@@ -318,6 +329,36 @@ class ComfyBridge(private val activity: Activity) {
         )
         return rawJson to parseWorkflowManifest(rawJson, response)
     }
+
+    private fun ensureActiveWorkflowScript(encodedWorkflowPath: String) = """
+        (async () => {
+          try {
+            const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
+            const workflowStore = app?.extensionManager?.workflow;
+            if (!workflowStore?.openWorkflow || !workflowStore?.getWorkflowByPath) {
+              return JSON.stringify({ok:false, error:'ComfyUI 工作流仓库尚未就绪'});
+            }
+            const expected = new TextDecoder().decode(Uint8Array.from(atob('$encodedWorkflowPath'), c => c.charCodeAt(0)));
+            const current = workflowStore.activeWorkflow?.path || '';
+            if (current === expected) {
+              return JSON.stringify({ok:true, switched:false});
+            }
+            const persistedWorkflow = workflowStore.getWorkflowByPath(expected);
+            if (!persistedWorkflow) {
+              return JSON.stringify({ok:false, error:'找不到被编辑的工作流：' + expected});
+            }
+            await workflowStore.openWorkflow(persistedWorkflow);
+            await new Promise(resolve => setTimeout(resolve, 400));
+            const activePath = workflowStore.activeWorkflow?.path || '';
+            if (activePath !== expected) {
+              return JSON.stringify({ok:false, error:'恢复被编辑的工作流失败：期望 ' + expected + '，实际 ' + activePath});
+            }
+            return JSON.stringify({ok:true, switched:true});
+          } catch (error) {
+            return JSON.stringify({ok:false, error:'恢复被编辑的工作流失败：' + String(error?.stack || error)});
+          }
+        })()
+    """.trimIndent()
 
     private fun parseWorkflowManifest(rawJson: String, response: String): WorkflowManifest {
         val root = JSONObject(response)

@@ -29,6 +29,7 @@ class AdvancedEditorActivity : ComponentActivity() {
     private lateinit var message: TextView
     private lateinit var closeButton: Button
     private lateinit var webContainer: FrameLayout
+    private var workflowPath: String = ""
     private var displayedWebView: WebView? = null
     private var pageReady = false
     private var closing = false
@@ -47,7 +48,7 @@ class AdvancedEditorActivity : ComponentActivity() {
 
         val serverUrl = intent.getStringExtra(EXTRA_SERVER_URL).orEmpty()
         val workflowJson = AdvancedEditorSession.input()
-        val workflowPath = intent.getStringExtra(EXTRA_WORKFLOW_PATH)
+        workflowPath = intent.getStringExtra(EXTRA_WORKFLOW_PATH)
             .orEmpty()
             .ifBlank { AdvancedEditorSession.inputPath().orEmpty() }
         if (serverUrl.isBlank() || workflowJson.isNullOrBlank() || workflowPath.isBlank()) {
@@ -194,7 +195,7 @@ class AdvancedEditorActivity : ComponentActivity() {
         progress.visibility = View.VISIBLE
         closeButton.isEnabled = false
         lifecycleScope.launch {
-            runCatching { bridge.snapshotCurrentWorkflow() }
+            runCatching { bridge.snapshotCurrentWorkflow(expectedPath = workflowPath) }
                 .onSuccess { (workflowJson, manifest) ->
                     AdvancedEditorSession.complete(workflowJson, manifest)
                     setResult(Activity.RESULT_OK)
