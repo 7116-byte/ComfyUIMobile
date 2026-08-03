@@ -638,6 +638,27 @@ class ComfyBridge(private val activity: Activity) {
             throw PageTransitionException("ComfyUI 页面在脚本启动后发生了切换")
         }
         if (started != "started") {
+            val kickoffState = runCatching {
+                evaluateImmediate(
+                    """
+                    (() => {
+                      if (window.__comfyMobileResults?.[$quotedToken]) return 'completed';
+                      if (window.__comfyMobileRunning?.[$quotedToken]) return 'running';
+                      return 'missing';
+                    })()
+                    """.trimIndent(),
+                )
+            }.getOrDefault("")
+            if (kickoffState == "running" || kickoffState == "completed") {
+                started = "started"
+            } else if (kickoffState == "missing") {
+                throw IllegalStateException(
+                    "前端桥接脚本没有启动，脚本存在语法错误或当前 WebView 不支持其中的语法" +
+                        "（长度=${script.length}，校验=${script.hashCode().toUInt().toString(16)}）",
+                )
+            }
+        }
+        if (started != "started") {
             throw JavascriptContextUnavailableException(
                 "ComfyUI 页面脚本没有响应：地址 $currentUrl，加载进度 $currentProgress%，" +
                     "页面完成=$currentFinished，网页已挂载=$currentAttached",
@@ -908,7 +929,7 @@ class ComfyBridge(private val activity: Activity) {
                 };
               }
               linkFallbackInstalled = true;
-              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+              $TWO_FRAME_RENDER_BARRIER
               await new Promise(resolve => setTimeout(resolve, 100));
               app.canvas.resize?.();
               app.canvas.setDirty?.(true, true);
@@ -1374,6 +1395,8 @@ class ComfyBridge(private val activity: Activity) {
 
     companion object {
         private const val IMAGE_IMPORT_PATH = "__comfy_mobile_import"
+        internal const val TWO_FRAME_RENDER_BARRIER =
+            "await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));"
         private val SUPPORTED_WORKFLOW_IMAGE_TYPES = setOf("image/png", "image/webp", "image/avif")
 
         internal fun normalizeServerWorkflowPath(value: String?): String? = value
