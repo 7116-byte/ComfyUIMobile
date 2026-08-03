@@ -85,6 +85,18 @@ class WorkflowDraftStore internal constructor(private val directory: File) {
         mutex.withLock { Files.deleteIfExists(fileFor(serverUrl, workflowPath).toPath()) }
     }
 
+    suspend fun count(): Int = withContext(Dispatchers.IO) {
+        mutex.withLock { countNow() }
+    }
+
+    suspend fun clearAll(): Int = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val files = directory.listFiles { file -> file.isFile && file.extension == "json" }.orEmpty()
+            files.forEach { file -> runCatching { file.delete() } }
+            files.count { !it.exists() }
+        }
+    }
+
     internal fun loadNow(serverUrl: String, workflowPath: String): WorkflowDraft? {
         val file = fileFor(serverUrl, workflowPath)
         if (!file.isFile) return null

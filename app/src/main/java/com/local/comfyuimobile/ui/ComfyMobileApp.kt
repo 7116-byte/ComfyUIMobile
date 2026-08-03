@@ -2042,6 +2042,7 @@ private fun JobCard(job: JobSummary, viewModel: MainViewModel) {
 private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     var confirmDeleteLocal by remember { mutableStateOf(false) }
+    var confirmClearDrafts by remember { mutableStateOf(false) }
     var showDiagnosticLog by remember { mutableStateOf(false) }
     var diagnosticLog by remember { mutableStateOf("") }
     var pendingLogExport by remember { mutableStateOf("") }
@@ -2053,6 +2054,7 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
         pendingLogExport = ""
         if (uri != null) viewModel.reportDiagnosticLogExport(success)
     }
+    LaunchedEffect(Unit) { viewModel.refreshLocalDraftCount() }
     if (showDiagnosticLog) {
         AlertDialog(
             onDismissRequest = { showDiagnosticLog = false },
@@ -2076,6 +2078,18 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
             onConfirm = {
                 viewModel.clearLocalCache()
                 confirmDeleteLocal = false
+            },
+        )
+        return
+    }
+    if (confirmClearDrafts) {
+        ConfirmDialog(
+            title = "清除全部本地草稿",
+            message = "将删除手机中所有工作流的本地未保存草稿（共 ${state.localDraftCount} 个），不影响服务器上的工作流文件。是否继续？",
+            onDismiss = { confirmClearDrafts = false },
+            onConfirm = {
+                viewModel.clearAllWorkflowDrafts()
+                confirmClearDrafts = false
             },
         )
         return
@@ -2117,6 +2131,12 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
                 }
                 OutlinedButton(onClick = { confirmDeleteLocal = true }, enabled = state.localResults.isNotEmpty()) {
                     Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("删除全部本地作品（${state.localResults.size} 项）")
+                }
+                HorizontalDivider()
+                Text("本地草稿", style = MaterialTheme.typography.titleSmall)
+                Text("手机中尚未保存到服务器的工作流修改，按工作流分别保存；打开工作流时自动恢复", style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = { confirmClearDrafts = true }, enabled = state.localDraftCount > 0) {
+                    Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("清除全部本地草稿（${state.localDraftCount}）")
                 }
                 HorizontalDivider()
                 Text("诊断日志", style = MaterialTheme.typography.titleSmall)

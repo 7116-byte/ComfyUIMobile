@@ -384,24 +384,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update { it.copy(loading = true, error = null, selectedWorkflow = null, fields = emptyList()) }
                 val serverUrl = _state.value.activeServer?.baseUrl ?: error("尚未连接 ComfyUI 服务器")
                 val draft = workflowDrafts.load(serverUrl, entry.path)
-                val raw = draft?.workflowJson ?: client.readWorkflow(entry.path)
+                // A legacy bug could write another workflow's JSON into this
+                // workflow's local draft. Compare the draft's node structure with
+                // the current server file; if they barely overlap, treat the
+                // draft as corrupted, discard it, and load the server version.
+                val serverRawForCheck = if (draft != null) {
+                    runCatching { client.readWorkflow(entry.path) }.getOrNull()
+                } else {
+                    null
+                }
+                val draftDiscarded = draft != null && serverRawForCheck != null &&
+                    WorkflowPolicy.draftStructureMismatched(draft.workflowJson, serverRawForCheck)
+                if (draftDiscarded) {
+                    runCatching { workflowDrafts.delete(serverUrl, entry.path) }
+                        .onFailure { AppLogger.error("清除不匹配的本地草稿失败", it) }
+                }
+                val raw = when {
+                    draftDiscarded -> serverRawForCheck!!
+                    draft != null -> draft.workflowJson
+                    else -> client.readWorkflow(entry.path)
+                }
                 val manifest = bridgeOperationMutex.withLock {
                     (bridge ?: error("前端桥接不可用")).loadWorkflow(
                         rawJson = raw,
                         workflowPath = entry.path,
                     )
                 }
-                val restoredFields = draft?.let { WorkflowDraftFields.restore(manifest.fields, it.fields) }
-                    ?: manifest.fields
-                val conflict = draft != null && WorkflowPolicy.hasModifiedConflict(draft.baseModified, entry.modified)
+                val restoredFields = if (draft != null && !draftDiscarded) {
+                    WorkflowDraftFields.restore(manifest.fields, draft.fields)
+                } else {
+                    manifest.fields
+                }
+                val conflict = draft != null && !draftDiscarded &&
+                    WorkflowPolicy.hasModifiedConflict(draft.baseModified, entry.modified)
                 val document = WorkflowDocument(
                     entry = entry,
                     rawJson = raw,
                     fields = restoredFields,
                     nodes = manifest.nodes,
                     serverUrl = serverUrl,
-                    baseModified = draft?.baseModified ?: entry.modified,
-                    hasUnsavedChanges = draft != null,
+                    baseModified = if (draft != null && !draftDiscarded) draft.baseModified else entry.modified,
+                    hasUnsavedChanges = draft != null && !draftDiscarded,
                 )
                 _state.update {
                     val activeNode = ExecutionNodeResolver.resolve(it.currentExecutingNodeId, manifest.nodes)
@@ -422,7 +445,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         } else {
                             it.generationMessage
                         },
-                        notice = if (draft != null) "已恢复 ${entry.name} 的本地未保存草稿" else "已加载 ${entry.name}",
+                        notice = when {
+                            draftDiscarded -> "检测到本地草稿与当前工作流内容不匹配（可能是旧版本数据混入），已忽略并读取服务器版本"
+                            draft != null -> "已恢复 ${entry.name} 的本地未保存草稿"
+                            else -> "已加载 ${entry.name}"
+                        },
                     )
                 }
                 if (recordAsOpened) {
@@ -1081,6 +1108,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update {
             if (success) it.copy(notice = "诊断日志已导出")
             else it.copy(error = "诊断日志导出失败")
+        }
+    }
+
+    fun refreshLocalDraftCount() {
+        viewModelScope.launch {
+            val count = runCatching { workflowDrafts.count() }.getOrDefault(0)
+            _state.update { it.copy(localDraftCount = count) }
+        }
+    }
+
+    fun clearAllWorkflowDrafts() {
+        viewModelScope.launch {
+            runOperation("清除本地草稿失败") {
+                val removed = workflowDrafts.clearAll()
+                _state.update {
+                    it.copy(
+                        localDraftCount = 0,
+                        notice = "已清除 $removed 个本地工作流草稿",
+                    )
+                }
+            }
         }
     }
 

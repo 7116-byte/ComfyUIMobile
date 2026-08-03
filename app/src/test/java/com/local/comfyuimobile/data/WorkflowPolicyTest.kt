@@ -36,4 +36,27 @@ class WorkflowPolicyTest {
         assertEquals(3, stored.getInt("order"))
         assertEquals("旧分支种子", mobile.getJSONObject("fields").getJSONObject("8/seed").getString("label"))
     }
+
+    @Test fun draftStructureKeepsSameTemplateDespiteValueEdits() {
+        val server = """{"nodes":[{"id":1,"type":"LoadImage"},{"id":2,"type":"KSampler"},{"id":3,"type":"SaveImage"}],"links":[]}"""
+        val draftSameValues = """{"nodes":[{"id":1,"type":"LoadImage"},{"id":2,"type":"KSampler"},{"id":3,"type":"SaveImage"}],"links":[]}"""
+        val draftEditedValues = """{"nodes":[{"id":1,"type":"LoadImage"},{"id":2,"type":"KSampler"},{"id":3,"type":"SaveImage"}],"links":[]}"""
+        assertEquals(1.0, WorkflowPolicy.draftStructureCoverage(draftSameValues, server), 0.0001)
+        assertEquals(1.0, WorkflowPolicy.draftStructureCoverage(draftEditedValues, server), 0.0001)
+        assertFalse(WorkflowPolicy.draftStructureMismatched(draftEditedValues, server))
+    }
+
+    @Test fun draftStructureKeepsAddedOrRemovedNodes() {
+        val server = """{"nodes":[{"id":1,"type":"LoadImage"},{"id":2,"type":"KSampler"},{"id":3,"type":"SaveImage"}],"links":[]}"""
+        val draftAdded = """{"nodes":[{"id":1,"type":"LoadImage"},{"id":2,"type":"KSampler"},{"id":3,"type":"SaveImage"},{"id":4,"type":"PreviewImage"}],"links":[]}"""
+        val draftRemoved = """{"nodes":[{"id":1,"type":"LoadImage"},{"id":2,"type":"KSampler"}],"links":[]}"""
+        assertFalse(WorkflowPolicy.draftStructureMismatched(draftAdded, server))
+        assertFalse(WorkflowPolicy.draftStructureMismatched(draftRemoved, server))
+    }
+
+    @Test fun draftStructureFlagsAnotherWorkflowsJson() {
+        val server = """{"nodes":[{"id":1,"type":"LoadImage"},{"id":2,"type":"KSampler"},{"id":3,"type":"SaveImage"}],"links":[]}"""
+        val otherWorkflow = """{"nodes":[{"id":11,"type":"CheckpointLoaderSimple"},{"id":12,"type":"CLIPTextEncode"},{"id":13,"type":"VAEDecode"},{"id":14,"type":"EmptyLatentImage"}],"links":[]}"""
+        assertTrue(WorkflowPolicy.draftStructureMismatched(otherWorkflow, server))
+    }
 }
