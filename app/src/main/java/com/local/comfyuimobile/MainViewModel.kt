@@ -50,6 +50,7 @@ import com.local.comfyuimobile.network.PromptSubmissionException
 import com.local.comfyuimobile.network.ProgressStateParser
 import com.local.comfyuimobile.service.JobMonitorService
 import com.local.comfyuimobile.service.JobNotificationNavigation
+import com.local.comfyuimobile.update.UpdateDownloadStatus
 import com.local.comfyuimobile.update.UpdateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -1383,7 +1384,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runOperation("更新下载失败") {
                 val result = updates.enqueue(info)
-                _state.update { it.copy(notice = "已通过${result.source}开始下载") }
+                _state.update {
+                    it.copy(
+                        updateDownloading = true,
+                        updateDownloadSource = result.source,
+                        updateDownloadProgress = 0f,
+                        notice = "已通过${result.source}（${result.latencyMillis}ms）开始下载",
+                    )
+                }
+                while (true) {
+                    delay(800)
+                    val progress = updates.downloadState(result.downloadId) ?: break
+                    when (progress.status) {
+                        UpdateDownloadStatus.SUCCESSFUL -> {
+                            _state.update {
+                                it.copy(
+                                    updateDownloading = false,
+                                    updateDownloadProgress = 1f,
+                                    notice = "下载完成，正在校验并安装",
+                                )
+                            }
+                            break
+                        }
+                        UpdateDownloadStatus.FAILED -> {
+                            _state.update {
+                                it.copy(
+                                    updateDownloading = false,
+                                    updateDownloadProgress = null,
+                                    error = "更新下载失败，请稍后重试",
+                                )
+                            }
+                            break
+                        }
+                        UpdateDownloadStatus.DOWNLOADING -> {
+                            _state.update { it.copy(updateDownloadProgress = progress.fraction) }
+                        }
+                    }
+                }
             }
         }
     }

@@ -205,4 +205,7 @@ data class AppUiState(
     val error: String? = null,
     val notice: String? = null,
     val updateInfo: UpdateInfo? = null,
+    val updateDownloading: Boolean = false,
+    val updateDownloadProgress: Float? = null,
+    val updateDownloadSource: String? = null,
 )

@@ -12,6 +12,8 @@ import androidx.core.content.FileProvider
 import com.local.comfyuimobile.BuildConfig
 import com.local.comfyuimobile.model.UpdateInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -21,18 +23,31 @@ import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 class UpdateManager(private val context: Context) {
-    private val client = OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build()
+    private val probeClient = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
+        .build()
     private val state = context.getSharedPreferences("update_download", Context.MODE_PRIVATE)
 
     suspend fun checkLatest(): UpdateInfo? = withContext(Dispatchers.IO) {
-        val request = Request.Builder()
-            .url("https://api.github.com/repos/${BuildConfig.GITHUB_REPOSITORY}/releases/latest")
-            .header("Accept", "application/vnd.github+json")
-            .get().build()
-        val root = client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw IllegalStateException("GitHub 检查失败：HTTP ${response.code}")
-            JSONObject(response.body?.string().orEmpty())
-        }
+        val apiBase = "https://api.github.com/repos/${BuildConfig.GITHUB_REPOSITORY}/releases/latest"
+        // Probe GitHub and the domestic mirrors concurrently and use whichever
+        // responds first, so update detection also works when api.github.com is
+        // slow or blocked on the current network.
+        val root = fastestSuccessful(UpdateMirrors.apiCandidates(apiBase)) { url ->
+            runCatching {
+                probeClient.newCall(
+                    Request.Builder()
+                        .url(url)
+                        .header("Accept", "application/vnd.github+json")
+                        .get()
+                        .build(),
+                ).execute().use { response ->
+                    if (!response.isSuccessful) throw IllegalStateException("检查失败：HTTP ${response.code}")
+                    JSONObject(response.body?.string().orEmpty())
+                }
+            }.getOrNull()
+        } ?: return@withContext null
         if (root.optBoolean("draft") || root.optBoolean("prerelease")) return@withContext null
         val tag = root.optString("tag_name")
         if (tag.isBlank() || VersionComparator.compare(tag, BuildConfig.VERSION_NAME) <= 0) return@withContext null
@@ -54,13 +69,15 @@ class UpdateManager(private val context: Context) {
 
     suspend fun enqueue(info: UpdateInfo): UpdateEnqueueResult = withContext(Dispatchers.IO) {
         val shaUrl = requireNotNull(info.sha256Url) { "Release 缺少 SHA-256 校验文件" }
-        val selected = UpdateMirrors.candidates(info.apkUrl, shaUrl).firstNotNullOfOrNull { candidate ->
-            runCatching {
-                val expectedSha = downloadText(candidate.sha256Url).trim().substringBefore(' ')
-                expectedSha.takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) }?.let { candidate to it }
-            }.getOrNull()
-        } ?: throw IllegalStateException("国内镜像和 GitHub 原地址均无法连接")
-        val (candidate, expectedSha) = selected
+        val probes = coroutineScope {
+            UpdateMirrors.candidates(info.apkUrl, shaUrl).map { candidate ->
+                async { probeCandidate(candidate) }
+            }.mapNotNull { it.await() }
+        }
+        val selected = UpdateMirrors.pickFastest(probes)
+            ?: throw IllegalStateException("国内镜像和 GitHub 原地址均无法连接")
+        val candidate = selected.candidate
+        val expectedSha = selected.expectedSha
         val filename = "ComfyUIMobile-${info.tag}-release.apk"
         val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
             ?: throw IllegalStateException("无法访问应用下载目录")
@@ -79,8 +96,58 @@ class UpdateManager(private val context: Context) {
             .putString("tag", info.tag)
             .putString("source", candidate.label)
             .apply()
-        UpdateEnqueueResult(id, candidate.label)
+        UpdateEnqueueResult(id, candidate.label, selected.latencyMillis)
     }
+
+    private suspend fun probeCandidate(candidate: UpdateDownloadCandidate): MirrorProbe? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val start = System.nanoTime()
+                val text = probeClient.newCall(
+                    Request.Builder().url(candidate.sha256Url).get().build(),
+                ).execute().use { response ->
+                    if (!response.isSuccessful) throw IllegalStateException("校验文件下载失败：HTTP ${response.code}")
+                    response.body?.string().orEmpty()
+                }
+                val expectedSha = text.trim().substringBefore(' ')
+                    .takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) }
+                    ?: return@runCatching null
+                MirrorProbe(candidate, (System.nanoTime() - start) / 1_000_000, expectedSha)
+            }.getOrNull()
+        }
+
+    private suspend fun <T> fastestSuccessful(
+        urls: List<String>,
+        load: suspend (String) -> T?,
+    ): T? = coroutineScope {
+        urls.map { url ->
+            async {
+                val start = System.nanoTime()
+                load(url)?.let { (System.nanoTime() - start) to it }
+            }
+        }.mapNotNull { it.await() }
+            .minByOrNull { it.first }
+            ?.second
+    }
+
+    fun downloadState(downloadId: Long): UpdateDownloadState? = runCatching {
+        val manager = context.getSystemService(DownloadManager::class.java)
+        manager.query(DownloadManager.Query().setFilterById(downloadId)).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+            val bytes = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+            val total = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+            UpdateDownloadState(
+                status = when (status) {
+                    DownloadManager.STATUS_SUCCESSFUL -> UpdateDownloadStatus.SUCCESSFUL
+                    DownloadManager.STATUS_FAILED -> UpdateDownloadStatus.FAILED
+                    else -> UpdateDownloadStatus.DOWNLOADING
+                },
+                bytesDownloaded = bytes,
+                totalBytes = total,
+            )
+        }
+    }.getOrNull()
 
     suspend fun verifyAndInstall(downloadId: Long): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
@@ -150,24 +217,36 @@ class UpdateManager(private val context: Context) {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun downloadText(url: String): String = client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
-        if (!response.isSuccessful) throw IllegalStateException("校验文件下载失败：HTTP ${response.code}")
-        response.body?.string().orEmpty()
-    }
-
     companion object {
         const val CHANNEL_ID = "comfy_updates"
         const val APK_MIME = "application/vnd.android.package-archive"
     }
 }
 
-data class UpdateEnqueueResult(val downloadId: Long, val source: String)
+data class UpdateEnqueueResult(val downloadId: Long, val source: String, val latencyMillis: Long)
 
 data class UpdateDownloadCandidate(
     val label: String,
     val apkUrl: String,
     val sha256Url: String,
 )
+
+data class MirrorProbe(
+    val candidate: UpdateDownloadCandidate,
+    val latencyMillis: Long,
+    val expectedSha: String,
+)
+
+enum class UpdateDownloadStatus { DOWNLOADING, SUCCESSFUL, FAILED }
+
+data class UpdateDownloadState(
+    val status: UpdateDownloadStatus,
+    val bytesDownloaded: Long,
+    val totalBytes: Long,
+) {
+    val fraction: Float
+        get() = if (totalBytes > 0) (bytesDownloaded.toFloat() / totalBytes).coerceIn(0f, 1f) else 0f
+}
 
 object UpdateMirrors {
     private val mirrors = listOf(
@@ -181,4 +260,12 @@ object UpdateMirrors {
         }
         add(UpdateDownloadCandidate("GitHub 原地址", apkUrl, sha256Url))
     }
+
+    fun apiCandidates(baseUrl: String): List<String> = buildList {
+        mirrors.forEach { (_, prefix) -> add(prefix + baseUrl) }
+        add(baseUrl)
+    }
+
+    /** Picks the fastest reachable mirror; probes must already be valid. */
+    fun pickFastest(probes: List<MirrorProbe>): MirrorProbe? = probes.minByOrNull { it.latencyMillis }
 }

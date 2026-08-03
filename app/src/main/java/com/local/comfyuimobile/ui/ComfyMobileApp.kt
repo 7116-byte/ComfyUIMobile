@@ -2171,12 +2171,25 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
                     TextButton(onClick = viewModel::clearDiagnosticLog) { Text("清空日志") }
                 }
                 HorizontalDivider()
-                Text("软件更新", style = MaterialTheme.typography.titleSmall)
-                OutlinedButton(onClick = { viewModel.checkUpdate() }) { Text("检查更新") }
-                state.updateInfo?.let { info ->
-                    Text("发现 ${info.tag}")
-                    Button(onClick = viewModel::downloadUpdate) { Icon(Icons.Default.Download, null); Spacer(Modifier.width(4.dp)); Text("下载并安装") }
-                }
+                 Text("软件更新", style = MaterialTheme.typography.titleSmall)
+                 OutlinedButton(onClick = { viewModel.checkUpdate() }) { Text("检查更新") }
+                 state.updateInfo?.let { info ->
+                     Text("发现 ${info.tag}")
+                     if (state.updateDownloading) {
+                         LinearProgressIndicator(
+                             progress = { state.updateDownloadProgress ?: 0f },
+                             modifier = Modifier.fillMaxWidth(),
+                         )
+                         Text(
+                             "下载中 ${((state.updateDownloadProgress ?: 0f) * 100).toInt()}% · ${state.updateDownloadSource.orEmpty()}",
+                             style = MaterialTheme.typography.bodySmall,
+                         )
+                     } else {
+                         Button(onClick = viewModel::downloadUpdate) {
+                             Icon(Icons.Default.Download, null); Spacer(Modifier.width(4.dp)); Text("下载并安装")
+                         }
+                     }
+                 }
                 if (state.activeServer != null) {
                     OutlinedButton(onClick = { viewModel.disconnect(); onDismiss() }) { Icon(Icons.Default.CloudOff, null); Spacer(Modifier.width(4.dp)); Text("断开连接") }
                 }
