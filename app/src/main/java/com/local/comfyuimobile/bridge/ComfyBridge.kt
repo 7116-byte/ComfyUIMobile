@@ -1431,6 +1431,29 @@ class ComfyBridge(private val activity: Activity) {
                   else settings?.setSettingValue?.('Comfy.Locale', 'zh');
                   return JSON.stringify({ok:false,error:'正在切换 ComfyUI 网页语言'});
                 }
+                // A fresh WebView profile enables Nodes 2.0 by default in
+                // Frontend 1.45.21, while the user's working browser uses the
+                // classic canvas. Some custom nodes never finish the DOM slot
+                // sync in Android WebView; ComfyUI then intentionally skips all
+                // links while LayoutStore.pendingSlotSync remains true. Use the
+                // same classic renderer as the browser before opening a graph.
+                const modernNodesEnabled = settings?.getSettingValue?.('Comfy.VueNodes.Enabled');
+                if (settings && modernNodesEnabled !== false) {
+                  delete window.__comfyMobileReadySince;
+                  delete window.__comfyMobileReadyKey;
+                  if (typeof settings?.setSettingValueAsync === 'function') {
+                    await settings.setSettingValueAsync('Comfy.VueNodes.Enabled', false);
+                  } else {
+                    settings?.setSettingValue?.('Comfy.VueNodes.Enabled', false);
+                  }
+                  return JSON.stringify({ok:false,error:'正在切换为与浏览器一致的经典节点画布'});
+                }
+                const modernNodeElements = document.querySelectorAll('[data-node-id]').length;
+                if (window.LiteGraph?.vueNodesMode === true || modernNodeElements > 0) {
+                  delete window.__comfyMobileReadySince;
+                  delete window.__comfyMobileReadyKey;
+                  return JSON.stringify({ok:false,error:'正在等待经典节点画布接管'});
+                }
                 const workflowStore = workspace.workflow;
                 if (!workflowStore?.getWorkflowByPath || !workflowStore?.syncWorkflows) {
                   return JSON.stringify({ok:false,error:'ComfyUI 工作流仓库尚未就绪'});

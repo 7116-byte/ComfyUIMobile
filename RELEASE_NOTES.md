@@ -1,3 +1,9 @@
+# v0.1.45
+
+- 修复高级编辑中连线短暂出现后全部消失：确认 ComfyUI Frontend 1.45.21 的现代节点模式会在 Android WebView 中卡于端口布局同步，官方 `drawConnections()` 因而主动跳过连线。
+- App 内置 ComfyUI 网页在打开工作流前切换为与用户正常浏览器一致的经典节点画布，并等待现代节点 DOM 完全退出后再继续。
+- 不修改工作流连线、不覆盖 `drawConnections()`，仍由 ComfyUI 自己加载和绘制完整工作流。
+
 # v0.1.44
 
 - 高级编辑改为复用 ComfyUI Frontend 1.45.21 工作流侧栏的原生打开流程：读取 `ComfyWorkflow.activeState`，并按原生参数调用 `loadGraphData`。
