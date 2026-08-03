@@ -98,6 +98,33 @@ class WorkflowDraftStoreTest {
         assertTrue(store.loadNow("http://100.64.0.10:18188", "workflows/56.json") != null)
     }
 
+    @Test
+    fun deltaDraftStoresOnlyChangesWithoutWholeWorkflow() {
+        val store = WorkflowDraftStore(temporaryFolder.newFolder("drafts"))
+        val delta = draft().copy(workflowJson = null, structural = false)
+
+        store.saveNow(delta)
+
+        val loaded = store.loadNow(delta.serverUrl, delta.workflowPath)
+        assertTrue(loaded != null)
+        assertNull(loaded!!.workflowJson)
+        assertFalse(loaded.structural)
+        assertEquals(delta.fields.single().key, loaded.fields.single().key)
+    }
+
+    @Test
+    fun structuralDraftKeepsWorkflowJsonAndFlag() {
+        val store = WorkflowDraftStore(temporaryFolder.newFolder("drafts"))
+        val structural = draft().copy(workflowJson = "{\"nodes\":[{\"id\":9}]}", structural = true)
+
+        store.saveNow(structural)
+
+        val loaded = store.loadNow(structural.serverUrl, structural.workflowPath)
+        assertTrue(loaded != null)
+        assertTrue(loaded!!.structural)
+        assertEquals(structural.workflowJson, loaded.workflowJson)
+    }
+
     private fun draft(
         serverUrl: String = "http://100.64.0.10:18188",
         workflowPath: String = "workflows/KREA2/测试.json",

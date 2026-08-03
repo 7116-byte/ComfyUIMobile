@@ -30,7 +30,9 @@ data class WorkflowDraft(
     val workflowPath: String,
     val workflowName: String,
     val baseModified: Double,
-    val workflowJson: String,
+    val workflowJson: String? = null,
+    /** True when the workflow structure itself changed (advanced editor). */
+    val structural: Boolean = false,
     val fields: List<WorkflowDraftField>,
     val updatedAt: Long = System.currentTimeMillis(),
 )
@@ -101,7 +103,13 @@ class WorkflowDraftStore internal constructor(private val directory: File) {
         val file = fileFor(serverUrl, workflowPath)
         if (!file.isFile) return null
         return runCatching { decode(file.readText(Charsets.UTF_8)) }
-            .getOrNull()
+            .getOrElse {
+                // Legacy schema-1 drafts (full workflow copies) are no longer
+                // readable and may carry corrupted content; drop them so they
+                // can never resurrect.
+                runCatching { file.delete() }
+                null
+            }
             ?.takeIf {
                 normalizeServer(it.serverUrl) == normalizeServer(serverUrl) &&
                     it.workflowPath == workflowPath
@@ -111,7 +119,7 @@ class WorkflowDraftStore internal constructor(private val directory: File) {
     internal fun saveNow(draft: WorkflowDraft) {
         require(draft.serverUrl.isNotBlank()) { "草稿缺少服务器地址" }
         require(draft.workflowPath.isNotBlank()) { "草稿缺少工作流路径" }
-        require(draft.workflowJson.isNotBlank()) { "草稿缺少工作流内容" }
+        require(!draft.structural || !draft.workflowJson.isNullOrBlank()) { "结构草稿缺少工作流内容" }
         directory.mkdirs()
         val target = fileFor(draft.serverUrl, draft.workflowPath)
         val temporary = File(directory, ".${target.name}.${UUID.randomUUID()}.tmp")
@@ -160,7 +168,10 @@ class WorkflowDraftStore internal constructor(private val directory: File) {
         .put("workflowPath", draft.workflowPath)
         .put("workflowName", draft.workflowName)
         .put("baseModified", draft.baseModified)
-        .put("workflowJson", draft.workflowJson)
+        .put("structural", draft.structural)
+        .apply {
+            draft.workflowJson?.let { put("workflowJson", it) }
+        }
         .put("updatedAt", draft.updatedAt)
         .put(
             "fields",
@@ -190,7 +201,8 @@ class WorkflowDraftStore internal constructor(private val directory: File) {
             workflowPath = root.getString("workflowPath"),
             workflowName = root.optString("workflowName"),
             baseModified = root.optDouble("baseModified"),
-            workflowJson = root.getString("workflowJson"),
+            workflowJson = root.optString("workflowJson").takeIf { it.isNotBlank() },
+            structural = root.optBoolean("structural", false),
             fields = List(fields.length()) { index ->
                 val item = fields.getJSONObject(index)
                 WorkflowDraftField(
@@ -210,7 +222,7 @@ class WorkflowDraftStore internal constructor(private val directory: File) {
 
     internal companion object {
         const val MAX_DRAFTS = 50
-        private const val SCHEMA = 1
+        private const val SCHEMA = 2
         private const val DIRECTORY_NAME = "workflow_drafts"
 
         fun normalizeServer(value: String): String = value.trim().trimEnd('/').lowercase()

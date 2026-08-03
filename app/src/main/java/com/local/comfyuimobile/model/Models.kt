@@ -90,6 +90,7 @@ data class WorkflowDocument(
     val serverUrl: String = "",
     val baseModified: Double = entry.modified,
     val hasUnsavedChanges: Boolean = false,
+    val dirtyFieldKeys: Set<String> = emptySet(),
 )
 
 enum class JobState { RUNNING, PENDING, SUCCESS, ERROR, CANCELLED, UNKNOWN }

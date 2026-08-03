@@ -396,26 +396,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     null
                 }
-                // A legacy bug could write another workflow's JSON into this
-                // workflow's local draft. Compare the draft's node structure with
-                // the current server file; if they barely overlap, treat the
-                // draft as corrupted, discard it, and load the server version.
-                val serverRawForCheck = if (draft != null) {
-                    runCatching { client.readWorkflow(entry.path) }.getOrNull()
-                } else {
-                    null
-                }
-                val draftDiscarded = draft != null && serverRawForCheck != null &&
-                    WorkflowPolicy.draftStructureMismatched(draft.workflowJson, serverRawForCheck)
+                // Local drafts only carry parameter changes (delta) or, for
+                // advanced-editor structure edits, the edited workflow JSON.
+                // The server file is always the base, so a draft can never
+                // replace the whole workflow with another workflow's data.
+                val serverRaw = client.readWorkflow(entry.path)
+                val structuralDraft = draft != null && draft.structural && !draft.workflowJson.isNullOrBlank()
+                val draftDiscarded = structuralDraft &&
+                    WorkflowPolicy.draftStructureMismatched(draft.workflowJson!!, serverRaw)
                 if (draftDiscarded) {
                     runCatching { workflowDrafts.delete(serverUrl, entry.path) }
                         .onFailure { AppLogger.error("清除不匹配的本地草稿失败", it) }
                 }
-                val raw = when {
-                    draftDiscarded -> serverRawForCheck!!
-                    draft != null -> draft.workflowJson
-                    else -> client.readWorkflow(entry.path)
-                }
+                val raw = if (structuralDraft && !draftDiscarded) draft.workflowJson!! else serverRaw
                 val manifest = bridgeOperationMutex.withLock {
                     (bridge ?: error("前端桥接不可用")).loadWorkflow(
                         rawJson = raw,
@@ -437,6 +430,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     serverUrl = serverUrl,
                     baseModified = if (draft != null && !draftDiscarded) draft.baseModified else entry.modified,
                     hasUnsavedChanges = draft != null && !draftDiscarded,
+                    dirtyFieldKeys = if (draft != null && !draftDiscarded) {
+                        draft.fields.mapTo(mutableSetOf()) { it.key }
+                    } else {
+                        emptySet()
+                    },
                 )
                 _state.update {
                     val activeNode = ExecutionNodeResolver.resolve(it.currentExecutingNodeId, manifest.nodes)
@@ -493,6 +491,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 selectedWorkflow = ui.selectedWorkflow?.copy(
                     fields = updatedFields,
                     hasUnsavedChanges = true,
+                    dirtyFieldKeys = (ui.selectedWorkflow?.dirtyFieldKeys ?: emptySet()) + key,
                 ),
                 nodeProblems = changedField?.nodeId?.let { ui.nodeProblems - it } ?: ui.nodeProblems,
             )
@@ -521,6 +520,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 selectedWorkflow = ui.selectedWorkflow?.copy(
                     fields = updatedFields,
                     hasUnsavedChanges = true,
+                    dirtyFieldKeys = (ui.selectedWorkflow?.dirtyFieldKeys ?: emptySet()) + first.key + second.key,
                 ),
             )
         }
@@ -566,6 +566,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             fields = result.manifest.fields,
             nodes = result.manifest.nodes,
             hasUnsavedChanges = true,
+            dirtyFieldKeys = result.manifest.fields.mapTo(mutableSetOf()) { it.key },
         )
         _state.update {
             it.copy(
@@ -578,7 +579,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             runOperation("高级编辑同步失败") {
-                persistDraftSnapshot(draftSnapshot(edited, result.manifest.fields))
+                val structural = !sameNodeStructure(document.nodes, result.manifest.nodes)
+                if (structural) {
+                    persistDraftSnapshot(structuralDraftSnapshot(edited, result.workflowJson, result.manifest.fields))
+                } else {
+                    persistDraftSnapshot(draftSnapshot(edited, result.manifest.fields))
+                }
                 val manifest = bridgeOperationMutex.withLock {
                     (bridge ?: error("前端桥接不可用")).loadWorkflow(
                         rawJson = result.workflowJson,
@@ -1799,6 +1805,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 selectedWorkflow = ui.selectedWorkflow?.copy(
                     fields = updatedFields,
                     hasUnsavedChanges = true,
+                    dirtyFieldKeys = (ui.selectedWorkflow?.dirtyFieldKeys ?: emptySet()) + key,
                 ),
             )
         }
@@ -1991,14 +1998,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return draftSnapshot(document, ui.fields)
     }
 
-    private fun draftSnapshot(document: WorkflowDocument, fields: List<ParameterField>): WorkflowDraft = WorkflowDraft(
+    private fun draftSnapshot(document: WorkflowDocument, fields: List<ParameterField>): WorkflowDraft {
+        val dirtyKeys = document.dirtyFieldKeys
+        // Delta draft: only the fields the user changed, applied on top of the
+        // server workflow when restored. Never stores a whole workflow copy.
+        val captured = if (dirtyKeys.isEmpty()) fields else fields.filter { it.key in dirtyKeys }
+        return WorkflowDraft(
+            serverUrl = document.serverUrl,
+            workflowPath = document.entry.path,
+            workflowName = document.entry.name,
+            baseModified = document.baseModified,
+            workflowJson = null,
+            structural = false,
+            fields = WorkflowDraftFields.capture(captured),
+        )
+    }
+
+    private fun structuralDraftSnapshot(
+        document: WorkflowDocument,
+        workflowJson: String,
+        fields: List<ParameterField>,
+    ): WorkflowDraft = WorkflowDraft(
         serverUrl = document.serverUrl,
         workflowPath = document.entry.path,
         workflowName = document.entry.name,
         baseModified = document.baseModified,
-        workflowJson = document.rawJson,
+        workflowJson = workflowJson,
+        structural = true,
         fields = WorkflowDraftFields.capture(fields),
     )
+
+    private fun sameNodeStructure(a: List<WorkflowNode>, b: List<WorkflowNode>): Boolean {
+        val byIdA = a.associate { it.id to it.type }
+        val byIdB = b.associate { it.id to it.type }
+        return byIdA == byIdB
+    }
 
     private suspend fun persistDraftSnapshot(snapshot: WorkflowDraft) {
         if (!_state.value.localDraftsEnabled) return
