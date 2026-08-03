@@ -318,7 +318,11 @@ class ComfyBridge(private val activity: Activity) {
                     "高级编辑原生打开诊断：源工作流=${diagnostics.optInt("sourceLinkCount")} 条，" +
                         "画布已载入=${diagnostics.optInt("loadedLinkCount")} 条，" +
                         "当前已绘制=${diagnostics.optInt("renderedPathCount")} 条，" +
-                        "画布模式=$canvasMode，Vue 节点=${diagnostics.optBoolean("vueNodesMode")}",
+                        "画布模式=$canvasMode，Vue 节点=${diagnostics.optBoolean("vueNodesMode")}，" +
+                        "重绘前=${diagnostics.optInt("paintedBeforeRefresh", -1)} 条，" +
+                        "重绘后=${diagnostics.optInt("paintedAfterRefresh", -1)} 条，" +
+                        "修复后=${diagnostics.optInt("paintedAfterRepair", -1)} 条，" +
+                        "修复方式=${diagnostics.optString("linkRepairMode", "none")}",
                 )
             }
         val layout = parseLayout(rawJson)
@@ -937,6 +941,109 @@ class ComfyBridge(private val activity: Activity) {
             if (sourceLinkCount > 0 && loadedLinkCount === 0) {
               return JSON.stringify({ok:false, error:'工作流原有 ' + sourceLinkCount + ' 条连线，但高级编辑画布没有载入连线'});
             }
+            if ($nativeWorkflowOpen && app.canvas) {
+              // Android WebView can leave the Vue-nodes slot-layout sync pending
+              // (pendingSlotSync stays true), so drawConnections() exits before
+              // painting any links; a stale WebView-local Comfy.LinkRenderMode
+              // of -1 hides them the same way. The graph itself still holds
+              // every link. Re-run the same resize+redraw the Activity performs
+              // after loading, detect the vanish, repair by mechanism, and
+              // report the exact state in the diagnostics.
+              const canvas = app.canvas;
+              const liteGraph = window.LiteGraph;
+              const graphLinksRef = rootGraph?.links ?? rootGraph?._links;
+              const graphLinkCount = graphLinksRef instanceof Map
+                ? graphLinksRef.size
+                : Object.keys(graphLinksRef || {}).length;
+              const countPainted = () => Number(canvas?.renderedPaths?.size || 0);
+              let paintedBefore = -1;
+              let paintedAfter = -1;
+              let paintedRepaired = -1;
+              let repairMode = 'none';
+              if (graphLinkCount > 0) {
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                await new Promise(resolve => setTimeout(resolve, 120));
+                paintedBefore = countPainted();
+                canvas.resize?.();
+                canvas.setDirty?.(true, true);
+                canvas.draw?.(true, true);
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                paintedAfter = countPainted();
+                if (paintedAfter === 0) {
+                  const settings = app.ui?.settings;
+                  const settingMode = Number(settings?.getSettingValue?.('Comfy.LinkRenderMode'));
+                  if (Number(canvas.links_render_mode) === -1) {
+                    canvas.links_render_mode = Number.isFinite(settingMode) && settingMode >= 0 ? settingMode : 2;
+                    if (Number(settings?.getSettingValue?.('Comfy.LinkRenderMode')) === -1) {
+                      if (typeof settings?.setSettingValueAsync === 'function') {
+                        await settings.setSettingValueAsync('Comfy.LinkRenderMode', 2);
+                      } else if (typeof settings?.setSettingValue === 'function') {
+                        settings.setSettingValue('Comfy.LinkRenderMode', 2);
+                      }
+                    }
+                    canvas.setDirty?.(true, true);
+                    canvas.draw?.(true, true);
+                    repairMode = 'linkMode';
+                  } else if (liteGraph?.vueNodesMode === true) {
+                    const previousVueMode = liteGraph.vueNodesMode;
+                    try {
+                      liteGraph.vueNodesMode = false;
+                      canvas.setDirty?.(true, true);
+                      canvas.draw?.(true, true);
+                      repairMode = 'vueFallback';
+                    } finally {
+                      liteGraph.vueNodesMode = previousVueMode;
+                    }
+                  } else {
+                    canvas.setDirty?.(true, true);
+                    canvas.draw?.(true, true);
+                    repairMode = 'redraw';
+                  }
+                  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                  paintedRepaired = countPainted();
+                }
+              }
+              // Persistent guard while editing: the Activity runs the same
+              // resize+redraw again after loadWorkflow returns, so a frame that
+              // painted links before but paints zero now gets repaired in place
+              // (no recursion - only the original drawConnections is re-run).
+              if (graphLinkCount > 0 && !canvas.__comfyMobileLinkGuardInstalled) {
+                const originalDrawConnections = canvas.drawConnections;
+                canvas.__comfyMobileLinkGuardInstalled = true;
+                canvas.drawConnections = function(context) {
+                  originalDrawConnections.call(this, context);
+                  const ref = this.graph?.links ?? this.graph?._links;
+                  const count = ref instanceof Map ? ref.size : Object.keys(ref || {}).length;
+                  if (count === 0) return;
+                  const rendered = Number(this.renderedPaths?.size || 0);
+                  const last = Number(this.__comfyMobileLastRendered || 0);
+                  this.__comfyMobileLastRendered = rendered;
+                  if (rendered !== 0 || last === 0) return;
+                  if (Number(this.links_render_mode) === -1) {
+                    this.links_render_mode = 2;
+                    originalDrawConnections.call(this, context);
+                    return;
+                  }
+                  if (window.LiteGraph?.vueNodesMode === true) {
+                    const previousVueMode = window.LiteGraph.vueNodesMode;
+                    try {
+                      window.LiteGraph.vueNodesMode = false;
+                      originalDrawConnections.call(this, context);
+                    } finally {
+                      window.LiteGraph.vueNodesMode = previousVueMode;
+                    }
+                  }
+                };
+                if (repairMode === 'none') repairMode = 'guard';
+              }
+              window.__comfyMobileLinkRepair = {
+                paintedBefore,
+                paintedAfter,
+                paintedRepaired,
+                repairMode,
+                graphLinkCount
+              };
+            }
             const allNodes = rootGraph?._nodes || [];
             const allNodeById = new Map(allNodes.map(node => [String(node.id), node]));
             const activeNodes = allNodes.filter(node => ![2, 4].includes(Number(node.mode ?? 0)));
@@ -1216,7 +1323,11 @@ class ComfyBridge(private val activity: Activity) {
                 loadedLinkCount,
                 renderedPathCount:Number(app.canvas?.renderedPaths?.size || 0),
                 canvasLinkMode:Number(app.canvas?.links_render_mode),
-                vueNodesMode:window.LiteGraph?.vueNodesMode === true
+                vueNodesMode:window.LiteGraph?.vueNodesMode === true,
+                paintedBeforeRefresh:Number(window.__comfyMobileLinkRepair?.paintedBefore ?? -1),
+                paintedAfterRefresh:Number(window.__comfyMobileLinkRepair?.paintedAfter ?? -1),
+                paintedAfterRepair:Number(window.__comfyMobileLinkRepair?.paintedRepaired ?? -1),
+                linkRepairMode:String(window.__comfyMobileLinkRepair?.repairMode || 'none')
               }
             });
           } catch (error) {
