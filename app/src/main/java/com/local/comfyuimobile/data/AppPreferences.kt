@@ -21,6 +21,7 @@ data class StoredSettings(
     val promptHistory: List<String> = emptyList(),
     val submittedJobs: Set<String> = emptySet(),
     val autoSaveResults: Boolean = false,
+    val localDraftsEnabled: Boolean = false,
     val lastUpdateCheck: Long = 0L,
     val recentWorkflows: List<String> = emptyList(),
     val cacheOutputRules: List<CacheOutputRule> = emptyList(),
@@ -35,6 +36,7 @@ class AppPreferences(private val context: Context) {
         val promptHistory = stringPreferencesKey("prompt_history")
         val submittedJobs = stringPreferencesKey("submitted_jobs")
         val autoSaveResults = booleanPreferencesKey("auto_save_results")
+        val localDraftsEnabled = booleanPreferencesKey("local_drafts_enabled")
         val lastUpdateCheck = longPreferencesKey("last_update_check")
         val recentWorkflow = stringPreferencesKey("recent_workflow")
         val recentWorkflows = stringPreferencesKey("recent_workflows")
@@ -50,6 +52,7 @@ class AppPreferences(private val context: Context) {
             promptHistory = decodeStrings(preferences[Keys.promptHistory].orEmpty()).take(PromptHistory.MAX_SIZE),
             submittedJobs = decodeStrings(preferences[Keys.submittedJobs].orEmpty()).toSet(),
             autoSaveResults = preferences[Keys.autoSaveResults] ?: false,
+            localDraftsEnabled = preferences[Keys.localDraftsEnabled] ?: false,
             lastUpdateCheck = preferences[Keys.lastUpdateCheck] ?: 0L,
             recentWorkflows = decodeStrings(preferences[Keys.recentWorkflows].orEmpty())
                 .ifEmpty { listOfNotNull(preferences[Keys.recentWorkflow]?.takeIf(String::isNotBlank)) }
@@ -87,6 +90,10 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setAutoSaveResults(enabled: Boolean) {
         context.dataStore.edit { it[Keys.autoSaveResults] = enabled }
+    }
+
+    suspend fun setLocalDraftsEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.localDraftsEnabled] = enabled }
     }
 
     suspend fun setLastUpdateCheck(timestamp: Long) {

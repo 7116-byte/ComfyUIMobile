@@ -116,6 +116,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         promptHistory = stored.promptHistory,
                         submittedJobIds = stored.submittedJobs,
                         autoSaveResults = stored.autoSaveResults,
+                        localDraftsEnabled = stored.localDraftsEnabled,
                         cacheOutputRules = stored.cacheOutputRules,
                         cacheClearedAt = stored.cacheClearedAt,
                         favoriteResultKeys = stored.favoriteResultKeys,
@@ -126,6 +127,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (submittedJobsChanged && _state.value.activeServer != null) {
                     refreshTasksInternal()
+                }
+                if (!stored.localDraftsEnabled) {
+                    // Local drafts are off: make sure stale draft files (including
+                    // corrupted ones from earlier versions) can never come back.
+                    cancelPendingDraftSave()
+                    runCatching { workflowDrafts.clearAll() }
+                    _state.update { it.copy(localDraftCount = 0) }
                 }
             }
         }
@@ -383,7 +391,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 flushCurrentDraft()
                 _state.update { it.copy(loading = true, error = null, selectedWorkflow = null, fields = emptyList()) }
                 val serverUrl = _state.value.activeServer?.baseUrl ?: error("尚未连接 ComfyUI 服务器")
-                val draft = workflowDrafts.load(serverUrl, entry.path)
+                val draft = if (_state.value.localDraftsEnabled) {
+                    workflowDrafts.load(serverUrl, entry.path)
+                } else {
+                    null
+                }
                 // A legacy bug could write another workflow's JSON into this
                 // workflow's local draft. Compare the draft's node structure with
                 // the current server file; if they barely overlap, treat the
@@ -1113,14 +1125,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshLocalDraftCount() {
         viewModelScope.launch {
-            val count = runCatching { workflowDrafts.count() }.getOrDefault(0)
+            val count = if (_state.value.localDraftsEnabled) {
+                runCatching { workflowDrafts.count() }.getOrDefault(0)
+            } else {
+                0
+            }
             _state.update { it.copy(localDraftCount = count) }
+        }
+    }
+
+    fun setLocalDraftsEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferences.setLocalDraftsEnabled(enabled)
+            cancelPendingDraftSave()
+            if (enabled) {
+                _state.update {
+                    it.copy(
+                        localDraftsEnabled = true,
+                        notice = "已开启本地草稿，未保存修改会自动恢复",
+                    )
+                }
+                refreshLocalDraftCount()
+            } else {
+                runCatching { workflowDrafts.clearAll() }
+                _state.update { it.copy(localDraftsEnabled = false) }
+                val document = _state.value.selectedWorkflow
+                if (document != null && document.hasUnsavedChanges && document.serverUrl.isNotBlank()) {
+                    discardLocalWorkflowDraft()
+                } else {
+                    _state.update {
+                        it.copy(
+                            localDraftCount = 0,
+                            selectedWorkflow = it.selectedWorkflow?.copy(hasUnsavedChanges = false),
+                            workflowDraftConflictRequired = false,
+                            workflowDraftConflictReason = "",
+                            notice = "已关闭本地草稿，之后打开工作流将直接读取服务器版本",
+                        )
+                    }
+                }
+            }
         }
     }
 
     fun clearAllWorkflowDrafts() {
         viewModelScope.launch {
             runOperation("清除本地草稿失败") {
+                cancelPendingDraftSave()
                 val removed = workflowDrafts.clearAll()
                 _state.update {
                     it.copy(
@@ -1934,6 +1984,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun currentDraftSnapshot(): WorkflowDraft? {
+        if (!_state.value.localDraftsEnabled) return null
         val ui = _state.value
         val document = ui.selectedWorkflow ?: return null
         if (!document.hasUnsavedChanges || document.serverUrl.isBlank()) return null
@@ -1950,6 +2001,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     private suspend fun persistDraftSnapshot(snapshot: WorkflowDraft) {
+        if (!_state.value.localDraftsEnabled) return
         workflowDrafts.save(snapshot)
         AppLogger.info("本地工作流草稿已保存：${snapshot.workflowPath}")
     }

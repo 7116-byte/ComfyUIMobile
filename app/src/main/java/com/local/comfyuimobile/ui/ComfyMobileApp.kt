@@ -2134,9 +2134,21 @@ private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismis
                 }
                 HorizontalDivider()
                 Text("本地草稿", style = MaterialTheme.typography.titleSmall)
-                Text("手机中尚未保存到服务器的工作流修改，按工作流分别保存；打开工作流时自动恢复", style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(onClick = { confirmClearDrafts = true }, enabled = state.localDraftCount > 0) {
-                    Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("清除全部本地草稿（${state.localDraftCount}）")
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("保存本地草稿")
+                        Text(
+                            "关闭后打开工作流直接读取服务器版本，不再保存或恢复未保存修改",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(state.localDraftsEnabled, viewModel::setLocalDraftsEnabled)
+                }
+                if (state.localDraftsEnabled) {
+                    Text("当前 ${state.localDraftCount} 个工作流有本地草稿", style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(onClick = { confirmClearDrafts = true }, enabled = state.localDraftCount > 0) {
+                        Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("清除全部本地草稿（${state.localDraftCount}）")
+                    }
                 }
                 HorizontalDivider()
                 Text("诊断日志", style = MaterialTheme.typography.titleSmall)

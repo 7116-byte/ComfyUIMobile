@@ -190,6 +190,7 @@ data class AppUiState(
     val promptHistory: List<String> = emptyList(),
     val submittedJobIds: Set<String> = emptySet(),
     val autoSaveResults: Boolean = false,
+    val localDraftsEnabled: Boolean = false,
     val loggingEnabled: Boolean = false,
     val loading: Boolean = false,
     val scanning: Boolean = false,
