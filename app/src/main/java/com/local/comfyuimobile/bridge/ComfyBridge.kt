@@ -245,12 +245,12 @@ class ComfyBridge(private val activity: Activity) {
     suspend fun loadWorkflow(
         rawJson: String,
         workflowPath: String? = null,
-        repairWebViewLinks: Boolean = false,
+        nativeWorkflowOpen: Boolean = false,
     ): WorkflowManifest {
         val encoded = Base64.getEncoder().encodeToString(rawJson.toByteArray(Charsets.UTF_8))
         val encodedPath = frontendWorkflowStorePath(workflowPath)
             ?.let { Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)) }
-        val script = workflowManifestScript(encoded, encodedPath, repairWebViewLinks)
+        val script = workflowManifestScript(encoded, encodedPath, nativeWorkflowOpen)
         var lastError: Throwable? = null
         var response: String? = null
         repeat(3) { attempt ->
@@ -297,7 +297,7 @@ class ComfyBridge(private val activity: Activity) {
             workflowManifestScript(
                 encodedWorkflow = encoded,
                 encodedWorkflowPath = null,
-                repairWebViewLinks = false,
+                nativeWorkflowOpen = false,
                 inspectCurrentGraph = true,
             ),
         )
@@ -308,18 +308,17 @@ class ComfyBridge(private val activity: Activity) {
         val root = JSONObject(response)
         if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "工作流解析失败"))
         root.optJSONObject("diagnostics")
-            ?.takeIf { it.optBoolean("repairWebViewLinks") }
+            ?.takeIf { it.optBoolean("nativeWorkflowOpen") }
             ?.let { diagnostics ->
                 val canvasMode = diagnostics.opt("canvasLinkMode")
                     .takeUnless { it == null || it == JSONObject.NULL }
                     ?.toString()
                     ?: "未知"
                 AppLogger.info(
-                    "高级编辑连线诊断：源工作流=${diagnostics.optInt("sourceLinkCount")} 条，" +
+                    "高级编辑原生打开诊断：源工作流=${diagnostics.optInt("sourceLinkCount")} 条，" +
                         "画布已载入=${diagnostics.optInt("loadedLinkCount")} 条，" +
                         "当前已绘制=${diagnostics.optInt("renderedPathCount")} 条，" +
-                        "画布模式=$canvasMode，Vue 节点=${diagnostics.optBoolean("vueNodesMode")}，" +
-                        "兼容绘制=${diagnostics.optBoolean("linkFallbackInstalled")}",
+                        "画布模式=$canvasMode，Vue 节点=${diagnostics.optBoolean("vueNodesMode")}",
                 )
             }
         val layout = parseLayout(rawJson)
@@ -802,7 +801,7 @@ class ComfyBridge(private val activity: Activity) {
     private fun workflowManifestScript(
         encodedWorkflow: String,
         encodedWorkflowPath: String?,
-        repairWebViewLinks: Boolean,
+        nativeWorkflowOpen: Boolean,
         inspectCurrentGraph: Boolean = false,
     ) = """
         (async () => {
@@ -811,6 +810,12 @@ class ComfyBridge(private val activity: Activity) {
             if (!app) return JSON.stringify({ok:false, error:'ComfyUI 前端对象尚未就绪'});
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedWorkflow'), c => c.charCodeAt(0)));
             const workflow = JSON.parse(text);
+            let sourceWorkflow = workflow;
+            const cloneValue = (value) => {
+              if (value == null || typeof value !== 'object') return value;
+              try { return structuredClone(value); }
+              catch (_) { return JSON.parse(JSON.stringify(value)); }
+            };
             const serverWorkflowPath = ${encodedWorkflowPath?.let { "new TextDecoder().decode(Uint8Array.from(atob('$it'), c => c.charCodeAt(0)))" } ?: "''"};
             if (!$inspectCurrentGraph) {
               if (serverWorkflowPath) {
@@ -825,26 +830,50 @@ class ComfyBridge(private val activity: Activity) {
               if (!persistedWorkflow) {
                 return JSON.stringify({ok:false, error:'服务器工作流列表中找不到：' + serverWorkflowPath});
               }
+              const alreadyActive = typeof workflowStore.isActive === 'function'
+                ? workflowStore.isActive(persistedWorkflow)
+                : workflowStore.activeWorkflow?.path === serverWorkflowPath;
               const loadFromRemote = !persistedWorkflow.isLoaded;
-              if (loadFromRemote) await persistedWorkflow.load();
-              if (!persistedWorkflow.activeState) {
-                return JSON.stringify({ok:false, error:'服务器工作流内容尚未加载：' + serverWorkflowPath});
-              }
-              // The supplied JSON is the App's single working copy. Associate it
-              // with the real ComfyUI workflow tab, but never replace it with a
-              // stale server/browser draft while parameters or advanced edits are
-              // still unsaved on the phone.
-              await app.loadGraphData(
-                workflow,
-                true,
-                true,
-                persistedWorkflow,
-                {
-                  checkForRerouteMigration:false,
-                  deferWarnings:true,
-                  skipAssetScans:!loadFromRemote
+              if ($nativeWorkflowOpen) {
+                // Match ComfyUI 1.45.21's workflow sidebar/openWorkflow service:
+                // keep the restored active tab untouched; otherwise load the
+                // ComfyWorkflow's own activeState with the native argument order.
+                if (!alreadyActive) {
+                  if (loadFromRemote) await persistedWorkflow.load();
+                  if (!persistedWorkflow.activeState) {
+                    return JSON.stringify({ok:false, error:'服务器工作流内容尚未加载：' + serverWorkflowPath});
+                  }
+                  sourceWorkflow = cloneValue(persistedWorkflow.activeState);
+                  await app.loadGraphData(
+                    sourceWorkflow,
+                    true,
+                    true,
+                    persistedWorkflow,
+                    {
+                      checkForRerouteMigration:false,
+                      deferWarnings:true,
+                      skipAssetScans:!loadFromRemote
+                    }
+                  );
                 }
-              );
+              } else {
+                if (loadFromRemote) await persistedWorkflow.load();
+                if (!persistedWorkflow.activeState) {
+                  return JSON.stringify({ok:false, error:'服务器工作流内容尚未加载：' + serverWorkflowPath});
+                }
+                // The parameter bridge keeps the App's current working copy.
+                await app.loadGraphData(
+                  workflow,
+                  true,
+                  true,
+                  persistedWorkflow,
+                  {
+                    checkForRerouteMigration:false,
+                    deferWarnings:true,
+                    skipAssetScans:!loadFromRemote
+                  }
+                );
+              }
               await new Promise(resolve => setTimeout(resolve, 250));
               const activeWorkflowPath = workflowStore.activeWorkflow?.path || '';
               if (activeWorkflowPath !== serverWorkflowPath) {
@@ -855,92 +884,52 @@ class ComfyBridge(private val activity: Activity) {
                 });
               }
 
-              // Re-run widget callbacks after opening the exact working graph so
-              // custom controls and group bypassers reflect the supplied values.
-              const openedGraph = app.rootGraph || app.graph;
-              const openedNodes = new Map((openedGraph?._nodes || []).map(node => [String(node.id), node]));
-              const cloneValue = (value) => {
-                if (value == null || typeof value !== 'object') return value;
-                try { return structuredClone(value); }
-                catch (_) { return JSON.parse(JSON.stringify(value)); }
-              };
-              for (const sourceNode of workflow.nodes || []) {
-                const targetNode = openedNodes.get(String(sourceNode.id));
-                if (!targetNode || !Array.isArray(sourceNode.widgets_values)) continue;
-                sourceNode.widgets_values.forEach((sourceValue, index) => {
-                  const widget = targetNode.widgets?.[index];
-                  if (!widget) return;
-                  const nextValue = cloneValue(sourceValue);
-                  const groupToggle = widget.value && typeof widget.value === 'object' &&
-                    typeof widget.value.toggled === 'boolean';
-                  const nextToggle = typeof nextValue === 'boolean'
-                    ? nextValue
-                    : (typeof nextValue?.toggled === 'boolean' ? nextValue.toggled : null);
-                  if (groupToggle && nextToggle != null) {
-                    if (widget.value.toggled !== nextToggle) {
-                      if (typeof widget.toggle === 'function') widget.toggle(nextToggle);
-                      else if (typeof widget.doModeChange === 'function') widget.doModeChange(nextToggle);
-                      else widget.value.toggled = nextToggle;
+              if (!$nativeWorkflowOpen) {
+                // Re-run callbacks only for the native parameter form's working
+                // copy. Advanced editing leaves ComfyUI's own graph untouched.
+                const openedGraph = app.rootGraph || app.graph;
+                const openedNodes = new Map((openedGraph?._nodes || []).map(node => [String(node.id), node]));
+                for (const sourceNode of workflow.nodes || []) {
+                  const targetNode = openedNodes.get(String(sourceNode.id));
+                  if (!targetNode || !Array.isArray(sourceNode.widgets_values)) continue;
+                  sourceNode.widgets_values.forEach((sourceValue, index) => {
+                    const widget = targetNode.widgets?.[index];
+                    if (!widget) return;
+                    const nextValue = cloneValue(sourceValue);
+                    const groupToggle = widget.value && typeof widget.value === 'object' &&
+                      typeof widget.value.toggled === 'boolean';
+                    const nextToggle = typeof nextValue === 'boolean'
+                      ? nextValue
+                      : (typeof nextValue?.toggled === 'boolean' ? nextValue.toggled : null);
+                    if (groupToggle && nextToggle != null) {
+                      if (widget.value.toggled !== nextToggle) {
+                        if (typeof widget.toggle === 'function') widget.toggle(nextToggle);
+                        else if (typeof widget.doModeChange === 'function') widget.doModeChange(nextToggle);
+                        else widget.value.toggled = nextToggle;
+                      }
+                    } else {
+                      widget.value = nextValue;
+                      try { widget.callback?.(nextValue, app.canvas, targetNode); } catch (_) {}
                     }
-                  } else {
-                    widget.value = nextValue;
-                    try { widget.callback?.(nextValue, app.canvas, targetNode); } catch (_) {}
-                  }
-                });
-              }
-              if (workflow.extra?.comfyMobile) {
-                openedGraph.extra = openedGraph.extra || {};
-                openedGraph.extra.comfyMobile = cloneValue(workflow.extra.comfyMobile);
+                  });
+                }
+                if (workflow.extra?.comfyMobile) {
+                  openedGraph.extra = openedGraph.extra || {};
+                  openedGraph.extra.comfyMobile = cloneValue(workflow.extra.comfyMobile);
+                }
               }
               } else {
                 await app.loadGraphData(workflow, true, false, null);
               }
             }
             const rootGraph = app.rootGraph || app.graph;
-            let linkFallbackInstalled = false;
-            if ($repairWebViewLinks && app.canvas && typeof app.canvas.drawConnections === 'function') {
-              // Android WebView can leave ComfyUI's Vue slot-layout sync pending
-              // after loadGraphData. The graph still contains every link, but
-              // drawConnections exits before painting any of them. Keep the
-              // user's link style untouched and fall back to LiteGraph's own
-              // slot positions only for a frame where zero paths were painted.
-              const canvas = app.canvas;
-              if (!canvas.__comfyMobileOriginalDrawConnections) {
-                const originalDrawConnections = canvas.drawConnections;
-                canvas.__comfyMobileOriginalDrawConnections = originalDrawConnections;
-                canvas.drawConnections = function(context) {
-                  originalDrawConnections.call(this, context);
-                  const graphLinks = this.graph?.links ?? this.graph?._links;
-                  const graphLinkCount = graphLinks instanceof Map
-                    ? graphLinks.size
-                    : Object.keys(graphLinks || {}).length;
-                  const renderedCount = Number(this.renderedPaths?.size || 0);
-                  const liteGraph = window.LiteGraph;
-                  if (Number(this.links_render_mode) !== -1 && graphLinkCount > 0 &&
-                      renderedCount === 0 && liteGraph?.vueNodesMode === true) {
-                    const previousVueMode = liteGraph.vueNodesMode;
-                    try {
-                      liteGraph.vueNodesMode = false;
-                      originalDrawConnections.call(this, context);
-                    } finally {
-                      liteGraph.vueNodesMode = previousVueMode;
-                    }
-                  }
-                };
-              }
-              linkFallbackInstalled = true;
-              $TWO_FRAME_RENDER_BARRIER
-              await new Promise(resolve => setTimeout(resolve, 100));
-              app.canvas.resize?.();
-              app.canvas.setDirty?.(true, true);
-              app.canvas.draw?.(true, true);
-            }
+            if ($nativeWorkflowOpen) sourceWorkflow = rootGraph?.serialize?.() || sourceWorkflow;
             const loadedIds = new Set((rootGraph?._nodes || []).map(node => String(node.id)));
-            const missing = (workflow.nodes || []).filter(node => !loadedIds.has(String(node.id))).map(node => node.type);
+            const missing = (sourceWorkflow.nodes || []).filter(node => !loadedIds.has(String(node.id))).map(node => node.type);
             if (missing.length) return JSON.stringify({ok:false, error:'缺失节点：' + [...new Set(missing)].join(', ')});
-            const sourceLinkCount = Array.isArray(workflow.links)
-              ? workflow.links.length
-              : Object.keys(workflow.links || {}).length;
+            const sourceLinkCount = Array.isArray(sourceWorkflow.links)
+              ? sourceWorkflow.links.length
+              : Object.keys(sourceWorkflow.links || {}).length;
             const rootLinks = rootGraph?.links ?? rootGraph?._links;
             const loadedLinkCount = rootLinks instanceof Map
               ? rootLinks.size
@@ -1222,13 +1211,12 @@ class ComfyBridge(private val activity: Activity) {
               fields,
               nodes,
               diagnostics:{
-                repairWebViewLinks:$repairWebViewLinks,
+                nativeWorkflowOpen:$nativeWorkflowOpen,
                 sourceLinkCount,
                 loadedLinkCount,
                 renderedPathCount:Number(app.canvas?.renderedPaths?.size || 0),
                 canvasLinkMode:Number(app.canvas?.links_render_mode),
-                vueNodesMode:window.LiteGraph?.vueNodesMode === true,
-                linkFallbackInstalled
+                vueNodesMode:window.LiteGraph?.vueNodesMode === true
               }
             });
           } catch (error) {
@@ -1395,8 +1383,6 @@ class ComfyBridge(private val activity: Activity) {
 
     companion object {
         private const val IMAGE_IMPORT_PATH = "__comfy_mobile_import"
-        internal const val TWO_FRAME_RENDER_BARRIER =
-            "await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));"
         private val SUPPORTED_WORKFLOW_IMAGE_TYPES = setOf("image/png", "image/webp", "image/avif")
 
         internal fun normalizeServerWorkflowPath(value: String?): String? = value

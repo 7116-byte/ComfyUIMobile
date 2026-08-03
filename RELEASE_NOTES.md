@@ -1,3 +1,9 @@
+# v0.1.44
+
+- 高级编辑改为复用 ComfyUI Frontend 1.45.21 工作流侧栏的原生打开流程：读取 `ComfyWorkflow.activeState`，并按原生参数调用 `loadGraphData`。
+- 删除 App 对 `drawConnections`的接管、Vue 节点模式切换和帧内连线兼容绘制，高级编辑画布完全交还 ComfyUI 前端渲染。
+- 已在本机安装的 ComfyUI Frontend 1.45.21 构建代码中核对侧栏 `openWorkflow()` 的真实调用顺序，不再猜测接口。
+
 # v0.1.43
 
 - 修复 v0.1.40 引入、并影响 v0.1.41/v0.1.42 的工作流解析脚本语法错误：高级编辑连线兼容逻辑多写了一个右括号，导致连接正常但任何工作流都无法进入参数页。

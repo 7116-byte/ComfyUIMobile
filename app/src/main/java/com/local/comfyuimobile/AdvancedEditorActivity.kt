@@ -63,7 +63,7 @@ class AdvancedEditorActivity : ComponentActivity() {
                 bridge.loadWorkflow(
                     rawJson = workflowJson,
                     workflowPath = workflowPath,
-                    repairWebViewLinks = true,
+                    nativeWorkflowOpen = true,
                 )
                 bridge.refreshVisibleViewport()
             }.onSuccess {
