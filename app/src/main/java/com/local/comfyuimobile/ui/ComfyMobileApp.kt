@@ -2005,14 +2005,19 @@ private fun TaskScreen(state: AppUiState, viewModel: MainViewModel) {
         }
         if (jobs.isEmpty()) EmptyState(Icons.AutoMirrored.Filled.List, "暂无任务记录")
         else LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(jobs, key = { it.id }) { job -> JobCard(job, viewModel) }
+            items(jobs, key = { it.id }) { job -> JobCard(job, viewModel, tracked = state.activeJobId == job.id) }
         }
     }
 }
 
 @Composable
-private fun JobCard(job: JobSummary, viewModel: MainViewModel) {
-    OutlinedCard(Modifier.fillMaxWidth()) {
+private fun JobCard(job: JobSummary, viewModel: MainViewModel, tracked: Boolean) {
+    val trackable = job.state in setOf(JobState.RUNNING, JobState.PENDING)
+    OutlinedCard(
+        Modifier
+            .fillMaxWidth()
+            .clickable(enabled = trackable) { viewModel.takeoverJob(job) },
+    ) {
         Column(Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(job.id.take(12), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
@@ -2028,10 +2033,18 @@ private fun JobCard(job: JobSummary, viewModel: MainViewModel) {
                     color = if (job.state == JobState.ERROR) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                 )
             }
+            if (tracked) {
+                Text("正在跟踪中 · 点击可查看参数", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            } else if (trackable) {
+                Text("点击接管此任务并打开对应工作流", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            }
+            job.workflowName.takeIf { it.isNotBlank() }?.let {
+                Text(it, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+            }
             if (job.submittedByApp) Text("本 App 提交", style = MaterialTheme.typography.labelSmall)
             job.currentNode?.let { Text("节点：$it", style = MaterialTheme.typography.bodySmall) }
             job.progress?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) }
-            if (job.state in setOf(JobState.RUNNING, JobState.PENDING)) {
+            if (trackable) {
                 TextButton(onClick = { viewModel.cancelJob(job) }, modifier = Modifier.align(Alignment.End)) { Text("取消任务") }
             }
         }

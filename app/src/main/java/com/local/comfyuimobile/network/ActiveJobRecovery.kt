@@ -14,9 +14,13 @@ object ActiveJobRecovery {
         activeJobId: String?,
         jobs: List<JobSummary>,
         awaitingQueueJobIds: Set<String>,
+        explicitlyTrackedIds: Set<String> = emptySet(),
     ): ActiveJobSelection {
+        // 本 App 提交的任务自动跟踪；用户在任务页主动点接管的任务，无论是否本
+        // App 提交，都保持跟踪直到结束。
         val activeJobs = jobs.filter {
-            it.submittedByApp && it.state in setOf(JobState.RUNNING, JobState.PENDING)
+            (it.submittedByApp || it.id in explicitlyTrackedIds) &&
+                it.state in setOf(JobState.RUNNING, JobState.PENDING)
         }
         activeJobId?.let { currentId ->
             activeJobs.firstOrNull { it.id == currentId }?.let {

@@ -101,6 +101,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val bridgeOperationMutex = Mutex()
     private val monitoredJobIds = ConcurrentHashMap.newKeySet<String>()
     private val awaitingQueueJobIds = ConcurrentHashMap.newKeySet<String>()
+    private val takenOverJobIds = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var pendingReconnectNodeId: String? = null
     @Volatile private var pendingNotificationWorkflowPath: String? = null
     private var visibleNodeChangedAt = 0L
@@ -1072,6 +1073,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runOperation("取消任务失败") {
                 client.cancel(job)
+                takenOverJobIds.remove(job.id)
                 stopMonitor(job.id)
                 if (_state.value.activeJobId == job.id) {
                     _state.update {
@@ -1128,6 +1130,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (success) it.copy(notice = "诊断日志已导出")
             else it.copy(error = "诊断日志导出失败")
         }
+    }
+
+    /**
+     * 任务页点运行中的任务：接管该任务（无论是否本 App 提交），并加载它对应
+     * 的工作流，让参数页跟着这个任务走。
+     */
+    fun takeoverJob(job: JobSummary) {
+        if (job.state !in setOf(JobState.RUNNING, JobState.PENDING)) return
+        if (_state.value.activeJobId == job.id && _state.value.selectedWorkflow?.entry?.path == job.workflowPath) {
+            _state.update { it.copy(notice = "正在跟踪任务：${job.id.take(8)}") }
+            return
+        }
+        takenOverJobIds.add(job.id)
+        _state.update {
+            it.copy(
+                activeJobId = job.id,
+                currentExecutingNodeId = ExecutionNodeResolver.resolve(
+                    job.currentNode,
+                    it.selectedWorkflow?.nodes.orEmpty(),
+                ),
+                generationProgress = job.progress,
+                generationMessage = if (job.state == JobState.PENDING) {
+                    "已经加入队列，等待服务器执行"
+                } else {
+                    "已接管任务：${job.id.take(8)}"
+                },
+                notice = "已接管任务：${job.id.take(8)}",
+            )
+        }
+        val path = job.workflowPath.takeIf { it.isNotBlank() } ?: return
+        val entry = _state.value.workflows.firstOrNull { !it.isDirectory && it.path == path }
+            ?: WorkflowEntry(
+                name = path.substringAfterLast('/'),
+                path = path,
+                isDirectory = false,
+            )
+        selectWorkflow(entry, recordAsOpened = true)
     }
 
     fun refreshLocalDraftCount() {
@@ -1699,7 +1738,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         },
                     )
                 }
-                val selection = ActiveJobRecovery.select(ui.activeJobId, jobs, awaiting)
+                takenOverJobIds.retainAll { id ->
+                    jobs.any { it.id == id && it.state in setOf(JobState.RUNNING, JobState.PENDING) }
+                }
+                val selection = ActiveJobRecovery.select(ui.activeJobId, jobs, awaiting, takenOverJobIds)
                 val active = selection.job ?: return@update ui.copy(jobs = jobs)
                 val sameActiveJob = ui.activeJobId == active.id
                 val recoveredRuntimeNode = reconnectRuntimeNode.takeIf { active.state == JobState.RUNNING }

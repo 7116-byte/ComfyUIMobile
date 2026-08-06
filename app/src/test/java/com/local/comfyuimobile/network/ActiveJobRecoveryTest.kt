@@ -49,6 +49,23 @@ class ActiveJobRecoveryTest {
         assertTrue(selection.isTakeover)
     }
 
+    @Test fun explicitlyTrackedForeignTaskStaysSelected() {
+        val foreign = job("foreign", JobState.RUNNING).copy(submittedByApp = false)
+
+        val selection = ActiveJobRecovery.select("foreign", listOf(foreign), emptySet(), setOf("foreign"))
+
+        assertEquals("foreign", selection.job?.id)
+        assertFalse(selection.isTakeover)
+    }
+
+    @Test fun foreignTaskNotTrackedWithoutExplicitTakeover() {
+        val foreign = job("foreign", JobState.RUNNING).copy(submittedByApp = false)
+
+        val selection = ActiveJobRecovery.select(null, listOf(foreign), emptySet())
+
+        assertNull(selection.job)
+    }
+
     @Test fun reconnectExecutingWithoutPromptIdUsesCurrentRunningTask() {
         val running = job("running", JobState.RUNNING)
 
