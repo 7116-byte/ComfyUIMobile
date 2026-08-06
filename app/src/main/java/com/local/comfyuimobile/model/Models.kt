@@ -100,6 +100,7 @@ data class JobSummary(
     val state: JobState,
     val workflowName: String = "",
     val workflowPath: String = "",
+    val workflowJson: String? = null,
     val progress: Float? = null,
     val currentNode: String? = null,
     val submittedByApp: Boolean = false,

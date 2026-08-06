@@ -164,6 +164,7 @@ class ComfyClient {
                         state = state,
                         workflowName = workflowName(extraData),
                         workflowPath = workflowPath(extraData),
+                        workflowJson = workflowJson(extraData),
                         message = statusString,
                     ),
                 )
@@ -336,6 +337,7 @@ class ComfyClient {
                             state = state,
                             workflowName = workflowName(item.optJSONObject(3)),
                             workflowPath = workflowPath(item.optJSONObject(3)),
+                            workflowJson = workflowJson(item.optJSONObject(3)),
                         ),
                     )
                 }
@@ -348,6 +350,15 @@ class ComfyClient {
 
     private fun workflowPath(extraData: JSONObject?): String =
         extraData?.optJSONObject("comfy_mobile")?.optString("workflow_path").orEmpty()
+
+    private fun workflowJson(extraData: JSONObject?): String? {
+        val value = extraData?.optJSONObject("extra_pnginfo")?.opt("workflow") ?: return null
+        return when (value) {
+            is JSONObject -> value.toString()
+            is String -> value
+            else -> null
+        }
+    }
 
     private fun parseNodeProblems(nodeErrors: JSONObject?): Map<String, List<String>> {
         if (nodeErrors == null) return emptyMap()

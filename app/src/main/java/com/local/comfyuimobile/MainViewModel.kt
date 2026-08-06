@@ -27,6 +27,7 @@ import com.local.comfyuimobile.data.WorkflowDraft
 import com.local.comfyuimobile.data.WorkflowDraftFields
 import com.local.comfyuimobile.data.WorkflowDraftStore
 import com.local.comfyuimobile.model.AppUiState
+import com.local.comfyuimobile.model.AppDestination
 import com.local.comfyuimobile.model.AppNavigationRequest
 import com.local.comfyuimobile.model.CacheOutputRule
 import com.local.comfyuimobile.model.ConnectionStatus
@@ -1159,14 +1160,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 notice = "已接管任务：${job.id.take(8)}",
             )
         }
-        val path = job.workflowPath.takeIf { it.isNotBlank() } ?: return
-        val entry = _state.value.workflows.firstOrNull { !it.isDirectory && it.path == path }
-            ?: WorkflowEntry(
-                name = path.substringAfterLast('/'),
-                path = path,
-                isDirectory = false,
+        val path = job.workflowPath.takeIf { it.isNotBlank() }
+        if (path != null) {
+            val entry = _state.value.workflows.firstOrNull { !it.isDirectory && it.path == path }
+                ?: WorkflowEntry(
+                    name = path.substringAfterLast('/'),
+                    path = path,
+                    isDirectory = false,
+                )
+            selectWorkflow(entry, recordAsOpened = true)
+        } else {
+            // 电脑浏览器等提交的任务没有 comfy_mobile.workflow_path，但任务里
+            // 内嵌了执行时的工作流图，直接用它打开参数页。
+            val workflowJson = job.workflowJson?.takeIf { it.isNotBlank() }
+            if (workflowJson != null) loadTaskEmbeddedWorkflow(workflowJson, job)
+        }
+        _state.update {
+            it.copy(
+                navigationRequest = AppNavigationRequest(
+                    id = SystemClock.elapsedRealtimeNanos(),
+                    destination = AppDestination.PARAMETERS,
+                ),
             )
-        selectWorkflow(entry, recordAsOpened = true)
+        }
+    }
+
+    private fun loadTaskEmbeddedWorkflow(workflowJson: String, job: JobSummary) {
+        viewModelScope.launch {
+            runOperation("加载任务工作流失败") {
+                val serverUrl = _state.value.activeServer?.baseUrl ?: error("尚未连接 ComfyUI 服务器")
+                val manifest = bridgeOperationMutex.withLock {
+                    (bridge ?: error("前端桥接不可用")).loadWorkflow(
+                        rawJson = workflowJson,
+                        workflowPath = null,
+                    )
+                }
+                val name = job.workflowName.ifBlank { "任务快照-${job.id.take(8)}" }
+                val entry = WorkflowEntry(
+                    name = name,
+                    path = "workflows/$name.json",
+                    isDirectory = false,
+                )
+                _state.update {
+                    it.copy(
+                        selectedWorkflow = WorkflowDocument(
+                            entry = entry,
+                            rawJson = workflowJson,
+                            fields = manifest.fields,
+                            nodes = manifest.nodes,
+                            serverUrl = serverUrl,
+                            baseModified = 0.0,
+                            hasUnsavedChanges = false,
+                        ),
+                        fields = manifest.fields,
+                        loading = false,
+                        nodeProblems = emptyMap(),
+                        notice = "已加载任务对应工作流（任务内嵌快照）",
+                    )
+                }
+            }
+        }
     }
 
     fun refreshLocalDraftCount() {
