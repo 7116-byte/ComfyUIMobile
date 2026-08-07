@@ -1581,7 +1581,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     markJobObserved(id)
                     pendingReconnectNodeId = null
                     updateJob(id) { it.copy(state = JobState.RUNNING, progress = 0f, currentNode = null) }
-                    if (id in _state.value.submittedJobIds) {
+                    if (tracksVisibleJob(id)) {
                         visibleNodeJob?.cancel()
                         visibleNodeChangedAt = 0L
                         _state.update {
@@ -1609,7 +1609,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val progress = (value / max).toFloat()
                     updateJob(id) { it.copy(progress = progress) }
                     updateMonitor(id, (progress * 100).toInt(), null)
-                    if (id in _state.value.submittedJobIds) {
+                    if (tracksVisibleJob(id)) {
                         _state.update {
                             it.copy(
                                 activeJobId = id,
@@ -1626,7 +1626,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val nodeId = resolveVisibleNode(update.nodeId)
                     updateJob(update.promptId) { it.copy(progress = update.progress, currentNode = nodeId, state = JobState.RUNNING) }
                     updateMonitor(update.promptId, (update.progress * 100).toInt(), nodeId)
-                    if (update.promptId in _state.value.submittedJobIds) {
+                    if (tracksVisibleJob(update.promptId)) {
                         showVisibleExecutingNode(update.promptId, nodeId, update.progress)
                     }
                 }
@@ -1662,7 +1662,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     if (node.isNotBlank()) updateMonitor(id, -1, node) else updateMonitor(id, 100, null)
-                    if (id in _state.value.submittedJobIds) {
+                    if (tracksVisibleJob(id)) {
                         if (node.isBlank()) {
                             if (!wasFailed) {
                                 finishVisibleExecution(id)
@@ -1687,7 +1687,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (id.isNotBlank()) {
                     markJobObserved(id)
                     updateJob(id) { it.copy(state = JobState.SUCCESS, progress = 1f, currentNode = null) }
-                    if (id in _state.value.submittedJobIds) {
+                    if (tracksVisibleJob(id)) {
                         finishVisibleExecution(id)
                     }
                 }
@@ -1705,7 +1705,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (id.isNotBlank()) {
                     markJobObserved(id)
                     updateJob(id) { it.copy(state = if (type == "execution_interrupted") JobState.CANCELLED else JobState.ERROR, currentNode = nodeId.ifBlank { null }, message = detail) }
-                    if (id in _state.value.submittedJobIds) {
+                    if (tracksVisibleJob(id)) {
                         _state.update {
                             it.copy(
                                 activeJobId = id,
@@ -1769,7 +1769,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }.onSuccess { fetchedJobs ->
             fetchedJobs.forEach { markJobObserved(it.id) }
             val activeAppJobs = fetchedJobs.filter {
-                it.submittedByApp && it.state in setOf(JobState.RUNNING, JobState.PENDING)
+                (it.submittedByApp || it.id in takenOverJobIds) &&
+                    it.state in setOf(JobState.RUNNING, JobState.PENDING)
             }
             val awaiting = awaitingQueueJobIds.toSet()
             val reconnectRuntimeNode = pendingReconnectNodeId
@@ -2028,6 +2029,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (promptId.isNotBlank()) awaitingQueueJobIds.remove(promptId)
     }
 
+    /** 本 App 提交的任务，或用户在任务页主动接管/正在跟踪的任务。 */
+    private fun tracksVisibleJob(id: String): Boolean =
+        id.isNotBlank() && (id in _state.value.submittedJobIds || id == _state.value.activeJobId)
+
     private fun resolveVisibleNode(runtimeNodeId: String?): String? =
         ExecutionNodeResolver.resolve(runtimeNodeId, _state.value.selectedWorkflow?.nodes.orEmpty())
 
@@ -2045,7 +2050,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val resolvedNodeId = resolveVisibleNode(nodeId) ?: return
         val applyUpdate = {
             _state.update { ui ->
-                if (promptId !in ui.submittedJobIds) ui else ui.copy(
+                if (promptId != ui.activeJobId && promptId !in ui.submittedJobIds) ui else ui.copy(
                     activeJobId = promptId,
                     currentExecutingNodeId = resolvedNodeId,
                     generationProgress = progress ?: ui.generationProgress,

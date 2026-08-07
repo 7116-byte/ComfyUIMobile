@@ -50,7 +50,7 @@ object ActiveJobRecovery {
         eventPromptId?.trim()?.takeIf { it.isNotBlank() }?.let { return it }
         activeJobId?.let { currentId ->
             jobs.firstOrNull {
-                it.id == currentId && it.submittedByApp && it.state == JobState.RUNNING
+                it.id == currentId && it.state == JobState.RUNNING
             }?.let { return it.id }
         }
         return jobs.firstOrNull {

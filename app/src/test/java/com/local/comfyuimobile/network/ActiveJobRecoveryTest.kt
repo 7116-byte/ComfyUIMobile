@@ -72,6 +72,12 @@ class ActiveJobRecoveryTest {
         assertEquals("running", ActiveJobRecovery.resolveEventPromptId(null, "running", listOf(running)))
     }
 
+    @Test fun reconnectExecutingWithoutPromptIdUsesTrackedForeignTask() {
+        val running = job("running", JobState.RUNNING).copy(submittedByApp = false)
+
+        assertEquals("running", ActiveJobRecovery.resolveEventPromptId(null, "running", listOf(running)))
+    }
+
     @Test fun reconnectExecutingWithoutPromptIdNeverUsesPendingTask() {
         val pending = job("pending", JobState.PENDING)
 
