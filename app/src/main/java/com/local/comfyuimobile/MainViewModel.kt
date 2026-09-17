@@ -53,7 +53,6 @@ import com.local.comfyuimobile.network.PromptSubmissionException
 import com.local.comfyuimobile.network.ProgressStateParser
 import com.local.comfyuimobile.service.JobMonitorService
 import com.local.comfyuimobile.service.JobNotificationNavigation
-import com.local.comfyuimobile.update.UpdateDownloadStatus
 import com.local.comfyuimobile.update.UpdateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -117,6 +116,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var serverInputSeeded = false
     private var workflowLoadJob: Job? = null
     private var connectionJob: Job? = null
+    private var updateCleanupJob: Job? = null
     private val taskRefreshMutex = Mutex()
     private val completionMessages = ConcurrentHashMap<String, String>()
 
@@ -171,6 +171,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val cached = localResultCache.load()
             _state.update { it.copy(localResults = cached) }
+        }
+        updateCleanupJob = viewModelScope.launch {
+            runCatching { updates.cleanupObsoletePackages() }
+                .onFailure { error ->
+                    if (error is CancellationException) throw error
+                    AppLogger.error("清理旧更新安装包失败", error)
+                }
         }
         viewModelScope.launch {
             while (isActive) {
@@ -1691,45 +1698,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun downloadUpdate() {
         val info = _state.value.updateInfo ?: return
+        if (_state.value.updateDownloading) return
         viewModelScope.launch {
-            runOperation("更新下载失败") {
-                val result = updates.enqueue(info)
+            updateCleanupJob?.join()
+            updateCleanupJob = null
+            _state.update {
+                it.copy(
+                    updateDownloading = true,
+                    updateDownloadSource = "App 内部下载",
+                    updateDownloadProgress = 0f,
+                    error = null,
+                    notice = "正在 App 内部下载 ${info.tag}",
+                )
+            }
+            runCatching {
+                updates.downloadAndInstall(info) { progress ->
+                    _state.update { state ->
+                        state.copy(updateDownloadProgress = progress.fraction)
+                    }
+                }
+            }.onSuccess { result ->
                 _state.update {
                     it.copy(
-                        updateDownloading = true,
+                        updateDownloading = false,
                         updateDownloadSource = result.source,
-                        updateDownloadProgress = 0f,
-                        notice = "已通过${result.source}（${result.latencyMillis}ms）开始下载",
+                        updateDownloadProgress = 1f,
+                        notice = "下载和校验完成，已打开系统安装确认",
                     )
                 }
-                while (true) {
-                    delay(800)
-                    val progress = updates.downloadState(result.downloadId) ?: break
-                    when (progress.status) {
-                        UpdateDownloadStatus.SUCCESSFUL -> {
-                            _state.update {
-                                it.copy(
-                                    updateDownloading = false,
-                                    updateDownloadProgress = 1f,
-                                    notice = "下载完成，正在校验并安装",
-                                )
-                            }
-                            break
-                        }
-                        UpdateDownloadStatus.FAILED -> {
-                            _state.update {
-                                it.copy(
-                                    updateDownloading = false,
-                                    updateDownloadProgress = null,
-                                    error = "更新下载失败，请稍后重试",
-                                )
-                            }
-                            break
-                        }
-                        UpdateDownloadStatus.DOWNLOADING -> {
-                            _state.update { it.copy(updateDownloadProgress = progress.fraction) }
-                        }
-                    }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                AppLogger.error("App 内部更新下载失败", error)
+                _state.update {
+                    it.copy(
+                        updateDownloading = false,
+                        updateDownloadProgress = null,
+                        error = "更新下载失败：${error.message ?: error.javaClass.simpleName}",
+                    )
                 }
             }
         }

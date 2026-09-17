@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -37,7 +38,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -400,6 +400,9 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
     var resultSource by rememberSaveable { mutableStateOf(ResultSource.LOCAL) }
     var resultLayout by rememberSaveable { mutableStateOf(ResultLayout.ALBUMS) }
     var resultAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
+    BackHandler(enabled = page == MainPage.RESULTS && resultAlbumId != null) {
+        resultAlbumId = null
+    }
     LaunchedEffect(state.navigationRequest?.id) {
         val request = state.navigationRequest ?: return@LaunchedEffect
         page = when (request.destination) {
@@ -1724,7 +1727,7 @@ private fun ImageGalleryViewer(
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
-            GallerySystemBars(chromeVisible)
+            GallerySystemBars()
             Box(Modifier.fillMaxSize()) {
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                     ZoomableGalleryImage(
@@ -1780,8 +1783,8 @@ private fun ImageGalleryViewer(
                     }
                     Row(
                         Modifier.fillMaxWidth().align(Alignment.BottomCenter)
-                            .background(Color.Black.copy(alpha = 0.68f)).navigationBarsPadding()
-                            .padding(horizontal = 4.dp, vertical = 8.dp),
+                            .background(Color.Black.copy(alpha = 0.68f))
+                            .padding(horizontal = 4.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         GalleryAction(Icons.Default.Share, "分享") { onShare(current) }
@@ -1866,17 +1869,19 @@ private fun ImageGalleryViewer(
 }
 
 @Composable
-private fun GallerySystemBars(chromeVisible: Boolean) {
+private fun GallerySystemBars() {
     val view = LocalView.current
     val window = remember(view) {
         (view.parent as? DialogWindowProvider)?.window ?: view.context.findActivity()?.window
     }
-    LaunchedEffect(chromeVisible, window) {
+    LaunchedEffect(window) {
         window?.let {
             WindowCompat.getInsetsController(it, view).apply {
                 systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                hide(WindowInsetsCompat.Type.navigationBars())
-                if (chromeVisible) show(WindowInsetsCompat.Type.statusBars()) else hide(WindowInsetsCompat.Type.statusBars())
+                // The gallery controls are overlays. Keeping both system bars hidden means
+                // showing/hiding the controls never changes the content viewport or pushes
+                // the bottom action row off-screen on Xiaomi devices.
+                hide(WindowInsetsCompat.Type.systemBars())
             }
         }
     }

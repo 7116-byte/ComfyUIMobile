@@ -21,8 +21,8 @@ android {
         applicationId = "com.local.comfyuimobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 159
-        versionName = "0.1.59"
+        versionCode = 160
+        versionName = "0.1.60"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"7116-byte/ComfyUIMobile\"")

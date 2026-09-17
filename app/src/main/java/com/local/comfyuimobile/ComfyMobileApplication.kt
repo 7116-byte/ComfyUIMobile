@@ -6,7 +6,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import com.local.comfyuimobile.data.AppLogger
 import com.local.comfyuimobile.service.JobMonitorService
-import com.local.comfyuimobile.update.UpdateManager
 
 class ComfyMobileApplication : Application() {
     override fun onCreate() {
@@ -27,9 +26,6 @@ class ComfyMobileApplication : Application() {
                 setShowBadge(true)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             },
-        )
-        manager.createNotificationChannel(
-            NotificationChannel(UpdateManager.CHANNEL_ID, getString(R.string.update_channel), NotificationManager.IMPORTANCE_DEFAULT),
         )
     }
 }

@@ -8,35 +8,40 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.local.comfyuimobile.BuildConfig
 import com.local.comfyuimobile.model.UpdateInfo
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import org.json.JSONObject
 
 class UpdateManager(private val context: Context) {
-    private val probeClient = OkHttpClient.Builder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(6, TimeUnit.SECONDS)
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
         .build()
-    private val state = context.getSharedPreferences("update_download", Context.MODE_PRIVATE)
 
     suspend fun checkLatest(): UpdateInfo? = withContext(Dispatchers.IO) {
         val apiBase = "https://api.github.com/repos/${BuildConfig.GITHUB_REPOSITORY}/releases/latest"
-        // Probe GitHub and the domestic mirrors concurrently and use whichever
-        // responds first, so update detection also works when api.github.com is
-        // slow or blocked on the current network.
         val root = fastestSuccessful(UpdateMirrors.apiCandidates(apiBase)) { url ->
             runCatching {
-                probeClient.newCall(
+                client.newCall(
                     Request.Builder()
                         .url(url)
                         .header("Accept", "application/vnd.github+json")
@@ -67,7 +72,22 @@ class UpdateManager(private val context: Context) {
         UpdateInfo(tag, apkUrl, shaUrl, root.optString("html_url"))
     }
 
-    suspend fun enqueue(info: UpdateInfo): UpdateEnqueueResult = withContext(Dispatchers.IO) {
+    /** Downloads inside this App, validates the APK, then opens Android's package installer. */
+    suspend fun downloadAndInstall(
+        info: UpdateInfo,
+        onProgress: (UpdateDownloadProgress) -> Unit,
+    ): UpdateInstallResult = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+            withContext(Dispatchers.Main) {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:${context.packageName}"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+            throw IllegalStateException("请允许本应用安装未知应用，然后重新点击下载并安装")
+        }
         val shaUrl = requireNotNull(info.sha256Url) { "Release 缺少 SHA-256 校验文件" }
         val probes = coroutineScope {
             UpdateMirrors.candidates(info.apkUrl, shaUrl).map { candidate ->
@@ -79,31 +99,109 @@ class UpdateManager(private val context: Context) {
         val candidate = selected.candidate
         val expectedSha = selected.expectedSha
         val filename = "ComfyUIMobile-${info.tag}-release.apk"
-        val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-            ?: throw IllegalStateException("无法访问应用下载目录")
-        val file = File(dir, filename).apply { delete() }
-        val request = DownloadManager.Request(Uri.parse(candidate.apkUrl))
-            .setTitle(filename)
-            .setDescription("ComfyUI Mobile 更新 · ${candidate.label}")
-            .setMimeType(APK_MIME)
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, filename)
-        val id = context.getSystemService(DownloadManager::class.java).enqueue(request)
-        state.edit()
-            .putLong("id", id)
-            .putString("file", file.absolutePath)
-            .putString("sha", expectedSha)
-            .putString("tag", info.tag)
-            .putString("source", candidate.label)
-            .apply()
-        UpdateEnqueueResult(id, candidate.label, selected.latencyMillis)
+        val directory = File(context.cacheDir, UPDATE_DIRECTORY)
+        UpdateFiles.prepareInternalDirectory(directory)
+        UpdateFiles.cleanLegacyDirectory(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS))
+        val partial = File(directory, "$filename.part")
+        val completed = File(directory, filename)
+        var installerStarted = false
+        try {
+            val actualSha = download(candidate.apkUrl, partial, onProgress)
+            require(actualSha.equals(expectedSha, true)) { "APK SHA-256 校验失败" }
+            require(partial.isFile && partial.length() > 0L) { "更新 APK 下载不完整" }
+            if (completed.exists() && !completed.delete()) error("无法替换旧更新文件")
+            check(partial.renameTo(completed)) { "无法完成更新文件写入" }
+            verifyPackage(completed)
+            currentCoroutineContext().ensureActive()
+            withContext(Dispatchers.Main) { launchInstaller(completed) }
+            installerStarted = true
+            UpdateInstallResult(candidate.label, selected.latencyMillis, completed.length())
+        } finally {
+            partial.delete()
+            if (!installerStarted) completed.delete()
+        }
+    }
+
+    /** Removes packages left by the old DownloadManager implementation after upgrading. */
+    suspend fun cleanupObsoletePackages() = withContext(Dispatchers.IO) {
+        UpdateFiles.cleanInternalDirectory(File(context.cacheDir, UPDATE_DIRECTORY))
+        UpdateFiles.cleanLegacyDirectory(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS))
+        cleanupLegacyDownloadManagerRecords()
+    }
+
+    private suspend fun download(
+        url: String,
+        destination: File,
+        onProgress: (UpdateDownloadProgress) -> Unit,
+    ): String {
+        val request = Request.Builder()
+            .url(url)
+            .header("Accept-Encoding", "identity")
+            .header("Cache-Control", "no-cache, no-transform")
+            .get()
+            .build()
+        return executeCancellable(request) { response ->
+            if (response.code != 200 || response.header("Content-Range") != null) {
+                throw IOException("更新下载失败：HTTP ${response.code}")
+            }
+            val body = response.body ?: throw IOException("更新下载内容为空")
+            val total = body.contentLength()
+            val digest = MessageDigest.getInstance("SHA-256")
+            var downloaded = 0L
+            var lastPublishedAt = 0L
+            onProgress(UpdateDownloadProgress(0L, total))
+            destination.outputStream().buffered().use { output ->
+                body.byteStream().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        digest.update(buffer, 0, count)
+                        downloaded += count
+                        if (total >= 0L && downloaded > total) throw IOException("更新文件超过声明长度")
+                        val now = System.nanoTime()
+                        if (now - lastPublishedAt >= PROGRESS_INTERVAL_NANOS) {
+                            onProgress(UpdateDownloadProgress(downloaded, total))
+                            lastPublishedAt = now
+                        }
+                    }
+                }
+            }
+            if (total >= 0L && downloaded != total) {
+                throw IOException("更新下载不完整：$downloaded / $total 字节")
+            }
+            onProgress(UpdateDownloadProgress(downloaded, total))
+            digest.digest().joinToString("") { "%02x".format(it) }
+        }
+    }
+
+    private suspend fun <T> executeCancellable(request: Request, block: suspend (Response) -> T): T = coroutineScope {
+        val call: Call = client.newCall(request)
+        val cancellation = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+            try {
+                awaitCancellation()
+            } finally {
+                call.cancel()
+            }
+        }
+        try {
+            currentCoroutineContext().ensureActive()
+            call.execute().use { response -> block(response) }
+        } catch (error: IOException) {
+            currentCoroutineContext().ensureActive()
+            throw error
+        } finally {
+            cancellation.cancel()
+        }
     }
 
     private suspend fun probeCandidate(candidate: UpdateDownloadCandidate): MirrorProbe? =
         withContext(Dispatchers.IO) {
             runCatching {
                 val start = System.nanoTime()
-                val text = probeClient.newCall(
+                val text = client.newCall(
                     Request.Builder().url(candidate.sha256Url).get().build(),
                 ).execute().use { response ->
                     if (!response.isSuccessful) throw IllegalStateException("校验文件下载失败：HTTP ${response.code}")
@@ -130,45 +228,36 @@ class UpdateManager(private val context: Context) {
             ?.second
     }
 
-    fun downloadState(downloadId: Long): UpdateDownloadState? = runCatching {
-        val manager = context.getSystemService(DownloadManager::class.java)
-        manager.query(DownloadManager.Query().setFilterById(downloadId)).use { cursor ->
-            if (!cursor.moveToFirst()) return null
-            val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-            val bytes = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
-            val total = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
-            UpdateDownloadState(
-                status = when (status) {
-                    DownloadManager.STATUS_SUCCESSFUL -> UpdateDownloadStatus.SUCCESSFUL
-                    DownloadManager.STATUS_FAILED -> UpdateDownloadStatus.FAILED
-                    else -> UpdateDownloadStatus.DOWNLOADING
-                },
-                bytesDownloaded = bytes,
-                totalBytes = total,
-            )
+    private fun launchInstaller(file: File) {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, APK_MIME)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-    }.getOrNull()
+        context.startActivity(intent)
+    }
 
-    suspend fun verifyAndInstall(downloadId: Long): Result<Unit> = withContext(Dispatchers.IO) {
+    private fun cleanupLegacyDownloadManagerRecords() {
         runCatching {
-            require(downloadId == state.getLong("id", -1L)) { "不是本应用发起的更新下载" }
             val manager = context.getSystemService(DownloadManager::class.java)
-            manager.query(DownloadManager.Query().setFilterById(downloadId)).use { cursor ->
-                require(cursor.moveToFirst()) { "找不到更新下载任务" }
-                val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-                require(status == DownloadManager.STATUS_SUCCESSFUL) { "更新下载未成功" }
+            val ids = mutableListOf<Long>()
+            manager.query(DownloadManager.Query()).use { cursor ->
+                val idColumn = cursor.getColumnIndex(DownloadManager.COLUMN_ID)
+                val titleColumn = cursor.getColumnIndex(DownloadManager.COLUMN_TITLE)
+                val uriColumn = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+                while (cursor.moveToNext()) {
+                    val title = titleColumn.takeIf { it >= 0 }?.let(cursor::getString).orEmpty()
+                    val localName = uriColumn.takeIf { it >= 0 }
+                        ?.let(cursor::getString)
+                        ?.let { Uri.parse(it).lastPathSegment }
+                        .orEmpty()
+                    if (UpdateFiles.isManagedPackageName(title) || UpdateFiles.isManagedPackageName(localName)) {
+                        ids += cursor.getLong(idColumn)
+                    }
+                }
             }
-            val file = File(state.getString("file", null) ?: error("更新文件路径缺失"))
-            require(file.isFile) { "更新 APK 不存在" }
-            val expectedSha = state.getString("sha", "").orEmpty()
-            if (expectedSha.isNotBlank()) require(sha256(file).equals(expectedSha, true)) { "APK SHA-256 校验失败" }
-            verifyPackage(file)
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, APK_MIME)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            withContext(Dispatchers.Main) { context.startActivity(intent) }
+            if (ids.isNotEmpty()) manager.remove(*ids.toLongArray())
+            context.getSharedPreferences("update_download", Context.MODE_PRIVATE).edit().clear().apply()
         }
     }
 
@@ -204,26 +293,44 @@ class UpdateManager(private val context: Context) {
     @Suppress("DEPRECATION")
     private fun longVersion(info: PackageInfo): Long = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
 
-    private fun sha256(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { stream ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val read = stream.read(buffer)
-                if (read <= 0) break
-                digest.update(buffer, 0, read)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
-
     companion object {
-        const val CHANNEL_ID = "comfy_updates"
         const val APK_MIME = "application/vnd.android.package-archive"
+        private const val UPDATE_DIRECTORY = "updates"
+        private const val PROGRESS_INTERVAL_NANOS = 100_000_000L
     }
 }
 
-data class UpdateEnqueueResult(val downloadId: Long, val source: String, val latencyMillis: Long)
+internal object UpdateFiles {
+    private val managedPackage = Regex("ComfyUIMobile-v[0-9A-Za-z._-]+-release\\.apk(?:\\.part|\\.sha256)?", RegexOption.IGNORE_CASE)
+
+    fun prepareInternalDirectory(directory: File) {
+        cleanInternalDirectory(directory)
+        if (!directory.isDirectory && !directory.mkdirs()) error("无法创建应用内更新目录")
+    }
+
+    fun cleanInternalDirectory(directory: File) {
+        if (!directory.exists()) return
+        directory.listFiles()?.forEach { child ->
+            if (child.isDirectory) child.deleteRecursively() else child.delete()
+        }
+    }
+
+    fun cleanLegacyDirectory(directory: File?) {
+        directory?.listFiles()
+            ?.filter { it.isFile && isManagedPackageName(it.name) }
+            ?.forEach { it.delete() }
+    }
+
+    fun isManagedPackageName(name: String): Boolean = managedPackage.matches(name)
+}
+
+data class UpdateInstallResult(val source: String, val latencyMillis: Long, val bytes: Long)
+
+data class UpdateDownloadProgress(val bytesDownloaded: Long, val totalBytes: Long) {
+    val fraction: Float?
+        get() = totalBytes.takeIf { it > 0L }
+            ?.let { (bytesDownloaded.toFloat() / it).coerceIn(0f, 1f) }
+}
 
 data class UpdateDownloadCandidate(
     val label: String,
@@ -236,17 +343,6 @@ data class MirrorProbe(
     val latencyMillis: Long,
     val expectedSha: String,
 )
-
-enum class UpdateDownloadStatus { DOWNLOADING, SUCCESSFUL, FAILED }
-
-data class UpdateDownloadState(
-    val status: UpdateDownloadStatus,
-    val bytesDownloaded: Long,
-    val totalBytes: Long,
-) {
-    val fraction: Float
-        get() = if (totalBytes > 0) (bytesDownloaded.toFloat() / totalBytes).coerceIn(0f, 1f) else 0f
-}
 
 object UpdateMirrors {
     private val mirrors = listOf(
@@ -266,6 +362,5 @@ object UpdateMirrors {
         add(baseUrl)
     }
 
-    /** Picks the fastest reachable mirror; probes must already be valid. */
     fun pickFastest(probes: List<MirrorProbe>): MirrorProbe? = probes.minByOrNull { it.latencyMillis }
 }
