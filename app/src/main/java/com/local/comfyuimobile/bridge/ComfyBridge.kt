@@ -546,8 +546,8 @@ class ComfyBridge(private val activity: Activity) {
         awaitReady()
         lastBridgePhase = "准备参数，共 ${fields.size} 项"
         AppLogger.info("前端桥接：$lastBridgePhase")
-        val changedFields = fields.filter { it.valueJson != it.originalValueJson }
-        AppLogger.info("前端桥接：Android 已比较参数，仅应用实际修改，共 ${changedFields.size} 项")
+        val changedFields = ParameterSync.editable(fields)
+        AppLogger.info("前端桥接：同步当前可编辑参数，共 ${changedFields.size} 项")
 
         for (field in changedFields) {
             lastBridgePhase = "应用参数：${field.nodeTitle}/${field.label}（${field.key}）"
@@ -605,7 +605,7 @@ class ComfyBridge(private val activity: Activity) {
     suspend fun syncWorkflow(fields: List<ParameterField>): String {
         awaitReady()
         val updates = JSONArray().apply {
-            fields.forEach { field ->
+            ParameterSync.editable(fields).forEach { field ->
                 put(
                     JSONObject()
                         .put("key", field.key)
@@ -1495,7 +1495,7 @@ class ComfyBridge(private val activity: Activity) {
                   else if (typeof widget.doModeChange === 'function') widget.doModeChange(update.value);
                   else widget.value.toggled = update.value;
                 }
-              } else {
+              } else if (widget.value !== update.value) {
                 widget.value = update.value;
                 try { widget.callback?.(update.value, app.canvas, node); } catch (_) {}
               }
@@ -1616,7 +1616,7 @@ class ComfyBridge(private val activity: Activity) {
                   else if (typeof widget.doModeChange === 'function') widget.doModeChange(update.value);
                   else widget.value.toggled = update.value;
                 }
-              } else {
+              } else if (widget.value !== update.value) {
                 widget.value = update.value;
                 try { widget.callback?.(update.value, app.canvas, node); } catch (_) {}
               }

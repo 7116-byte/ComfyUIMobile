@@ -30,6 +30,7 @@ class AdvancedEditorActivity : ComponentActivity() {
     private lateinit var closeButton: Button
     private lateinit var webContainer: FrameLayout
     private var workflowPath: String = ""
+    private var snapshotMode = false
     private var displayedWebView: WebView? = null
     private var pageReady = false
     private var closing = false
@@ -48,6 +49,7 @@ class AdvancedEditorActivity : ComponentActivity() {
 
         val serverUrl = intent.getStringExtra(EXTRA_SERVER_URL).orEmpty()
         val workflowJson = AdvancedEditorSession.input()
+        snapshotMode = AdvancedEditorSession.isSnapshot()
         workflowPath = intent.getStringExtra(EXTRA_WORKFLOW_PATH)
             .orEmpty()
             .ifBlank { AdvancedEditorSession.inputPath().orEmpty() }
@@ -63,8 +65,8 @@ class AdvancedEditorActivity : ComponentActivity() {
                 bridge.awaitVisibleViewport()
                 bridge.loadWorkflow(
                     rawJson = workflowJson,
-                    workflowPath = workflowPath,
-                    nativeWorkflowOpen = true,
+                    workflowPath = workflowPath.takeUnless { snapshotMode },
+                    nativeWorkflowOpen = false,
                 )
             }.onSuccess {
                 pageReady = true
@@ -195,7 +197,7 @@ class AdvancedEditorActivity : ComponentActivity() {
         progress.visibility = View.VISIBLE
         closeButton.isEnabled = false
         lifecycleScope.launch {
-            runCatching { bridge.snapshotCurrentWorkflow(expectedPath = workflowPath) }
+            runCatching { bridge.snapshotCurrentWorkflow(expectedPath = workflowPath.takeUnless { snapshotMode }) }
                 .onSuccess { (workflowJson, manifest) ->
                     if (manifest.fields.isEmpty() && manifest.nodes.isEmpty()) {
                         AppLogger.info("高级编辑以空参数清单退出：工作流当前没有已连线的输出节点")

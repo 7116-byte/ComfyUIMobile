@@ -17,6 +17,8 @@ import com.local.comfyuimobile.data.CachePolicy
 import com.local.comfyuimobile.data.LocalResultCache
 import com.local.comfyuimobile.network.ComfyClient
 import com.local.comfyuimobile.network.ResultParser
+import com.local.comfyuimobile.network.TaskLifecycle
+import com.local.comfyuimobile.model.JobState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +45,7 @@ class JobMonitorService : Service() {
     private val serverUrls = ConcurrentHashMap<String, String>()
     private val localResultCache by lazy { LocalResultCache(applicationContext) }
     private val preferences by lazy { AppPreferences(applicationContext) }
+    private val monitorStore by lazy { getSharedPreferences("active_job_monitors_v1", MODE_PRIVATE) }
     private val wakeLock by lazy {
         getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:comfy-job").apply {
             setReferenceCounted(false)
@@ -58,6 +61,7 @@ class JobMonitorService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val promptId = intent?.getStringExtra(EXTRA_PROMPT_ID).orEmpty()
+        if (intent?.action == null && monitors[promptId]?.isActive == true) return START_REDELIVER_INTENT
         val workflowName = intent?.getStringExtra(EXTRA_WORKFLOW_NAME).orEmpty().ifBlank {
             workflowNames[promptId].orEmpty().ifBlank { "ComfyUI 工作流" }
         }
@@ -75,34 +79,37 @@ class JobMonitorService : Service() {
                 notification("正在准备后台任务", workflowName, true, promptId = promptId, baseUrl = baseUrl, workflowPath = workflowPath),
             )
             AppLogger.info("后台前台通知已建立：任务=${promptId.ifBlank { "待恢复" }}")
-            handleStartCommand(intent, startId)
+            restoreMonitors(excluding = if (intent?.action == ACTION_STOP) promptId else null)
+            if (intent == null) {
+                stopIfIdle()
+                if (monitors.isEmpty()) START_NOT_STICKY else START_STICKY
+            } else handleStartCommand(intent, startId)
         } catch (error: Throwable) {
             AppLogger.error("后台任务服务启动失败，任务=${promptId.ifBlank { "未知" }}", error)
             monitors.remove(promptId)?.cancel()
             workflowNames.remove(promptId)
             workflowPaths.remove(promptId)
             serverUrls.remove(promptId)
-            runCatching { releaseBackgroundLocks() }
-            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
-            stopSelf(startId)
-            START_NOT_STICKY
+            runCatching { stopIfIdle() }
+            if (monitors.isEmpty()) START_NOT_STICKY else START_STICKY
         }
     }
 
     private fun handleStartCommand(intent: Intent?, startId: Int): Int {
         val promptId = intent?.getStringExtra(EXTRA_PROMPT_ID).orEmpty()
         if (intent?.action == ACTION_STOP) {
+            monitorStore.edit().remove(promptId).apply()
             monitors.remove(promptId)?.cancel()
             workflowNames.remove(promptId)
             workflowPaths.remove(promptId)
             serverUrls.remove(promptId)
             stopIfIdle()
-            return START_NOT_STICKY
+            return if (monitors.isEmpty()) START_NOT_STICKY else START_STICKY
         }
         if (intent?.action == ACTION_PROGRESS) {
             if (!monitors.containsKey(promptId)) {
                 stopIfIdle()
-                return START_NOT_STICKY
+                return if (monitors.isEmpty()) START_NOT_STICKY else START_STICKY
             }
             val percent = intent.getIntExtra(EXTRA_PROGRESS, -1)
             val node = intent.getStringExtra(EXTRA_NODE).orEmpty()
@@ -119,7 +126,7 @@ class JobMonitorService : Service() {
                     workflowPath = workflowPaths[promptId].orEmpty(),
                 ),
             )
-            return START_NOT_STICKY
+            return START_STICKY
         }
         val baseUrl = intent?.getStringExtra(EXTRA_BASE_URL).orEmpty().trimEnd('/')
         val workflowName = intent?.getStringExtra(EXTRA_WORKFLOW_NAME).orEmpty().ifBlank { "ComfyUI 工作流" }
@@ -128,9 +135,12 @@ class JobMonitorService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
+        if (monitors[promptId]?.isActive == true && serverUrls[promptId] == baseUrl) return START_REDELIVER_INTENT
         workflowNames[promptId] = workflowName
         workflowPaths[promptId] = workflowPath
         serverUrls[promptId] = baseUrl
+        monitorStore.edit().putString(promptId, JSONObject().put("server", baseUrl)
+            .put("name", workflowName).put("path", workflowPath).toString()).apply()
         AppLogger.info("后台开始监控任务：$promptId，工作流=$workflowName")
         startForeground(
             FOREGROUND_ID,
@@ -140,9 +150,14 @@ class JobMonitorService : Service() {
         monitors.remove(promptId)?.cancel()
         val monitor = scope.launch(start = CoroutineStart.LAZY) {
             var consecutivePollFailures = 0
+            var consecutiveMissing = 0
             while (isActive) {
-                runCatching { readStatus(baseUrl, promptId) }.onSuccess { status ->
+                runCatching { readStatus(baseUrl, promptId) }.onSuccess { polled ->
                     consecutivePollFailures = 0
+                    consecutiveMissing = if (polled.missing) consecutiveMissing + 1 else 0
+                    // A removed pending task has no history. Require several successful absence checks,
+                    // never infer cancellation from network errors or a single queue/history race.
+                    val status = if (consecutiveMissing >= 3) PollStatus(true, true) else polled
                     if (status.completed) {
                         if (status.error) {
                             getSystemService(NotificationManager::class.java)
@@ -156,8 +171,9 @@ class JobMonitorService : Service() {
                                         workflowPath,
                                     ),
                                 )
+                            broadcastCompletion(baseUrl, promptId, 0, failed = true, requested = false, executionFailed = true)
                         } else {
-                            val localSaveRequested = runCatching { hasLocalSaveRequested(baseUrl) }.getOrDefault(false)
+                            val localSaveRequested = runCatching { hasLocalSaveRequested(baseUrl, promptId) }.getOrDefault(false)
                             startForeground(
                                 FOREGROUND_ID,
                                 notification(
@@ -214,14 +230,10 @@ class JobMonitorService : Service() {
                                     promptId.hashCode(),
                                     completionNotification(title, detail, promptId, baseUrl, workflowPath),
                                 )
-                            sendBroadcast(
-                                Intent(ACTION_LOCAL_RESULTS_UPDATED)
-                                    .setPackage(packageName)
-                                    .putExtra(EXTRA_SAVED_COUNT, savedCount)
-                                    .putExtra(EXTRA_SAVE_FAILED, report.failed > 0)
-                                    .putExtra(EXTRA_LOCAL_SAVE_REQUESTED, report.localSaveRequested),
-                            )
+                            broadcastCompletion(baseUrl, promptId, savedCount, report.failed > 0, report.localSaveRequested)
                         }
+                        preferences.setTaskTracked(baseUrl, promptId, false)
+                        monitorStore.edit().remove(promptId).apply()
                         monitors.remove(promptId)
                         workflowNames.remove(promptId)
                         workflowPaths.remove(promptId)
@@ -230,6 +242,8 @@ class JobMonitorService : Service() {
                         return@launch
                     }
                 }.onFailure { error ->
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    consecutiveMissing = 0
                     consecutivePollFailures += 1
                     if (consecutivePollFailures == 1 || consecutivePollFailures % 6 == 0) {
                         AppLogger.error("后台轮询任务失败：$promptId，连续失败=$consecutivePollFailures", error)
@@ -240,7 +254,20 @@ class JobMonitorService : Service() {
         }
         monitors[promptId] = monitor
         monitor.start()
-        return START_REDELIVER_INTENT
+        return START_STICKY
+    }
+
+    private fun restoreMonitors(excluding: String?) {
+        monitorStore.all.forEach { (id, value) ->
+            if (id == excluding || monitors[id]?.isActive == true) return@forEach
+            val data = runCatching { JSONObject(value as String) }.getOrNull() ?: return@forEach
+            val server = data.optString("server")
+            if (server.isBlank()) return@forEach
+            handleStartCommand(Intent(this, JobMonitorService::class.java)
+                .putExtra(EXTRA_PROMPT_ID, id).putExtra(EXTRA_BASE_URL, server)
+                .putExtra(EXTRA_WORKFLOW_NAME, data.optString("name"))
+                .putExtra(EXTRA_WORKFLOW_PATH, data.optString("path")), 0)
+        }
     }
 
     override fun onDestroy() {
@@ -253,13 +280,20 @@ class JobMonitorService : Service() {
         val encoded = URLEncoder.encode(promptId, Charsets.UTF_8.name())
         val request = Request.Builder().url("$baseUrl/history/$encoded").get().build()
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return PollStatus(false, false)
+            check(response.isSuccessful) { "任务状态读取失败：HTTP ${response.code}" }
             val root = JSONObject(response.body?.string().orEmpty())
-            val status = root.optJSONObject(promptId)?.optJSONObject("status") ?: return PollStatus(false, false)
-            return PollStatus(
-                completed = status.optBoolean("completed"),
-                error = status.optString("status_str").equals("error", true),
-            )
+            val state = TaskLifecycle.historyState(root.optJSONObject(promptId)?.optJSONObject("status"))
+            if (TaskLifecycle.isTerminal(state)) return PollStatus(true, state != JobState.SUCCESS)
+            if (root.has(promptId)) return PollStatus(false, false)
+        }
+        client.newCall(Request.Builder().url("$baseUrl/queue").get().build()).execute().use { response ->
+            check(response.isSuccessful) { "任务队列读取失败：HTTP ${response.code}" }
+            val queue = JSONObject(response.body?.string().orEmpty())
+            val exists = listOf("queue_running", "queue_pending").any { key ->
+                val items = queue.optJSONArray(key)
+                items != null && (0 until items.length()).any { items.optJSONArray(it)?.optString(1) == promptId }
+            }
+            return PollStatus(false, false, missing = !exists)
         }
     }
 
@@ -269,13 +303,12 @@ class JobMonitorService : Service() {
         val history = resultClient.history(promptId)
         check(history.optJSONObject(promptId) != null) { "任务结果尚未写入历史" }
         val settings = preferences.settings.first()
-        val localSaveRequested = settings.cacheOutputRules.any { rule ->
-            rule.enabled && rule.serverUrl == baseUrl
-        }
+        val allowedIds = settings.submittedJobs + TaskLifecycle.trackedIds(settings.trackedJobs, baseUrl)
+        val localSaveRequested = CachePolicy.requestedForTask(promptId, allowedIds, settings.cacheOutputRules, baseUrl, history)
         val eligible = ResultParser.parse(baseUrl, history).filter { media ->
             media.jobId == promptId && CachePolicy.shouldCache(
                 media,
-                settings.submittedJobs,
+                allowedIds,
                 settings.cacheOutputRules,
                 baseUrl,
                 settings.cacheClearedAt,
@@ -372,10 +405,21 @@ class JobMonitorService : Service() {
             .build()
     }
 
-    private suspend fun hasLocalSaveRequested(baseUrl: String): Boolean =
-        preferences.settings.first().cacheOutputRules.any { rule ->
-            rule.enabled && rule.serverUrl == baseUrl
-        }
+    private suspend fun hasLocalSaveRequested(baseUrl: String, promptId: String): Boolean {
+        val settings = preferences.settings.first()
+        val resultClient = ComfyClient().apply { setServer(baseUrl) }
+        return CachePolicy.requestedForTask(promptId,
+            settings.submittedJobs + TaskLifecycle.trackedIds(settings.trackedJobs, baseUrl),
+            settings.cacheOutputRules, baseUrl, resultClient.history(promptId))
+    }
+
+    private fun broadcastCompletion(baseUrl: String, promptId: String, count: Int,
+                                    failed: Boolean, requested: Boolean, executionFailed: Boolean = false) {
+        sendBroadcast(Intent(ACTION_LOCAL_RESULTS_UPDATED).setPackage(packageName)
+            .putExtra(EXTRA_BASE_URL, baseUrl).putExtra(EXTRA_PROMPT_ID, promptId)
+            .putExtra(EXTRA_SAVED_COUNT, count).putExtra(EXTRA_SAVE_FAILED, failed)
+            .putExtra(EXTRA_LOCAL_SAVE_REQUESTED, requested).putExtra(EXTRA_EXECUTION_FAILED, executionFailed))
+    }
 
     private fun completionNotification(
         title: String,
@@ -415,7 +459,7 @@ class JobMonitorService : Service() {
         return pendingIntent
     }
 
-    private data class PollStatus(val completed: Boolean, val error: Boolean)
+    private data class PollStatus(val completed: Boolean, val error: Boolean, val missing: Boolean = false)
     private data class SaveReport(
         val total: Int,
         val failed: Int,
@@ -439,6 +483,7 @@ class JobMonitorService : Service() {
         const val EXTRA_SAVED_COUNT = "saved_count"
         const val EXTRA_SAVE_FAILED = "save_failed"
         const val EXTRA_LOCAL_SAVE_REQUESTED = "local_save_requested"
+        const val EXTRA_EXECUTION_FAILED = "execution_failed"
         const val EXTRA_OPEN_COMPLETED = "open_completed"
         private const val FOREGROUND_ID = 8188
     }

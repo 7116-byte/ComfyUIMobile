@@ -25,6 +25,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import okio.source
 
 data class QueueResponse(val promptId: String, val number: Int, val nodeErrors: JSONObject?)
@@ -45,6 +46,7 @@ class ComfyClient {
 
     @Volatile private var baseUrl: String = ""
     @Volatile private var socket: WebSocket? = null
+    private val socketEpoch = AtomicLong()
 
     fun setServer(url: String) {
         baseUrl = url.trimEnd('/')
@@ -152,11 +154,7 @@ class ComfyClient {
                 val status = item.optJSONObject("status")
                 val statusString = status?.optString("status_str").orEmpty()
                 val completed = status?.optBoolean("completed") == true
-                val state = when {
-                    statusString.equals("error", true) -> JobState.ERROR
-                    completed -> JobState.SUCCESS
-                    else -> JobState.UNKNOWN
-                }
+                val state = TaskLifecycle.historyState(status)
                 val extraData = item.optJSONArray("prompt")?.optJSONObject(3)
                 add(
                     JobSummary(
@@ -247,9 +245,13 @@ class ComfyClient {
             val body = JSONObject().put("delete", JSONArray().put(job.id))
             executeText(Request.Builder().url("$baseUrl/queue").post(body.toString().toRequestBody(jsonMedia)).build())
         } else {
-            val specific = Request.Builder().url("$baseUrl/api/jobs/${encode(job.id)}").delete().build()
-            runCatching { executeText(specific) }.getOrElse {
-                executeText(Request.Builder().url("$baseUrl/interrupt").post(ByteArray(0).toRequestBody()).build())
+            val specific = Request.Builder().url("$baseUrl/api/jobs/${encode(job.id)}/cancel")
+                .post(ByteArray(0).toRequestBody()).build()
+            client.newCall(specific).execute().use { response ->
+                if (response.code == 404 || response.code == 405) {
+                    error("此服务器不支持按任务安全取消；未发送会影响其他任务的全局中断，请在服务器端取消")
+                }
+                check(response.isSuccessful) { "取消任务失败：HTTP ${response.code}" }
             }
         }
     }
@@ -261,20 +263,22 @@ class ComfyClient {
 
     fun openWebSocket(clientId: String, onMessage: (JSONObject) -> Unit, onFailure: (Throwable) -> Unit, onOpen: () -> Unit) {
         closeWebSocket()
+        val epoch = socketEpoch.get()
         val request = Request.Builder().url(baseUrl.replaceFirst("http://", "ws://") + "/ws?clientId=${encode(clientId)}").build()
         socket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) = onOpen()
+            override fun onOpen(webSocket: WebSocket, response: Response) { if (epoch == socketEpoch.get()) onOpen() }
             override fun onMessage(webSocket: WebSocket, text: String) {
-                runCatching { onMessage(JSONObject(text)) }
+                if (epoch == socketEpoch.get()) runCatching { onMessage(JSONObject(text)) }
             }
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = onFailure(t)
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { if (epoch == socketEpoch.get()) onFailure(t) }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                onFailure(IllegalStateException("WebSocket 已关闭：$code $reason"))
+                if (epoch == socketEpoch.get()) onFailure(IllegalStateException("WebSocket 已关闭：$code $reason"))
             }
         })
     }
 
     fun closeWebSocket() {
+        socketEpoch.incrementAndGet()
         socket?.close(1000, "switch server")
         socket = null
     }

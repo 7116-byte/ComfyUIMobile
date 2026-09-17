@@ -46,6 +46,9 @@ class MainActivity : ComponentActivity() {
                 count = intent.getIntExtra(JobMonitorService.EXTRA_SAVED_COUNT, 0),
                 failed = intent.getBooleanExtra(JobMonitorService.EXTRA_SAVE_FAILED, false),
                 localSaveRequested = intent.getBooleanExtra(JobMonitorService.EXTRA_LOCAL_SAVE_REQUESTED, false),
+                promptId = intent.getStringExtra(JobMonitorService.EXTRA_PROMPT_ID).orEmpty(),
+                serverUrl = intent.getStringExtra(JobMonitorService.EXTRA_BASE_URL).orEmpty(),
+                executionFailed = intent.getBooleanExtra(JobMonitorService.EXTRA_EXECUTION_FAILED, false),
             )
         }
     }

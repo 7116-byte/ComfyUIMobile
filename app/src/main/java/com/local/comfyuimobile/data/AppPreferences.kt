@@ -20,6 +20,7 @@ data class StoredSettings(
     val activeServerUrl: String = "",
     val promptHistory: List<String> = emptyList(),
     val submittedJobs: Set<String> = emptySet(),
+    val trackedJobs: Set<String> = emptySet(),
     val autoSaveResults: Boolean = false,
     val localDraftsEnabled: Boolean = false,
     val lastUpdateCheck: Long = 0L,
@@ -35,6 +36,7 @@ class AppPreferences(private val context: Context) {
         val activeServerUrl = stringPreferencesKey("active_server_url")
         val promptHistory = stringPreferencesKey("prompt_history")
         val submittedJobs = stringPreferencesKey("submitted_jobs")
+        val trackedJobs = stringPreferencesKey("tracked_jobs_v1")
         val autoSaveResults = booleanPreferencesKey("auto_save_results")
         val localDraftsEnabled = booleanPreferencesKey("local_drafts_enabled")
         val lastUpdateCheck = longPreferencesKey("last_update_check")
@@ -51,6 +53,7 @@ class AppPreferences(private val context: Context) {
             activeServerUrl = preferences[Keys.activeServerUrl].orEmpty(),
             promptHistory = decodeStrings(preferences[Keys.promptHistory].orEmpty()).take(PromptHistory.MAX_SIZE),
             submittedJobs = decodeStrings(preferences[Keys.submittedJobs].orEmpty()).toSet(),
+            trackedJobs = decodeStrings(preferences[Keys.trackedJobs].orEmpty()).toSet(),
             autoSaveResults = preferences[Keys.autoSaveResults] ?: false,
             localDraftsEnabled = preferences[Keys.localDraftsEnabled] ?: false,
             lastUpdateCheck = preferences[Keys.lastUpdateCheck] ?: 0L,
@@ -86,6 +89,14 @@ class AppPreferences(private val context: Context) {
 
     suspend fun saveSubmittedJobs(ids: Set<String>) {
         context.dataStore.edit { it[Keys.submittedJobs] = encodeStrings(ids.toList().takeLast(200)) }
+    }
+
+    suspend fun setTaskTracked(server: String, id: String, tracked: Boolean) {
+        val key = com.local.comfyuimobile.network.TaskLifecycle.key(server, id)
+        context.dataStore.edit { values ->
+            val current = decodeStrings(values[Keys.trackedJobs].orEmpty()).toSet()
+            values[Keys.trackedJobs] = encodeStrings(if (tracked) current + key else current - key)
+        }
     }
 
     suspend fun setAutoSaveResults(enabled: Boolean) {

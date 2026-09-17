@@ -11,16 +11,19 @@ object AdvancedEditorSession {
     @Volatile private var inputWorkflow: String? = null
     @Volatile private var inputWorkflowPath: String? = null
     @Volatile private var output: AdvancedEditorResult? = null
+    @Volatile private var snapshotMode: Boolean = false
 
     @Synchronized
-    fun begin(workflowJson: String, workflowPath: String) {
+    fun begin(workflowJson: String, workflowPath: String, snapshot: Boolean = false) {
         inputWorkflow = workflowJson
         inputWorkflowPath = workflowPath
         output = null
+        snapshotMode = snapshot
     }
 
     fun input(): String? = inputWorkflow
     fun inputPath(): String? = inputWorkflowPath
+    fun isSnapshot(): Boolean = snapshotMode
 
     @Synchronized
     fun complete(workflowJson: String, manifest: WorkflowManifest) {

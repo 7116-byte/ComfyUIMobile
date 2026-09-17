@@ -6,8 +6,21 @@ import com.local.comfyuimobile.model.ResultMedia
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.json.JSONObject
 
 class CachePolicyTest {
+    @Test fun configuredOutputForAnotherTaskDoesNotCreateFalseSaveFailure() {
+        val history = JSONObject("""{"app-job":{"prompt":[0,"app-job",{"9":{"class_type":"PreviewImage"}},{}]}}""")
+        assertFalse(CachePolicy.requestedForTask("app-job", setOf("app-job"), listOf(rule), rule.serverUrl, history))
+    }
+
+    @Test fun explicitTakeoverCanSaveButUntrackedBrowserTasksCannot() {
+        val history = JSONObject("""{"foreign":{"prompt":[0,"foreign",{"9":{"class_type":"SaveImage"}},{}]}}""")
+        assertFalse(CachePolicy.requestedForTask("foreign", emptySet(), listOf(rule), rule.serverUrl, history))
+        assertTrue(CachePolicy.requestedForTask("foreign", setOf("foreign"), listOf(rule), rule.serverUrl, history))
+        assertTrue(CachePolicy.shouldCache(media.copy(jobId = "foreign"), setOf("foreign"), listOf(rule), rule.serverUrl))
+    }
+
     private val rule = CacheOutputRule(
         serverUrl = "http://192.168.10.109:8188",
         workflowPath = "workflows/a.json",

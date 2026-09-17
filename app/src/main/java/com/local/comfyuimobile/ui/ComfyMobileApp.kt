@@ -567,7 +567,7 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
                     moveDialog = true
                 }) { Text("移动") }
                 OutlinedButton(onClick = {
-                    state.previewWorkflow.let { export -> exportRaw = export.rawJson; exportLauncher.launch(export.entry.name) }
+                    viewModel.exportPreview { name, raw -> exportRaw = raw; exportLauncher.launch(name) }
                 }) { Text("导出") }
                 OutlinedButton(onClick = { deleteDialog = true }) { Text("删除") }
             }

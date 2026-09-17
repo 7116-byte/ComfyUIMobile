@@ -26,6 +26,7 @@ import com.local.comfyuimobile.data.WorkflowPath
 import com.local.comfyuimobile.data.WorkflowDraft
 import com.local.comfyuimobile.data.WorkflowDraftFields
 import com.local.comfyuimobile.data.WorkflowDraftStore
+import com.local.comfyuimobile.data.WorkflowWorkingCopy
 import com.local.comfyuimobile.model.AppUiState
 import com.local.comfyuimobile.model.AppDestination
 import com.local.comfyuimobile.model.AppNavigationRequest
@@ -42,6 +43,7 @@ import com.local.comfyuimobile.model.WorkflowDocument
 import com.local.comfyuimobile.model.WorkflowEntry
 import com.local.comfyuimobile.model.WorkflowNode
 import com.local.comfyuimobile.network.ActiveJobRecovery
+import com.local.comfyuimobile.network.TaskLifecycle
 import com.local.comfyuimobile.network.ComfyClient
 import com.local.comfyuimobile.network.ExecutionNodeResolver
 import com.local.comfyuimobile.network.LanAddress
@@ -65,6 +67,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -105,16 +108,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val takenOverJobIds = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var pendingReconnectNodeId: String? = null
     @Volatile private var pendingNotificationWorkflowPath: String? = null
+    private var pendingNotificationJobId: String? = null
     private var visibleNodeChangedAt = 0L
     @Volatile private var lastUpdateCheck: Long = 0L
     private var bridgeLoadedPath: String? = null
     private var serverInputSeeded = false
+    private var workflowLoadJob: Job? = null
+    private var connectionJob: Job? = null
+    private val taskRefreshMutex = Mutex()
+    private val completionMessages = ConcurrentHashMap<String, String>()
 
     init {
         viewModelScope.launch {
             preferences.settings.collect { stored ->
                 val submittedJobsChanged = _state.value.submittedJobIds != stored.submittedJobs
                 lastUpdateCheck = stored.lastUpdateCheck
+                _state.value.activeServer?.baseUrl?.let { server ->
+                    takenOverJobIds.clear()
+                    takenOverJobIds.addAll(TaskLifecycle.trackedIds(stored.trackedJobs, server))
+                }
                 // 只在首次加载时用上次连接的地址填充输入框；之后只要还没连上
                 // （activeServer == null），就绝不覆盖用户正在输入/刚设置的新地址，
                 // 否则连接过程中的任何 DataStore 写入（如检查更新的时间戳）都会把
@@ -158,6 +170,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val cached = localResultCache.load()
             _state.update { it.copy(localResults = cached) }
         }
+        viewModelScope.launch {
+            while (isActive) {
+                delay(5_000)
+                val ui = _state.value
+                if (ui.activeServer != null && ui.status == ConnectionStatus.CONNECTED &&
+                    (ui.jobs.any { it.state == JobState.RUNNING || it.state == JobState.PENDING } || awaitingQueueJobIds.isNotEmpty())) {
+                    refreshTasksInternal()
+                }
+            }
+        }
     }
 
     fun attachBridge(value: ComfyBridge) {
@@ -184,7 +206,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ),
             )
         }
-        workflowPath.trim().takeIf(String::isNotBlank)?.let { pendingNotificationWorkflowPath = it }
+        if (!completed) {
+            pendingNotificationJobId = promptId.takeIf(String::isNotBlank)
+            pendingNotificationWorkflowPath = workflowPath.takeIf(String::isNotBlank)
+        }
 
         val normalized = runCatching { LanAddress.normalize(baseUrl) }.getOrNull()
         val current = _state.value
@@ -225,7 +250,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _state.update { it.copy(selectedWorkflow = updated) }
                         persistDraftSnapshot(draftSnapshot(updated, _state.value.fields))
                     }
-                    AdvancedEditorSession.begin(currentWorkflow, document.entry.path)
+                    AdvancedEditorSession.begin(currentWorkflow, document.entry.path, snapshot = document.sourceJobId != null)
                 }
             }.onSuccess {
                 _state.update { it.copy(advancedEditor = true, loading = false) }
@@ -245,11 +270,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect(address: String = state.value.serverInput) {
+        if (generationJob?.isActive == true || workflowSaveJob?.isActive == true) {
+            _state.update { it.copy(notice = "请等待当前提交或保存操作完成后再切换服务器") }
+            return
+        }
         AppLogger.info("请求连接服务器：$address")
         persistCurrentWorkflowDraft()
         reconnectJob?.cancel()
+        connectionJob?.cancel()
+        workflowLoadJob?.cancel()
+        bridgeLoadedPath = null
         client.closeWebSocket()
-        viewModelScope.launch {
+        connectionJob = viewModelScope.launch {
             runOperation("连接失败") {
                 val activeBridge = bridge ?: error("前端桥接尚未初始化")
                 _state.update {
@@ -298,11 +330,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         bridgeReady = true,
                         loading = false,
                         selectedWorkflow = sameServerDocument,
+                        previewWorkflow = sameServerDocument,
+                        activeJobId = null,
+                        currentExecutingNodeId = null,
+                        generationProgress = null,
+                        generationMessage = "",
+                        jobs = emptyList(),
                         fields = sameServerDocument?.fields.orEmpty(),
                         workflowDraftConflictRequired = if (sameServerDocument == null) false else it.workflowDraftConflictRequired,
                         workflowDraftConflictReason = if (sameServerDocument == null) "" else it.workflowDraftConflictReason,
                     )
                 }
+                takenOverJobIds.clear()
+                takenOverJobIds.addAll(TaskLifecycle.trackedIds(preferences.settings.first().trackedJobs, profile.baseUrl))
                 if (_state.value.selectedWorkflow != null) {
                     restoreWorkingCopyAfterReconnect(activeBridge, profile.baseUrl)
                 }
@@ -314,6 +354,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
+        connectionJob?.cancel()
+        workflowLoadJob?.cancel()
+        takenOverJobIds.clear()
+        bridgeLoadedPath = null
         persistCurrentWorkflowDraft()
         reconnectJob?.cancel()
         client.closeWebSocket()
@@ -329,6 +373,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 systemStats = null,
                 workflows = emptyList(),
                 selectedWorkflow = null,
+                previewWorkflow = null,
                 fields = emptyList(),
                 jobs = emptyList(),
                 results = emptyList(),
@@ -404,7 +449,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (entry.isDirectory) return
         AppLogger.info("预读取工作流：${entry.path}")
         parameterRefreshJob?.cancel()
-        viewModelScope.launch {
+        workflowLoadJob?.cancel()
+        workflowLoadJob = viewModelScope.launch {
             runOperation("工作流加载失败") {
                 flushCurrentDraft()
                 _state.update {
@@ -511,12 +557,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 把当前预读取的工作流正式打开为参数页工作流。 */
     fun openPreviewedWorkflow() {
-        val preview = _state.value.previewWorkflow ?: return
+        val preview = currentPreview() ?: return
         val manifestNodes = preview.nodes
         _state.update { ui ->
             val activeNode = ExecutionNodeResolver.resolve(ui.currentExecutingNodeId, manifestNodes)
             ui.copy(
                 selectedWorkflow = preview,
+                previewWorkflow = preview,
                 fields = preview.fields,
                 nodeProblems = emptyMap(),
                 currentExecutingNodeId = activeNode,
@@ -657,7 +704,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val manifest = bridgeOperationMutex.withLock {
                     (bridge ?: error("前端桥接不可用")).loadWorkflow(
                         rawJson = result.workflowJson,
-                        workflowPath = document.entry.path,
+                        workflowPath = WorkflowWorkingCopy.frontendPath(document),
                     )
                 }
                 bridgeLoadedPath = document.entry.path
@@ -684,7 +731,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val activeBridge = bridge ?: error("前端桥接不可用")
                 val (raw, manifest) = bridgeOperationMutex.withLock {
                     val updatedRaw = activeBridge.invokeWidgetButton(nodeId, actionToken)
-                    updatedRaw to activeBridge.loadWorkflow(updatedRaw, workflowPath = document.entry.path)
+                    updatedRaw to activeBridge.loadWorkflow(updatedRaw, workflowPath = WorkflowWorkingCopy.frontendPath(document))
                 }
                 bridgeLoadedPath = document.entry.path
                 _state.update {
@@ -731,6 +778,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ensureSelectedWorkflowLoaded()
                     (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
                 }
+                _state.update { ui ->
+                    ui.copy(selectedWorkflow = ui.selectedWorkflow?.copy(rawJson = generated.workflowJson))
+                }
                 val response = try {
                     client.queuePrompt(
                         generated.promptJson,
@@ -754,6 +804,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update {
                     it.copy(
                         submittedJobIds = submitted,
+                        selectedWorkflow = it.selectedWorkflow?.let { document ->
+                            if (document.sourceJobId != null) document.copy(sourceJobId = response.promptId) else document
+                        },
                         promptHistory = history,
                         generating = false,
                         nodeProblems = emptyMap(),
@@ -816,6 +869,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     fields = _state.value.fields,
                     baseModified = saved.modified,
                     hasUnsavedChanges = false,
+                    sourceJobId = null,
                 )
                 runCatching { workflowDrafts.delete(document.serverUrl, document.entry.path) }
                     .onFailure { AppLogger.error("清理已保存工作流草稿失败", it) }
@@ -875,6 +929,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     serverUrl = _state.value.activeServer?.baseUrl ?: document.serverUrl,
                     baseModified = saved.modified,
                     hasUnsavedChanges = false,
+                    sourceJobId = null,
                 )
                 runCatching { workflowDrafts.delete(document.serverUrl, document.entry.path) }
                     .onFailure { AppLogger.error("清理另存前的工作流草稿失败", it) }
@@ -950,13 +1005,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun duplicateWorkflow(name: String) {
-        val document = _state.value.previewWorkflow ?: return
+        val document = currentPreview() ?: return
         viewModelScope.launch {
             runOperation("复制工作流失败") {
                 val folder = document.entry.path.substringBeforeLast('/', "workflows")
                 val fileName = WorkflowPath.fileName(name)
                 val currentJson = bridgeOperationMutex.withLock {
-                    (bridge ?: error("前端桥接不可用")).syncWorkflow(document.fields)
+                    serializeDocument(document)
                 }
                 val json = JSONObject(currentJson)
                     .put("id", UUID.randomUUID().toString())
@@ -969,14 +1024,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun renameWorkflow(name: String) {
-        val document = _state.value.previewWorkflow ?: return
+        val document = currentPreview() ?: return
         viewModelScope.launch {
             runOperation("工作流改名失败") {
                 flushCurrentDraft()
                 val folder = document.entry.path.substringBeforeLast('/', "workflows")
                 val fileName = WorkflowPath.fileName(name)
                 val currentJson = bridgeOperationMutex.withLock {
-                    (bridge ?: error("前端桥接不可用")).syncWorkflow(document.fields)
+                    serializeDocument(document)
                 }
                 val moved = client.moveWorkflow(document.entry.path, "$folder/$fileName")
                 val manifest = bridgeOperationMutex.withLock {
@@ -1015,13 +1070,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun moveWorkflow(folder: String) {
-        val document = _state.value.previewWorkflow ?: return
+        val document = currentPreview() ?: return
         viewModelScope.launch {
             runOperation("移动工作流失败") {
                 flushCurrentDraft()
                 val destination = "${WorkflowPath.folder(folder)}/${document.entry.name}"
                 val currentJson = bridgeOperationMutex.withLock {
-                    (bridge ?: error("前端桥接不可用")).syncWorkflow(document.fields)
+                    serializeDocument(document)
                 }
                 val moved = client.moveWorkflow(document.entry.path, destination)
                 val manifest = bridgeOperationMutex.withLock {
@@ -1145,7 +1200,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun currentWorkflowExport(): Pair<String, String>? = _state.value.previewWorkflow?.let { it.entry.name to it.rawJson }
+    fun exportPreview(onReady: (String, String) -> Unit) = viewModelScope.launch {
+        val document = currentPreview() ?: return@launch
+        runOperation("导出工作流失败") {
+            val raw = bridgeOperationMutex.withLock { serializeDocument(document) }
+            onReady(document.entry.name, raw)
+        }
+    }
+
+    private fun currentPreview(): WorkflowDocument? = _state.value.let {
+        WorkflowWorkingCopy.preview(it.previewWorkflow, it.selectedWorkflow, it.fields)
+    }
+
+    /** Caller holds bridgeOperationMutex; never serialize whichever graph happened to be visible. */
+    private suspend fun serializeDocument(document: WorkflowDocument): String {
+        val activeBridge = bridge ?: error("前端桥接不可用")
+        require(document.serverUrl == _state.value.activeServer?.baseUrl) { "工作流不属于当前服务器" }
+        return WorkflowWorkingCopy.serialize(document, load = {
+            activeBridge.loadWorkflow(it.rawJson, workflowPath = WorkflowWorkingCopy.frontendPath(it))
+            bridgeLoadedPath = it.entry.path
+        }, sync = { activeBridge.syncWorkflow(it) })
+    }
 
     fun refreshTasks() = viewModelScope.launch { refreshTasksInternal() }
     fun refreshResults() = viewModelScope.launch { refreshResultsInternal() }
@@ -1154,21 +1229,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(localResults = local) }
     }
 
-    fun onLocalResultsSaved(count: Int, failed: Boolean, localSaveRequested: Boolean) = viewModelScope.launch {
+    fun onLocalResultsSaved(count: Int, failed: Boolean, localSaveRequested: Boolean,
+                            promptId: String, serverUrl: String, executionFailed: Boolean) = viewModelScope.launch {
         val local = localResultCache.load()
+        monitoredJobIds.remove(promptId)
+        val message = when {
+            executionFailed -> "任务失败或已取消"
+            localSaveRequested && failed -> "生成完成，但本地作品保存失败"
+            localSaveRequested -> "本地保存完成，共 $count 项"
+            else -> "生成完成"
+        }
+        completionMessages[TaskLifecycle.key(serverUrl, promptId)] = message
+        if (TaskLifecycle.matches(serverUrl, promptId, _state.value.activeServer?.baseUrl, _state.value.activeJobId)) {
+            visibleNodeJob?.cancel()
+        }
         _state.update {
-            it.copy(
+            if (!TaskLifecycle.matches(serverUrl, promptId, it.activeServer?.baseUrl, it.activeJobId)) {
+                it.copy(localResults = local)
+            } else it.copy(
                 localResults = local,
-                generationMessage = when {
-                    localSaveRequested && failed -> "生成完成，但本地作品保存失败"
-                    localSaveRequested -> "本地保存完成，共 $count 项"
-                    else -> "生成完成"
-                },
-                notice = when {
-                    localSaveRequested && failed -> "本地作品保存失败，可保持连接后重试"
-                    localSaveRequested -> "本地保存完成，共 $count 项"
-                    else -> "生成完成"
-                },
+                currentExecutingNodeId = null,
+                generationProgress = if (executionFailed) null else 1f,
+                generationMessage = message,
+                notice = message,
             )
         }
     }
@@ -1178,6 +1261,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runOperation("取消任务失败") {
                 client.cancel(job)
                 takenOverJobIds.remove(job.id)
+                preferences.setTaskTracked(client.serverUrl(), job.id, false)
                 stopMonitor(job.id)
                 if (_state.value.activeJobId == job.id) {
                     _state.update {
@@ -1199,7 +1283,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearPendingJobs() {
         viewModelScope.launch {
             runOperation("清空队列失败") {
+                val pending = client.queue().filter { it.state == JobState.PENDING }
                 client.clearPending()
+                pending.forEach {
+                    stopMonitor(it.id)
+                    takenOverJobIds.remove(it.id)
+                    preferences.setTaskTracked(client.serverUrl(), it.id, false)
+                }
+                if (_state.value.activeJobId in pending.map { it.id }) {
+                    visibleNodeJob?.cancel()
+                    _state.update { it.copy(activeJobId = null, currentExecutingNodeId = null,
+                        generationProgress = null, generationMessage = "等待任务已清空") }
+                }
                 refreshTasksInternal()
             }
         }
@@ -1242,21 +1337,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun takeoverJob(job: JobSummary) {
         if (job.state !in setOf(JobState.RUNNING, JobState.PENDING)) return
-        if (_state.value.activeJobId == job.id && _state.value.selectedWorkflow?.entry?.path == job.workflowPath) {
+        if (_state.value.activeJobId == job.id && _state.value.selectedWorkflow?.sourceJobId == job.id) {
             _state.update { it.copy(notice = "正在跟踪任务：${job.id.take(8)}") }
             return
         }
         takenOverJobIds.add(job.id)
+        val serverUrl = _state.value.activeServer?.baseUrl ?: return
+        viewModelScope.launch {
+            preferences.setTaskTracked(serverUrl, job.id, true)
+            startMonitor(job.id, job.workflowName, job.workflowPath)
+        }
         _state.update {
             it.copy(
                 activeJobId = job.id,
-                currentExecutingNodeId = ExecutionNodeResolver.resolve(
-                    job.currentNode,
-                    it.selectedWorkflow?.nodes.orEmpty(),
-                ),
+                currentExecutingNodeId = null,
                 generationProgress = job.progress,
                 generationMessage = if (job.state == JobState.PENDING) {
                     "已经加入队列，等待服务器执行"
+                } else if (!job.submittedByApp) {
+                    "正在跟踪任务：原生服务器不提供跨客户端节点进度"
                 } else {
                     "已接管任务：${job.id.take(8)}"
                 },
@@ -1264,7 +1363,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         val path = job.workflowPath.takeIf { it.isNotBlank() }
-        if (path != null) {
+        val snapshot = job.workflowJson?.takeIf { it.isNotBlank() }
+        if (snapshot != null) {
+            loadTaskEmbeddedWorkflow(snapshot, job)
+        } else if (path != null) {
             val entry = _state.value.workflows.firstOrNull { !it.isDirectory && it.path == path }
                 ?: WorkflowEntry(
                     name = path.substringAfterLast('/'),
@@ -1273,10 +1375,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             selectWorkflow(entry, recordAsOpened = true)
         } else {
-            // 电脑浏览器等提交的任务没有 comfy_mobile.workflow_path，但任务里
-            // 内嵌了执行时的工作流图，直接用它打开参数页。
-            val workflowJson = job.workflowJson?.takeIf { it.isNotBlank() }
-            if (workflowJson != null) loadTaskEmbeddedWorkflow(workflowJson, job)
+            _state.update { it.copy(notice = "任务没有提供工作流快照，仅跟踪任务状态") }
         }
         _state.update {
             it.copy(
@@ -1289,8 +1388,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadTaskEmbeddedWorkflow(workflowJson: String, job: JobSummary) {
-        viewModelScope.launch {
+        workflowLoadJob?.cancel()
+        workflowLoadJob = viewModelScope.launch {
             runOperation("加载任务工作流失败") {
+                flushCurrentDraft()
+                _state.update { it.copy(loading = true) }
                 val serverUrl = _state.value.activeServer?.baseUrl ?: error("尚未连接 ComfyUI 服务器")
                 val manifest = bridgeOperationMutex.withLock {
                     (bridge ?: error("前端桥接不可用")).loadWorkflow(
@@ -1298,11 +1400,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         workflowPath = null,
                     )
                 }
-                bridgeLoadedPath = null
-                val name = job.workflowName.ifBlank { "任务快照-${job.id.take(8)}" }
+                val name = job.workflowName.ifBlank { "任务快照-${job.id.take(8)}.json" }
                 val entry = WorkflowEntry(
                     name = name,
-                    path = "workflows/$name.json",
+                    path = job.workflowPath.ifBlank { "workflows/${WorkflowPath.fileName(name)}" },
                     isDirectory = false,
                 )
                 val document = WorkflowDocument(
@@ -1312,8 +1413,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     nodes = manifest.nodes,
                     serverUrl = serverUrl,
                     baseModified = 0.0,
-                    hasUnsavedChanges = false,
+                    hasUnsavedChanges = true,
+                    sourceJobId = job.id,
                 )
+                if (_state.value.activeServer?.baseUrl != serverUrl || _state.value.activeJobId != job.id) return@runOperation
+                bridgeLoadedPath = entry.path
                 _state.update {
                     it.copy(
                         previewWorkflow = document,
@@ -1321,6 +1425,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         fields = manifest.fields,
                         loading = false,
                         nodeProblems = emptyMap(),
+                        currentExecutingNodeId = ExecutionNodeResolver.resolve(
+                            it.jobs.firstOrNull { latest -> latest.id == job.id }?.currentNode, manifest.nodes),
                         notice = "已加载任务对应工作流（任务内嵌快照）",
                     )
                 }
@@ -1680,6 +1786,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun handleSocketMessage(message: JSONObject) {
         val type = message.optString("type")
         val data = message.optJSONObject("data") ?: JSONObject()
+        val eventId = data.optString("prompt_id")
+        if (eventId.isNotBlank() && completionMessages.containsKey(TaskLifecycle.key(client.serverUrl(), eventId))) return
         when (type) {
             "execution_start" -> {
                 val id = data.optString("prompt_id")
@@ -1729,7 +1837,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "progress_state" -> {
                 ProgressStateParser.parse(data)?.let { update ->
                     markJobObserved(update.promptId)
-                    val nodeId = resolveVisibleNode(update.nodeId)
+                    val nodeId = update.nodeId
                     updateJob(update.promptId) { it.copy(progress = update.progress, currentNode = nodeId, state = JobState.RUNNING) }
                     updateMonitor(update.promptId, (update.progress * 100).toInt(), nodeId)
                     if (tracksVisibleJob(update.promptId)) {
@@ -1746,7 +1854,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val id = ActiveJobRecovery.resolveEventPromptId(
                     eventPromptId = eventPromptId,
                     activeJobId = _state.value.activeJobId,
-                    jobs = _state.value.jobs,
+                    jobs = _state.value.jobs.filter { it.submittedByApp },
                 ).orEmpty()
                 if (id.isBlank() && runtimeNode.isNotBlank()) {
                     // ComfyUI 重连补发当前节点时不带 prompt_id；等 /queue 恢复任务 ID 后再应用。
@@ -1754,7 +1862,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     AppLogger.info("已收到重连当前部件，等待关联运行任务：部件=$runtimeNode")
                     return
                 }
-                val node = resolveVisibleNode(runtimeNode).orEmpty()
+                val node = runtimeNode
                 if (id.isNotBlank()) {
                     markJobObserved(id)
                     pendingReconnectNodeId = null
@@ -1812,10 +1920,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     markJobObserved(id)
                     updateJob(id) { it.copy(state = if (type == "execution_interrupted") JobState.CANCELLED else JobState.ERROR, currentNode = nodeId.ifBlank { null }, message = detail) }
                     if (tracksVisibleJob(id)) {
+                        visibleNodeJob?.cancel()
                         _state.update {
                             it.copy(
                                 activeJobId = id,
-                                currentExecutingNodeId = nodeId.ifBlank { null },
+                                currentExecutingNodeId = null,
                                 generationProgress = null,
                                 generationMessage = "生成失败：$detail",
                                 error = "生成失败：$detail",
@@ -1829,7 +1938,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun refreshStatsInternal() {
+        val server = _state.value.activeServer?.baseUrl ?: return
         runCatching { client.systemStats() }.onSuccess { stats ->
+            if (_state.value.activeServer?.baseUrl != server) return@onSuccess
             val updatedProfile = _state.value.activeServer?.copy(lastSeen = System.currentTimeMillis(), comfyVersion = stats.comfyVersion)
             _state.update { it.copy(systemStats = stats, activeServer = updatedProfile ?: it.activeServer) }
             if (updatedProfile != null) preferences.saveServer(updatedProfile)
@@ -1837,7 +1948,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun refreshWorkflowsInternal() {
+        val server = _state.value.activeServer?.baseUrl ?: return
         runCatching { client.listWorkflows() }.onSuccess { entries ->
+            if (_state.value.activeServer?.baseUrl != server) return@onSuccess
             _state.update { ui ->
                 val document = ui.selectedWorkflow
                 val current = document?.let { selected -> entries.firstOrNull { it.path == selected.entry.path } }
@@ -1859,6 +1972,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun refreshTasksInternal() {
+        if (!taskRefreshMutex.tryLock()) return
+        try {
+            val server = _state.value.activeServer?.baseUrl ?: return
+            refreshTasksForServer(server)
+        } finally {
+            taskRefreshMutex.unlock()
+        }
+    }
+
+    private suspend fun refreshTasksForServer(server: String) {
         runCatching {
             val existing = _state.value.jobs.associateBy { it.id }
             val live = client.queue()
@@ -1873,6 +1996,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }.onSuccess { fetchedJobs ->
+            if (_state.value.activeServer?.baseUrl != server) return@onSuccess
             fetchedJobs.forEach { markJobObserved(it.id) }
             val activeAppJobs = fetchedJobs.filter {
                 (it.submittedByApp || it.id in takenOverJobIds) &&
@@ -1902,10 +2026,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     jobs.any { it.id == id && it.state in setOf(JobState.RUNNING, JobState.PENDING) }
                 }
                 val selection = ActiveJobRecovery.select(ui.activeJobId, jobs, awaiting, takenOverJobIds)
-                val active = selection.job ?: return@update ui.copy(jobs = jobs)
+                val active = selection.job ?: run {
+                    val finished = jobs.firstOrNull { it.id == ui.activeJobId && TaskLifecycle.isTerminal(it.state) }
+                    if (finished != null) {
+                        visibleNodeJob?.cancel()
+                        return@update TaskLifecycle.settle(ui.copy(jobs = jobs), server, finished.id, finished.state,
+                            completionMessages[TaskLifecycle.key(server, finished.id)]
+                                ?: if (finished.state == JobState.SUCCESS) "生成完成，正在确认本地保存状态" else "任务失败或已取消")
+                    }
+                    return@update ui.copy(jobs = jobs)
+                }
                 val sameActiveJob = ui.activeJobId == active.id
-                val recoveredRuntimeNode = reconnectRuntimeNode.takeIf { active.state == JobState.RUNNING }
-                val resolvedNode = ExecutionNodeResolver.resolve(
+                val recoveredRuntimeNode = reconnectRuntimeNode.takeIf { active.state == JobState.RUNNING && active.submittedByApp }
+                val sameDocument = TaskLifecycle.ownsDocument(active, ui.selectedWorkflow)
+                val resolvedNode = if (!sameDocument || active.state == JobState.PENDING) null else ExecutionNodeResolver.resolve(
                     ActiveJobRecovery.currentNodeId(recoveredRuntimeNode, active.currentNode),
                     ui.selectedWorkflow?.nodes.orEmpty(),
                 ) ?: if (sameActiveJob && active.state in setOf(JobState.RUNNING, JobState.PENDING)) {
@@ -1914,13 +2048,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     null
                 }
                 val progress = active.progress ?: if (sameActiveJob) ui.generationProgress else null
-                val updatedJobs = jobs.map { job ->
-                    if (job.id == active.id && resolvedNode != null) {
-                        job.copy(currentNode = resolvedNode, progress = progress)
-                    } else {
-                        job
-                    }
-                }
+                val updatedJobs = jobs
                 if (recoveredRuntimeNode != null) reconnectNodeApplied = true
                 ui.copy(
                     jobs = updatedJobs,
@@ -1957,6 +2085,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _state.value.selectedWorkflow?.entry?.path.orEmpty()
                     },
                 )
+            }
+            val active = _state.value.jobs.firstOrNull { it.id == _state.value.activeJobId }
+            val selected = _state.value.selectedWorkflow
+            val needsSnapshot = selected == null || (selected.sourceJobId != null && selected.sourceJobId != active?.id && selected.dirtyFieldKeys.isEmpty())
+            if (needsSnapshot && workflowLoadJob?.isActive != true && active?.workflowJson != null && !TaskLifecycle.isTerminal(active.state)) {
+                loadTaskEmbeddedWorkflow(active.workflowJson, active)
             }
         }
     }
@@ -2004,7 +2138,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun startMonitor(promptId: String, workflowName: String, workflowPath: String) {
-        if (!monitoredJobIds.add(promptId)) return
+        monitoredJobIds.add(promptId)
         val intent = Intent(app, JobMonitorService::class.java)
             .putExtra(JobMonitorService.EXTRA_BASE_URL, client.serverUrl())
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
@@ -2021,7 +2155,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun updateMonitor(promptId: String, progress: Int, node: String?) {
-        if (promptId !in _state.value.submittedJobIds) return
+        if (promptId !in _state.value.submittedJobIds && promptId !in takenOverJobIds) return
         val intent = Intent(app, JobMonitorService::class.java)
             .setAction(JobMonitorService.ACTION_PROGRESS)
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
@@ -2056,6 +2190,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun restoreNotificationWorkflow() {
+        val promptId = pendingNotificationJobId
+        if (promptId != null) {
+            pendingNotificationJobId = null
+            pendingNotificationWorkflowPath = null
+            viewModelScope.launch {
+                refreshTasksInternal()
+                _state.value.jobs.firstOrNull { it.id == promptId }?.let { job ->
+                    if (!TaskLifecycle.isTerminal(job.state)) takeoverJob(job)
+                }
+            }
+            return
+        }
         val path = pendingNotificationWorkflowPath?.takeIf(String::isNotBlank) ?: return
         if (_state.value.selectedWorkflow?.entry?.path == path) {
             pendingNotificationWorkflowPath = null
@@ -2096,7 +2242,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val activeBridge = bridge ?: error("前端桥接不可用")
         val manifest = activeBridge.loadWorkflow(
             rawJson = document.rawJson,
-            workflowPath = document.entry.path,
+            workflowPath = WorkflowWorkingCopy.frontendPath(document),
         )
         bridgeLoadedPath = document.entry.path
         _state.update { ui ->
@@ -2125,7 +2271,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update { it.copy(loading = true, error = null) }
                 val (raw, manifest) = bridgeOperationMutex.withLock {
                     val updatedRaw = activeBridge.syncWorkflow(snapshot)
-                    updatedRaw to activeBridge.loadWorkflow(updatedRaw, workflowPath = document.entry.path)
+                    updatedRaw to activeBridge.loadWorkflow(updatedRaw, workflowPath = WorkflowWorkingCopy.frontendPath(document))
                 }
                 bridgeLoadedPath = document.entry.path
                 _state.update { ui ->
@@ -2173,7 +2319,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 本 App 提交的任务，或用户在任务页主动接管/正在跟踪的任务。 */
     private fun tracksVisibleJob(id: String): Boolean =
-        id.isNotBlank() && (id in _state.value.submittedJobIds || id == _state.value.activeJobId)
+        id.isNotBlank() && id == _state.value.activeJobId
 
     private fun resolveVisibleNode(runtimeNodeId: String?): String? =
         ExecutionNodeResolver.resolve(runtimeNodeId, _state.value.selectedWorkflow?.nodes.orEmpty())
@@ -2189,10 +2335,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun showVisibleExecutingNode(promptId: String, nodeId: String?, progress: Float? = null) {
+        val job = _state.value.jobs.firstOrNull { it.id == promptId }
+        if (job != null && !TaskLifecycle.ownsDocument(job, _state.value.selectedWorkflow)) return
         val resolvedNodeId = resolveVisibleNode(nodeId) ?: return
         val applyUpdate = {
             _state.update { ui ->
-                if (promptId != ui.activeJobId && promptId !in ui.submittedJobIds) ui else ui.copy(
+                if (promptId != ui.activeJobId) ui else ui.copy(
                     activeJobId = promptId,
                     currentExecutingNodeId = resolvedNodeId,
                     generationProgress = progress ?: ui.generationProgress,
@@ -2241,11 +2389,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         visibleNodeJob = viewModelScope.launch {
             delay(waitMillis)
             _state.update { ui ->
-                if (ui.activeJobId != promptId) ui else ui.copy(
-                    currentExecutingNodeId = null,
-                    generationProgress = 1f,
-                    generationMessage = "生成完成，正在后台保存本地作品",
-                )
+                TaskLifecycle.settle(ui, ui.activeServer?.baseUrl.orEmpty(), promptId, JobState.SUCCESS,
+                    completionMessages[TaskLifecycle.key(ui.activeServer?.baseUrl.orEmpty(), promptId)]
+                        ?: "生成完成，正在确认本地保存状态")
             }
         }
     }
