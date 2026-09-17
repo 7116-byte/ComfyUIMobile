@@ -2,7 +2,7 @@
 
 ComfyUI Mobile 是一个连接自有 ComfyUI 服务器的原生 Android 客户端。它把 ComfyUI 工作流转换成手机友好的纵向参数表单，不在主界面显示节点画布。
 
-> 当前版本：v0.1.58。首要兼容 ComfyUI 0.30.1、ComfyUI Frontend 1.47.12。
+> 当前版本：v0.1.59。首要兼容 ComfyUI 0.30.1、ComfyUI Frontend 1.47.12。
 
 ## 功能
 
@@ -46,6 +46,8 @@ ComfyUI Mobile 是一个连接自有 ComfyUI 服务器的原生 Android 客户�
 隐藏 WebView 没有注册 Android JavaScript 接口。自定义节点前端脚本只能在 WebView 的普通网页权限内运行，不能直接调用原生对象。
 
 ## 构建
+
+原图下载支持大文件 2–4 路 HTTP Range 并发、完整性校验和不支持时自动回退，覆盖手动保存及后台自动下载，不压缩原图。详细行为见 [原图分段下载](docs/original-downloads.md)。
 
 要求 JDK 17、Android SDK 36：
 

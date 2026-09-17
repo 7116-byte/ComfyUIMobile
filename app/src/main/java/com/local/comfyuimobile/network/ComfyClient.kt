@@ -23,6 +23,7 @@ import org.json.JSONObject
 import java.net.URLEncoder
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -35,7 +36,9 @@ class PromptSubmissionException(
     val nodeProblems: Map<String, List<String>>,
 ) : IllegalStateException(message)
 
-class ComfyClient {
+class ComfyClient(
+    downloadDirectory: File = File(System.getProperty("java.io.tmpdir") ?: ".", "comfy-original-downloads"),
+) {
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
     private val client = OkHttpClient.Builder()
         .connectTimeout(4, TimeUnit.SECONDS)
@@ -43,6 +46,8 @@ class ComfyClient {
         .writeTimeout(60, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
+
+    private val originalDownloader = OriginalFileDownloader(client, downloadDirectory)
 
     @Volatile private var baseUrl: String = ""
     @Volatile private var socket: WebSocket? = null
@@ -286,13 +291,9 @@ class ComfyClient {
     fun mediaUrl(filename: String, subfolder: String, type: String): String =
         "$baseUrl/view?filename=${encode(filename)}&subfolder=${encode(subfolder)}&type=${encode(type)}"
 
-    suspend fun downloadTo(url: String, output: OutputStream) = withContext(Dispatchers.IO) {
-        client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
-            if (!response.isSuccessful) throw IllegalStateException("下载失败：HTTP ${response.code}")
-            val body = response.body ?: throw IllegalStateException("下载内容为空")
-            output.use { target -> body.byteStream().use { source -> source.copyTo(target) } }
-        }
-    }
+    suspend fun downloadTo(url: String, output: OutputStream) = originalDownloader.downloadTo(url, output)
+
+    suspend fun downloadToFile(url: String, destination: File) = originalDownloader.downloadToFile(url, destination)
 
     private fun getJson(path: String): JSONObject = executeJson(Request.Builder().url(baseUrl + path).get().build())
 

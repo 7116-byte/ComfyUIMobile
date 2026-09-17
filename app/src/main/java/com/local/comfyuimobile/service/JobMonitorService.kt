@@ -298,7 +298,7 @@ class JobMonitorService : Service() {
     }
 
     private suspend fun saveLocalOutputs(baseUrl: String, promptId: String): SaveReport {
-        val resultClient = ComfyClient()
+        val resultClient = ComfyClient(java.io.File(cacheDir, "original-downloads"))
         resultClient.setServer(baseUrl)
         val history = resultClient.history(promptId)
         check(history.optJSONObject(promptId) != null) { "任务结果尚未写入历史" }
@@ -331,14 +331,14 @@ class JobMonitorService : Service() {
             repeat(3) { attempt ->
                 if (saved) return@repeat
                 runCatching {
-                    destination.parentFile?.mkdirs()
-                    destination.outputStream().use { output -> resultClient.downloadTo(media.url, output) }
+                    resultClient.downloadToFile(media.url, destination)
                     localResultCache.add(media, destination)
                 }.onSuccess {
                     saved = true
                 }.onFailure { error ->
                     lastError = error.message.orEmpty()
                     destination.delete()
+                    if (error is kotlinx.coroutines.CancellationException) throw error
                     if (attempt < 2) delay((attempt + 1) * 1_000L)
                 }
             }

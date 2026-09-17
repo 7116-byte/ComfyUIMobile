@@ -58,6 +58,8 @@ import com.local.comfyuimobile.update.UpdateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -84,7 +86,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = AppPreferences(application)
     private val localResultCache = LocalResultCache(application)
     private val workflowDrafts = WorkflowDraftStore(application)
-    private val client = ComfyClient()
+    private val client = ComfyClient(File(application.cacheDir, "original-downloads"))
     private val scanner = LanScanner(application, client)
     private val updates = UpdateManager(application)
     private val clientId = application
@@ -1586,6 +1588,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     onComplete(message)
                 }
                 .onFailure { error ->
+                    if (error is CancellationException) throw error
                     val message = "${verb}失败：${error.message ?: error.javaClass.simpleName}"
                     _state.update { it.copy(error = message) }
                     onComplete(message)
@@ -1603,7 +1606,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 items.forEach { item ->
                     runCatching { saveToMediaStore(item) }
                         .onSuccess { succeeded += 1 }
-                        .onFailure { failed += 1 }
+                        .onFailure { error ->
+                            if (error is CancellationException) throw error
+                            failed += 1
+                        }
                 }
                 _state.update {
                     it.copy(
@@ -1640,7 +1646,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runOperation("分享结果失败") {
                 val file = media.localPath?.let(::File)?.takeIf { it.isFile } ?: run {
                     val dir = File(app.cacheDir, "shared").apply { mkdirs() }
-                    File(dir, media.filename).also { client.downloadTo(media.url, it.outputStream()) }
+                    File(dir, media.filename).also { client.downloadToFile(media.url, it) }
                 }
                 val uri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", file)
                 val intent = Intent(Intent.ACTION_SEND).apply {
@@ -2121,10 +2127,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val output = resolver.openOutputStream(uri) ?: error("无法写入媒体文件")
             val localFile = media.localPath?.let(::File)?.takeIf { it.isFile }
             if (localFile != null) {
-                output.use { target -> localFile.inputStream().use { source -> source.copyTo(target) } }
+                output.use { target ->
+                    localFile.inputStream().use { source ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val count = source.read(buffer)
+                            if (count < 0) break
+                            target.write(buffer, 0, count)
+                        }
+                    }
+                }
             } else {
                 client.downloadTo(media.url, output)
             }
+            currentCoroutineContext().ensureActive()
             if (Build.VERSION.SDK_INT >= 29) {
                 values.clear()
                 values.put(MediaStore.MediaColumns.IS_PENDING, 0)
