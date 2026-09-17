@@ -903,11 +903,23 @@ class ComfyBridge(private val activity: Activity) {
               catch (_) { return JSON.parse(JSON.stringify(value)); }
             };
             const serverWorkflowPath = ${encodedWorkflowPath?.let { "new TextDecoder().decode(Uint8Array.from(atob('$it'), c => c.charCodeAt(0)))" } ?: "''"};
+            const workflowStore = app.extensionManager?.workflow;
+            const repairOpenWorkflowTabs = (preferredPath = '') => {
+              if (typeof workflowStore?.openWorkflowsInBackground !== 'function') return;
+              const validOpenPaths = Array.from(workflowStore.openWorkflows || [])
+                .filter(item => item && typeof item.path === 'string' && item.path)
+                .map(item => item.path);
+              const anchor = preferredPath || workflowStore.activeWorkflow?.path ||
+                Array.from(workflowStore.workflows || []).find(item => item?.path)?.path || '';
+              const paths = [...new Set([anchor, ...validOpenPaths].filter(Boolean))];
+              // Calling this with an empty list is intentional: the store action
+              // also filters invalid paths already persisted in its tab order.
+              workflowStore.openWorkflowsInBackground({left: paths, right: []});
+            };
             if (!$inspectCurrentGraph) {
               if (serverWorkflowPath) {
               // Follow the same path as ComfyUI's workflow sidebar: resolve the
               // persisted ComfyWorkflow first and pass that object to loadGraphData.
-              const workflowStore = app.extensionManager?.workflow;
               if (!workflowStore?.getWorkflowByPath || !workflowStore?.syncWorkflows) {
                 return JSON.stringify({ok:false, error:'当前 ComfyUI 前端未提供官方工作流打开接口'});
               }
@@ -916,6 +928,11 @@ class ComfyBridge(private val activity: Activity) {
               if (!persistedWorkflow) {
                 return JSON.stringify({ok:false, error:'服务器工作流列表中找不到：' + serverWorkflowPath});
               }
+              // Frontend 1.52.x can leave removed paths in its persisted tab order.
+              // Its openWorkflows getter then exposes `undefined` entries and
+              // beforeLoadNewGraph crashes while reading item.path. Re-run the
+              // official tab merge/filter action after every entity sync.
+              repairOpenWorkflowTabs(serverWorkflowPath);
               const alreadyActive = typeof workflowStore.isActive === 'function'
                 ? workflowStore.isActive(persistedWorkflow)
                 : workflowStore.activeWorkflow?.path === serverWorkflowPath;
@@ -1005,6 +1022,7 @@ class ComfyBridge(private val activity: Activity) {
                 }
               }
               } else {
+                repairOpenWorkflowTabs();
                 await app.loadGraphData(workflow, true, false, null);
               }
             }

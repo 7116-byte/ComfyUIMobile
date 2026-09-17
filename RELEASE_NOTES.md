@@ -1,3 +1,9 @@
+# v0.1.62
+
+- 修复 ComfyUI 0.36.0 / Frontend 1.52.7 中，App WebView 残留已删除的工作流标签后，加载工作流报 `Cannot read properties of undefined (reading 'path')` 的问题。
+- 每次加载前通过 ComfyUI 前端自带的标签过滤接口清理无效路径，不修改工作流文件，也不清空有效标签或当前参数。
+- 覆盖服务器工作流和图片内嵌工作流；没有修改 VPN、代理或反向隧道配置。
+
 # v0.1.61
 
 - 监听手机默认网络切换；Wi-Fi、移动网络或 VPN 变化后会重新建立 ComfyUI 接口、WebView 与 WebSocket 连接，同服务器重连不会主动清空正在跟踪的任务。
