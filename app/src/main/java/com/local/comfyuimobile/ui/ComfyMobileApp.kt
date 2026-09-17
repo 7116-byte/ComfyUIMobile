@@ -7,6 +7,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.view.Window
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -433,11 +435,10 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
                 },
                 navigationIcon = { Icon(Icons.Default.Wifi, null, Modifier.padding(start = 12.dp), tint = MaterialTheme.colorScheme.secondary) },
                 actions = {
-                    IconButton(onClick = viewModel::refreshOrReconnect) {
-                        Icon(
-                            Icons.Default.Refresh,
-                            if (state.status == ConnectionStatus.CONNECTED) "刷新" else "重新连接",
-                        )
+                    TextButton(onClick = viewModel::refreshOrReconnect) {
+                        Icon(Icons.Default.Refresh, null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("重连")
                     }
                     IconButton(onClick = { settings = true }) { Icon(Icons.Default.Settings, "设置") }
                 },
@@ -497,6 +498,7 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
     var deleteDialog by remember { mutableStateOf(false) }
     var dialogText by remember { mutableStateOf("") }
     var exportRaw by remember { mutableStateOf<String?>(null) }
+    var selectedEntryPath by rememberSaveable(state.activeServer?.baseUrl) { mutableStateOf<String?>(null) }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val name = displayName(context, uri) ?: "imported.json"
@@ -512,6 +514,14 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
         if (currentFolder != WorkflowBrowser.ROOT && state.workflows.none { it.isDirectory && it.path == currentFolder }) {
             currentFolder = WorkflowBrowser.ROOT
         }
+        if (selectedEntryPath != null && state.workflows.none { !it.isDirectory && it.path == selectedEntryPath }) {
+            selectedEntryPath = null
+        }
+    }
+    val selectedEntry = state.workflows.firstOrNull { !it.isDirectory && it.path == selectedEntryPath }
+    val actionEntry = selectedEntry ?: state.previewWorkflow?.entry
+    val actionFolders = remember(state.workflows, actionEntry?.path) {
+        actionEntry?.let { WorkflowPath.availableFolders(state.workflows, it.path) }.orEmpty()
     }
     Column(Modifier.fillMaxSize()) {
         OutlinedTextField(
@@ -548,29 +558,33 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (state.previewWorkflow != null) {
+        if (actionEntry != null) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Button(onClick = {
-                    viewModel.openPreviewedWorkflow()
+                    if (state.previewWorkflow?.entry?.path == actionEntry.path) {
+                        viewModel.openPreviewedWorkflow()
+                    } else {
+                        viewModel.selectWorkflow(actionEntry, recordAsOpened = true)
+                    }
+                    selectedEntryPath = null
                     onOpenParameters()
                 }) { Text("打开参数") }
                 OutlinedButton(onClick = {
-                    dialogText = state.previewWorkflow.entry.name.substringBeforeLast('.')
+                    dialogText = actionEntry.name.substringBeforeLast('.')
                     duplicateDialog = true
                 }) { Text("新建副本") }
                 OutlinedButton(onClick = {
-                    dialogText = state.previewWorkflow.entry.name.substringBeforeLast('.')
+                    dialogText = actionEntry.name.substringBeforeLast('.')
                     renameDialog = true
                 }) { Text("改名") }
                 OutlinedButton(onClick = {
-                    dialogText = state.previewWorkflow.entry.path.substringBeforeLast('/', "workflows")
                     moveDialog = true
                 }) { Text("移动") }
                 OutlinedButton(onClick = {
-                    viewModel.exportPreview { name, raw -> exportRaw = raw; exportLauncher.launch(name) }
+                    viewModel.exportWorkflow(actionEntry) { name, raw -> exportRaw = raw; exportLauncher.launch(name) }
                 }) { Text("导出") }
                 OutlinedButton(onClick = { deleteDialog = true }) { Text("删除") }
             }
@@ -580,17 +594,24 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
             items(filtered, key = { it.path }) { entry ->
                 WorkflowRow(
                     entry = entry,
-                    selected = state.previewWorkflow?.entry?.path == entry.path,
+                    selected = if (selectedEntryPath != null) {
+                        selectedEntryPath == entry.path
+                    } else {
+                        state.previewWorkflow?.entry?.path == entry.path
+                    },
                     onClick = {
                         if (entry.isDirectory) {
                             currentFolder = entry.path
                             search = ""
                         } else {
+                            selectedEntryPath = null
                             viewModel.selectWorkflow(entry)
                         }
                     },
+                    onLongClick = if (entry.isDirectory) null else ({ selectedEntryPath = entry.path }),
                     onDoubleClick = {
                         if (!entry.isDirectory) {
+                            selectedEntryPath = null
                             viewModel.selectWorkflow(entry, recordAsOpened = true)
                             onOpenParameters()
                         }
@@ -599,10 +620,24 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
             }
         }
     }
-    if (duplicateDialog) NameDialog("复制为新工作流", dialogText, { duplicateDialog = false }) { viewModel.duplicateWorkflow(it); duplicateDialog = false }
-    if (renameDialog) NameDialog("工作流改名", dialogText, { renameDialog = false }) { viewModel.renameWorkflow(it); renameDialog = false }
-    if (moveDialog) NameDialog("移动到文件夹", dialogText, { moveDialog = false }) { viewModel.moveWorkflow(it); moveDialog = false }
-    if (deleteDialog) ConfirmDialog("删除工作流", "将从 ComfyUI 服务器永久删除 ${state.previewWorkflow?.entry?.name}。", { deleteDialog = false }) { viewModel.deleteWorkflow(); deleteDialog = false }
+    if (duplicateDialog && actionEntry != null) NameDialog("复制为新工作流", dialogText, { duplicateDialog = false }) {
+        viewModel.duplicateWorkflow(actionEntry, it); duplicateDialog = false; selectedEntryPath = null
+    }
+    if (renameDialog && actionEntry != null) NameDialog("工作流改名", dialogText, { renameDialog = false }) {
+        viewModel.renameWorkflow(actionEntry, it); renameDialog = false; selectedEntryPath = null
+    }
+    if (moveDialog && actionEntry != null) MoveWorkflowDialog(
+        initialFolder = actionEntry.path.substringBeforeLast('/', "workflows"),
+        folders = actionFolders,
+        onDismiss = { moveDialog = false },
+    ) { folder ->
+        viewModel.moveWorkflow(actionEntry, folder); moveDialog = false; selectedEntryPath = null
+    }
+    if (deleteDialog && actionEntry != null) ConfirmDialog(
+        "删除工作流",
+        "将从 ComfyUI 服务器永久删除 ${actionEntry.name}。",
+        { deleteDialog = false },
+    ) { viewModel.deleteWorkflow(actionEntry); deleteDialog = false; selectedEntryPath = null }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -611,10 +646,15 @@ private fun WorkflowRow(
     entry: WorkflowEntry,
     selected: Boolean,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
     onDoubleClick: () -> Unit = {},
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onDoubleClick = onDoubleClick),
+        modifier = Modifier.fillMaxWidth().combinedClickable(
+            onClick = onClick,
+            onLongClick = onLongClick,
+            onDoubleClick = onDoubleClick,
+        ),
         colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1409,6 +1449,7 @@ private fun ResultScreen(
     selectedAlbumId: String?,
     onSelectedAlbumChange: (String?) -> Unit,
 ) {
+    val hostView = LocalView.current
     var selectedMedia by remember { mutableStateOf<ResultMedia?>(null) }
     var selectedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
     var confirmDeleteSelection by remember { mutableStateOf(false) }
@@ -1431,6 +1472,7 @@ private fun ResultScreen(
         if (item.kind == MediaKind.IMAGE) {
             val images = context.filter { it.kind == MediaKind.IMAGE }
             galleryInitialIndex = images.indexOfFirst { (it.localPath ?: it.url) == (item.localPath ?: item.url) }.coerceAtLeast(0)
+            hostView.context.findActivity()?.window?.let { enterGalleryFullscreen(it, hostView) }
             galleryItems = images
         } else {
             selectedMedia = item
@@ -1558,6 +1600,10 @@ private fun ResultScreen(
             onSave = viewModel::saveResultWithFeedback,
             onShare = viewModel::shareResult,
             onOpen = viewModel::openResult,
+            onOpenWorkflow = { item ->
+                galleryItems = emptyList()
+                viewModel.openWorkflowFromResult(item)
+            },
             favoriteKeys = state.favoriteResultKeys,
             onFavorite = viewModel::toggleResultFavorite,
             onDelete = { item ->
@@ -1701,6 +1747,7 @@ private fun ImageGalleryViewer(
     onSave: (ResultMedia, (String) -> Unit) -> Unit,
     onShare: (ResultMedia) -> Unit,
     onOpen: (ResultMedia) -> Unit,
+    onOpenWorkflow: (ResultMedia) -> Unit,
     favoriteKeys: Set<String>,
     onFavorite: (ResultMedia) -> Unit,
     onDelete: (ResultMedia) -> Unit,
@@ -1820,6 +1867,12 @@ private fun ImageGalleryViewer(
                             }
                             DropdownMenu(expanded = moreExpanded, onDismissRequest = { moreExpanded = false }) {
                                 DropdownMenuItem(
+                                    text = { Text("打开工作流") },
+                                    leadingIcon = { Icon(Icons.Default.Tune, null) },
+                                    enabled = current.kind == MediaKind.IMAGE,
+                                    onClick = { moreExpanded = false; onOpenWorkflow(current) },
+                                )
+                                DropdownMenuItem(
                                     text = { Text("打开原文件") },
                                     leadingIcon = { Icon(Icons.Default.FileOpen, null) },
                                     onClick = { moreExpanded = false; onOpen(current) },
@@ -1871,23 +1924,29 @@ private fun ImageGalleryViewer(
 @Composable
 private fun GallerySystemBars() {
     val view = LocalView.current
-    val window = remember(view) {
-        (view.parent as? DialogWindowProvider)?.window ?: view.context.findActivity()?.window
-    }
-    LaunchedEffect(window) {
-        window?.let {
-            WindowCompat.getInsetsController(it, view).apply {
-                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                // The gallery controls are overlays. Keeping both system bars hidden means
-                // showing/hiding the controls never changes the content viewport or pushes
-                // the bottom action row off-screen on Xiaomi devices.
-                hide(WindowInsetsCompat.Type.systemBars())
-            }
+    val dialogWindow = remember(view) { (view.parent as? DialogWindowProvider)?.window }
+    val hostWindow = remember(view) { view.context.findActivity()?.window }
+    DisposableEffect(dialogWindow, hostWindow) {
+        dialogWindow?.let { enterGalleryFullscreen(it, view) }
+        hostWindow?.let { enterGalleryFullscreen(it, view) }
+        onDispose {
+            dialogWindow?.let { exitGalleryFullscreen(it, view) }
+            hostWindow?.let { exitGalleryFullscreen(it, view) }
         }
     }
-    DisposableEffect(window) {
-        onDispose { window?.let { WindowCompat.getInsetsController(it, view).show(WindowInsetsCompat.Type.systemBars()) } }
+}
+
+private fun enterGalleryFullscreen(window: Window, view: android.view.View) {
+    window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+    WindowCompat.getInsetsController(window, view).apply {
+        systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        hide(WindowInsetsCompat.Type.systemBars())
     }
+}
+
+private fun exitGalleryFullscreen(window: Window, view: android.view.View) {
+    window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+    WindowCompat.getInsetsController(window, view).show(WindowInsetsCompat.Type.systemBars())
 }
 
 private class GalleryTransformState {
@@ -2315,6 +2374,58 @@ private fun SaveWorkflowAsDialog(
         },
         confirmButton = {
             TextButton(onClick = { onConfirm(name, folder) }, enabled = name.isNotBlank()) { Text("另存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun MoveWorkflowDialog(
+    initialFolder: String,
+    folders: List<String>,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var folder by remember(initialFolder) { mutableStateOf(initialFolder) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择目标文件夹") },
+        text = {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().fillMaxHeight(0.58f),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(folders, key = { it }) { option ->
+                    OutlinedCard(
+                        modifier = Modifier.fillMaxWidth().clickable { folder = option },
+                        colors = CardDefaults.outlinedCardColors(
+                            containerColor = if (option == folder) {
+                                MaterialTheme.colorScheme.primaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.surface
+                            },
+                        ),
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(if (option == folder) Icons.Default.CheckCircle else Icons.Default.Folder, null)
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                if (option == "workflows") "工作流根目录" else option.removePrefix("workflows/"),
+                                maxLines = 2,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(folder) },
+                enabled = folder.isNotBlank() && folder != initialFolder,
+            ) { Text("移动到这里") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )

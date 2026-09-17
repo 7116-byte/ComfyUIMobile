@@ -116,6 +116,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var serverInputSeeded = false
     private var workflowLoadJob: Job? = null
     private var connectionJob: Job? = null
+    private var networkChangeJob: Job? = null
     private var updateCleanupJob: Job? = null
     private val taskRefreshMutex = Mutex()
     private val completionMessages = ConcurrentHashMap<String, String>()
@@ -279,7 +280,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect(address: String = state.value.serverInput) {
-        if (generationJob?.isActive == true || workflowSaveJob?.isActive == true) {
+        val requestedAddress = runCatching { LanAddress.normalize(address) }.getOrNull()
+        val sameServerReconnect = requestedAddress != null && _state.value.activeServer?.baseUrl?.let {
+            WorkflowDraftStore.normalizeServer(it) == WorkflowDraftStore.normalizeServer(requestedAddress)
+        } == true
+        if ((generationJob?.isActive == true || workflowSaveJob?.isActive == true) && !sameServerReconnect) {
             _state.update { it.copy(notice = "请等待当前提交或保存操作完成后再切换服务器") }
             return
         }
@@ -299,7 +304,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         connectionMessage = "正在检查服务器地址格式",
                         connectionStep = 1,
                         loading = true,
-                        activeServer = null,
                         bridgeReady = false,
                         error = null,
                     )
@@ -326,6 +330,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 setConnectionStep(6, "节点定义正常，正在保存连接并同步数据")
                 preferences.saveServer(profile)
                 _state.update {
+                    val reconnectingSameServer = it.activeServer?.baseUrl?.let { currentUrl ->
+                        WorkflowDraftStore.normalizeServer(currentUrl) == WorkflowDraftStore.normalizeServer(profile.baseUrl)
+                    } == true
                     val sameServerDocument = it.selectedWorkflow?.takeIf { document ->
                         WorkflowDraftStore.normalizeServer(document.serverUrl) ==
                             WorkflowDraftStore.normalizeServer(profile.baseUrl)
@@ -340,11 +347,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         loading = false,
                         selectedWorkflow = sameServerDocument,
                         previewWorkflow = sameServerDocument,
-                        activeJobId = null,
-                        currentExecutingNodeId = null,
-                        generationProgress = null,
-                        generationMessage = "",
-                        jobs = emptyList(),
+                        activeJobId = if (reconnectingSameServer) it.activeJobId else null,
+                        currentExecutingNodeId = if (reconnectingSameServer) it.currentExecutingNodeId else null,
+                        generationProgress = if (reconnectingSameServer) it.generationProgress else null,
+                        generationMessage = if (reconnectingSameServer) it.generationMessage else "",
+                        jobs = if (reconnectingSameServer) it.jobs else emptyList(),
                         fields = sameServerDocument?.fields.orEmpty(),
                         workflowDraftConflictRequired = if (sameServerDocument == null) false else it.workflowDraftConflictRequired,
                         workflowDraftConflictReason = if (sameServerDocument == null) "" else it.workflowDraftConflictReason,
@@ -424,33 +431,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshOrReconnect() {
+        reconnectNow()
+    }
+
+    fun reconnectNow() {
         val current = _state.value
-        if (current.loading || current.status == ConnectionStatus.CONNECTING) return
         val address = current.activeServer?.baseUrl ?: current.serverInput
-        if (current.status != ConnectionStatus.CONNECTED) {
-            connect(address)
-            return
+        if (address.isBlank()) return
+        connect(address)
+    }
+
+    fun onNetworkLost() {
+        if (_state.value.activeServer == null) return
+        reconnectJob?.cancel()
+        client.closeWebSocket()
+        _state.update {
+            it.copy(
+                status = ConnectionStatus.RECONNECTING,
+                connectionMessage = "网络已断开，等待网络恢复",
+                bridgeReady = false,
+            )
         }
-        viewModelScope.launch {
-            _state.update { it.copy(connectionMessage = "正在检查服务器连接", error = null) }
-            val stats = runCatching { client.systemStats() }.getOrElse {
-                _state.update {
-                    it.copy(
-                        status = ConnectionStatus.RECONNECTING,
-                        connectionMessage = "刷新失败，正在重新连接",
-                    )
-                }
-                connect(address)
-                return@launch
-            }
-            _state.update {
-                it.copy(
-                    status = ConnectionStatus.CONNECTED,
-                    connectionMessage = "已连接 ${it.activeServer?.name.orEmpty()}",
-                    systemStats = stats,
-                )
-            }
-            refreshAll()
+    }
+
+    fun onNetworkAvailableAfterChange() {
+        val current = _state.value
+        if (current.activeServer == null && current.status !in setOf(ConnectionStatus.ERROR, ConnectionStatus.RECONNECTING)) return
+        networkChangeJob?.cancel()
+        networkChangeJob = viewModelScope.launch {
+            delay(350)
+            _state.update { it.copy(connectionMessage = "网络已变化，正在重新连接", error = null) }
+            reconnectNow()
         }
     }
 
@@ -1032,6 +1043,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun duplicateWorkflow(entry: WorkflowEntry, name: String) {
+        if (_state.value.previewWorkflow?.entry?.path == entry.path) {
+            duplicateWorkflow(name)
+            return
+        }
+        viewModelScope.launch {
+            runOperation("复制工作流失败") {
+                val folder = entry.path.substringBeforeLast('/', "workflows")
+                val fileName = WorkflowPath.fileName(name)
+                val json = JSONObject(client.readWorkflow(entry.path))
+                    .put("id", UUID.randomUUID().toString())
+                    .put("revision", 0)
+                client.writeWorkflow("$folder/$fileName", json.toString(), overwrite = false)
+                refreshWorkflowsInternal()
+                _state.update { it.copy(notice = "已新建副本 $fileName") }
+            }
+        }
+    }
+
     fun renameWorkflow(name: String) {
         val document = currentPreview() ?: return
         viewModelScope.launch {
@@ -1074,6 +1104,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 preferences.setRecentWorkflow(moved.path, replacedPath = document.entry.path)
                 refreshWorkflowsInternal()
+            }
+        }
+    }
+
+    fun renameWorkflow(entry: WorkflowEntry, name: String) {
+        if (_state.value.previewWorkflow?.entry?.path == entry.path) {
+            renameWorkflow(name)
+            return
+        }
+        viewModelScope.launch {
+            runOperation("工作流改名失败") {
+                val folder = entry.path.substringBeforeLast('/', "workflows")
+                val fileName = WorkflowPath.fileName(name)
+                val moved = client.moveWorkflow(entry.path, "$folder/$fileName")
+                preferences.setRecentWorkflow(moved.path, replacedPath = entry.path)
+                refreshWorkflowsInternal()
+                _state.update { it.copy(notice = "已改名为 $fileName") }
             }
         }
     }
@@ -1123,6 +1170,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun moveWorkflow(entry: WorkflowEntry, folder: String) {
+        if (_state.value.previewWorkflow?.entry?.path == entry.path) {
+            moveWorkflow(folder)
+            return
+        }
+        viewModelScope.launch {
+            runOperation("移动工作流失败") {
+                val targetFolder = WorkflowPath.folder(folder)
+                require(targetFolder != entry.path.substringBeforeLast('/', "workflows")) { "请选择其他文件夹" }
+                val moved = client.moveWorkflow(entry.path, "$targetFolder/${entry.name}")
+                preferences.setRecentWorkflow(moved.path, replacedPath = entry.path)
+                refreshWorkflowsInternal()
+                _state.update { it.copy(notice = "已移动到 $targetFolder") }
+            }
+        }
+    }
+
     fun deleteWorkflow() {
         val document = _state.value.previewWorkflow ?: return
         viewModelScope.launch {
@@ -1140,6 +1204,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 refreshWorkflowsInternal()
+            }
+        }
+    }
+
+    fun deleteWorkflow(entry: WorkflowEntry) {
+        if (_state.value.previewWorkflow?.entry?.path == entry.path) {
+            deleteWorkflow()
+            return
+        }
+        viewModelScope.launch {
+            runOperation("删除工作流失败") {
+                client.deleteWorkflow(entry.path)
+                workflowDrafts.delete(_state.value.activeServer?.baseUrl.orEmpty(), entry.path)
+                preferences.removeRecentWorkflow(entry.path)
+                refreshWorkflowsInternal()
+                _state.update { it.copy(notice = "已删除 ${entry.name}") }
             }
         }
     }
@@ -1165,47 +1245,88 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             ?: error("无法读取所选文件")
                     }
                 }
-                val json = JSONObject(raw)
-                require(json.optJSONArray("nodes") != null) { "不是 ComfyUI 画布工作流 JSON" }
-                val sourceName = filename.substringAfterLast('/').substringAfterLast('\\')
-                val targetName = if (isImage) sourceName.substringBeforeLast('.', sourceName) else sourceName
-                val safeName = WorkflowPath.fileName(targetName)
-                val existingPaths = client.listWorkflows().mapTo(mutableSetOf()) { it.path }
-                val baseName = safeName.substringBeforeLast(".json", safeName)
-                var candidateName = safeName
-                var copyNumber = 2
-                while ("workflows/$candidateName" in existingPaths) {
-                    candidateName = "$baseName-$copyNumber.json"
-                    copyNumber += 1
+                installImportedWorkflow(raw, filename, isImage, openParameters = false)
+            }
+        }
+    }
+
+    fun openWorkflowFromResult(media: ResultMedia) {
+        if (media.kind != MediaKind.IMAGE) return
+        viewModelScope.launch {
+            runOperation("打开工作流失败") {
+                _state.update { it.copy(loading = true, error = null) }
+                val temporaryFile = media.localPath?.let(::File)?.takeIf { it.isFile } ?: run {
+                    val directory = File(app.cacheDir, "shared").apply { mkdirs() }
+                    File(directory, "workflow-${UUID.randomUUID()}-${File(media.filename).name}").also {
+                        client.downloadToFile(media.url, it)
+                    }
                 }
-                val entry = client.writeWorkflow("workflows/$candidateName", json.toString(), overwrite = false)
-                refreshWorkflowsInternal()
-                val manifest = bridgeOperationMutex.withLock {
-                    (bridge ?: error("前端桥接不可用")).loadWorkflow(
-                        rawJson = json.toString(),
-                        workflowPath = entry.path,
-                    )
-                }
-                bridgeLoadedPath = entry.path
-                val document = WorkflowDocument(
-                    entry = entry,
-                    rawJson = json.toString(),
-                    fields = manifest.fields,
-                    nodes = manifest.nodes,
-                    serverUrl = _state.value.activeServer?.baseUrl.orEmpty(),
-                    baseModified = entry.modified,
-                )
-                _state.update {
-                    it.copy(
-                        previewWorkflow = document,
-                        selectedWorkflow = document,
-                        fields = manifest.fields,
-                        loading = false,
-                        nodeProblems = emptyMap(),
-                        notice = "已从${if (isImage) "图片" else "文件"}导入 $candidateName",
-                    )
+                try {
+                    val extension = media.filename.substringAfterLast('.', "").lowercase()
+                    val raw = if (extension == "png") {
+                        withContext(Dispatchers.IO) { temporaryFile.inputStream().use(WorkflowImageReader::readPngWorkflow) }
+                    } else {
+                        val uri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", temporaryFile)
+                        (bridge ?: error("前端桥接不可用")).extractWorkflowFromImage(uri, mimeType(media), media.filename)
+                    }
+                    installImportedWorkflow(raw, media.filename, isImage = true, openParameters = true)
+                } finally {
+                    if (media.localPath == null) temporaryFile.delete()
                 }
             }
+        }
+    }
+
+    private suspend fun installImportedWorkflow(
+        raw: String,
+        filename: String,
+        isImage: Boolean,
+        openParameters: Boolean,
+    ) {
+        val json = JSONObject(raw)
+        require(json.optJSONArray("nodes") != null) { "不是 ComfyUI 画布工作流 JSON" }
+        val sourceName = filename.substringAfterLast('/').substringAfterLast('\\')
+        val targetName = if (isImage) sourceName.substringBeforeLast('.', sourceName) else sourceName
+        val safeName = WorkflowPath.fileName(targetName)
+        val existingPaths = client.listWorkflows().mapTo(mutableSetOf()) { it.path }
+        val baseName = safeName.substringBeforeLast(".json", safeName)
+        var candidateName = safeName
+        var copyNumber = 2
+        while ("workflows/$candidateName" in existingPaths) {
+            candidateName = "$baseName-$copyNumber.json"
+            copyNumber += 1
+        }
+        val entry = client.writeWorkflow("workflows/$candidateName", json.toString(), overwrite = false)
+        refreshWorkflowsInternal()
+        val manifest = bridgeOperationMutex.withLock {
+            (bridge ?: error("前端桥接不可用")).loadWorkflow(
+                rawJson = json.toString(),
+                workflowPath = entry.path,
+            )
+        }
+        bridgeLoadedPath = entry.path
+        val document = WorkflowDocument(
+            entry = entry,
+            rawJson = json.toString(),
+            fields = manifest.fields,
+            nodes = manifest.nodes,
+            serverUrl = _state.value.activeServer?.baseUrl.orEmpty(),
+            baseModified = entry.modified,
+        )
+        _state.update {
+            it.copy(
+                previewWorkflow = document,
+                selectedWorkflow = document,
+                fields = manifest.fields,
+                loading = false,
+                nodeProblems = emptyMap(),
+                notice = "已从${if (isImage) "图片" else "文件"}导入 $candidateName",
+                navigationRequest = if (openParameters) {
+                    AppNavigationRequest(SystemClock.elapsedRealtimeNanos(), AppDestination.PARAMETERS)
+                } else {
+                    it.navigationRequest
+                },
+            )
         }
     }
 
@@ -1214,6 +1335,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         runOperation("导出工作流失败") {
             val raw = bridgeOperationMutex.withLock { serializeDocument(document) }
             onReady(document.entry.name, raw)
+        }
+    }
+
+    fun exportWorkflow(entry: WorkflowEntry, onReady: (String, String) -> Unit) = viewModelScope.launch {
+        val preview = _state.value.previewWorkflow
+        runOperation("导出工作流失败") {
+            val raw = if (preview?.entry?.path == entry.path) {
+                bridgeOperationMutex.withLock { serializeDocument(preview) }
+            } else {
+                client.readWorkflow(entry.path)
+            }
+            onReady(entry.name, raw)
         }
     }
 
@@ -2622,7 +2755,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         error = "$prefix：$detail",
                         status = if (connecting) ConnectionStatus.ERROR else it.status,
                         connectionMessage = if (connecting) "第 ${it.connectionStep} 步失败：$detail" else it.connectionMessage,
-                        activeServer = if (connecting) null else it.activeServer,
+                        activeServer = if (connecting && it.activeServer?.baseUrl?.let { currentUrl ->
+                                WorkflowDraftStore.normalizeServer(currentUrl) !=
+                                    WorkflowDraftStore.normalizeServer(it.serverInput)
+                            } == true
+                        ) null else it.activeServer,
                         bridgeReady = if (connecting) false else it.bridgeReady,
                     )
                 }

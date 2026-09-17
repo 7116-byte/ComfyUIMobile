@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -22,6 +24,28 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     private lateinit var bridge: ComfyBridge
     private var localResultsReceiverRegistered = false
+    private var networkCallbackRegistered = false
+    @Volatile private var currentDefaultNetwork: Network? = null
+    @Volatile private var hasObservedDefaultNetwork = false
+    @Volatile private var defaultNetworkWasLost = false
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            val previous = currentDefaultNetwork
+            val changed = hasObservedDefaultNetwork && (defaultNetworkWasLost || previous != network)
+            currentDefaultNetwork = network
+            hasObservedDefaultNetwork = true
+            defaultNetworkWasLost = false
+            if (changed) viewModel.onNetworkAvailableAfterChange()
+        }
+
+        override fun onLost(network: Network) {
+            if (currentDefaultNetwork != network) return
+            currentDefaultNetwork = null
+            defaultNetworkWasLost = true
+            viewModel.onNetworkLost()
+        }
+    }
 
     private val localResultsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -42,6 +66,7 @@ class MainActivity : ComponentActivity() {
         viewModel.attachBridge(bridge)
         requestRuntimePermissions()
         registerLocalResultsReceiver()
+        registerNetworkCallback()
         setContent {
             ComfyMobileTheme {
                 ComfyMobileApp(viewModel, bridge)
@@ -64,6 +89,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         if (localResultsReceiverRegistered) unregisterReceiver(localResultsReceiver)
+        if (networkCallbackRegistered) {
+            runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback) }
+            networkCallbackRegistered = false
+        }
         bridge.destroy()
         super.onDestroy()
     }
@@ -72,6 +101,13 @@ class MainActivity : ComponentActivity() {
         val filter = IntentFilter(JobMonitorService.ACTION_LOCAL_RESULTS_UPDATED)
         ContextCompat.registerReceiver(this, localResultsReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         localResultsReceiverRegistered = true
+    }
+
+    private fun registerNetworkCallback() {
+        runCatching {
+            getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkCallback)
+            networkCallbackRegistered = true
+        }
     }
 
     private fun handleJobNotification(intent: Intent?) {
