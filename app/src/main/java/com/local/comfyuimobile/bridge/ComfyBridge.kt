@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.SystemClock
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -24,10 +25,15 @@ import com.local.comfyuimobile.model.WorkflowConnectionMarker
 import com.local.comfyuimobile.model.WorkflowManifest
 import com.local.comfyuimobile.model.WorkflowNode
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -173,6 +179,25 @@ class ComfyBridge(private val activity: Activity) {
         }
     }
 
+    // A transport reconnect does not invalidate the loaded frontend or its graph.
+    // Probe the live JS context before deciding to navigate and restore a draft.
+    suspend fun tryReuseServer(baseUrl: String): Boolean = withContext(Dispatchers.Main.immediate) {
+        if (allowedOrigin != baseUrl.trimEnd('/') || pageLoadError != null ||
+            !isPageReadyForScripts(webView.url.orEmpty(), allowedOrigin, webView.progress,
+                pageEpoch, finishedPageEpoch, webView.isAttachedToWindow)
+        ) return@withContext false
+        val expectedPage = pageEpoch
+        val expectedRenderer = rendererEpoch
+        try {
+            val ready = withTimeoutOrNull(1_500L) { evaluateImmediate(REUSE_SCRIPT) } == "ready"
+            ready && expectedPage == pageEpoch && expectedRenderer == rendererEpoch
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     suspend fun loadServer(baseUrl: String, timeoutMillis: Long = 45_000L) {
         val origin = baseUrl.trimEnd('/')
         withContext(Dispatchers.Main.immediate) {
@@ -211,20 +236,32 @@ class ComfyBridge(private val activity: Activity) {
     }
 
     suspend fun awaitReady(timeoutMillis: Long = 90_000L) {
+        if (tryReuseServer(allowedOrigin)) return
+        val startedAt = SystemClock.elapsedRealtime()
         val deadline = System.currentTimeMillis() + timeoutMillis
         var lastError = "ComfyUI 前端尚未初始化"
+        var loggedError = ""
         while (System.currentTimeMillis() < deadline) {
             val remaining = deadline - System.currentTimeMillis()
             val response = runCatching {
-                evaluate(READY_SCRIPT, timeoutMillis = remaining.coerceIn(1_000L, 5_000L))
+                evaluate(READY_SCRIPT, timeoutMillis = remaining.coerceIn(1_000L, 5_000L), startDelayMillis = 0)
             }.getOrElse {
+                currentCoroutineContext().ensureActive()
+                if (it is CancellationException && it !is TimeoutCancellationException) throw it
                 lastError = it.message.takeUnless(String?::isNullOrBlank) ?: lastError
                 ""
             }
             val json = runCatching { JSONObject(response) }.getOrNull()
-            if (json?.optBoolean("ok") == true) return
+            if (json?.optBoolean("ok") == true) {
+                AppLogger.info("ComfyUI 前端就绪：耗时=${SystemClock.elapsedRealtime() - startedAt}ms")
+                return
+            }
             lastError = json?.optString("error").takeUnless { it.isNullOrBlank() } ?: lastError
-            delay(500)
+            if (lastError != loggedError) {
+                AppLogger.info("ComfyUI 初始化等待：$lastError，已耗时=${SystemClock.elapsedRealtime() - startedAt}ms")
+                loggedError = lastError
+            }
+            delay(200)
         }
         throw IllegalStateException("前端桥接超时：$lastError")
     }
@@ -647,7 +684,7 @@ class ComfyBridge(private val activity: Activity) {
         webView.destroy()
     }
 
-    private suspend fun evaluate(script: String, timeoutMillis: Long = 120_000L): String = withContext(Dispatchers.Main.immediate) {
+    private suspend fun evaluate(script: String, timeoutMillis: Long = 120_000L, startDelayMillis: Int = 250): String = withContext(Dispatchers.Main.immediate) {
         webView.onResume()
         webView.resumeTimers()
         val expectedRendererEpoch = rendererEpoch
@@ -677,7 +714,7 @@ class ComfyBridge(private val activity: Activity) {
                     delete window.__comfyMobileRunning[$quotedToken];
                   }
                 })();
-              }, 250);
+              }, $startDelayMillis);
               return 'started';
             })()
         """.trimIndent()
@@ -1672,6 +1709,18 @@ class ComfyBridge(private val activity: Activity) {
             allowedOrigin.isNotBlank() && currentUrl != "about:blank" &&
                 currentUrl.startsWith(allowedOrigin) && progress >= 100 &&
                 pageEpoch == finishedPageEpoch && attached
+
+        private val REUSE_SCRIPT = """
+            (() => {
+              const app = window.comfyAPI?.app?.app;
+              return !!(app && window.__comfyMobileApp === app && app.vueAppReady &&
+                (app.rootGraph || app.graph) && app.extensionManager?.spinner !== true &&
+                typeof app.extensionManager?.workflow?.getWorkflowByPath === 'function' &&
+                typeof app.extensionManager?.workflow?.syncWorkflows === 'function' &&
+                window.LiteGraph?.vueNodesMode !== true &&
+                app.ui?.settings?.getSettingValue?.('Comfy.VueNodes.Enabled') === false) ? 'ready' : 'unavailable';
+            })()
+        """.trimIndent()
 
         private val READY_SCRIPT = """
             (async () => {

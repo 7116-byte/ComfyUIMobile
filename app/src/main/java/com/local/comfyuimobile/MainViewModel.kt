@@ -284,6 +284,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val sameServerReconnect = requestedAddress != null && _state.value.activeServer?.baseUrl?.let {
             WorkflowDraftStore.normalizeServer(it) == WorkflowDraftStore.normalizeServer(requestedAddress)
         } == true
+        if (connectionJob?.isActive == true && requestedAddress == client.serverUrl()) return
         if ((generationJob?.isActive == true || workflowSaveJob?.isActive == true) && !sameServerReconnect) {
             _state.update { it.copy(notice = "请等待当前提交或保存操作完成后再切换服务器") }
             return
@@ -293,10 +294,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         reconnectJob?.cancel()
         connectionJob?.cancel()
         workflowLoadJob?.cancel()
-        bridgeLoadedPath = null
+        if (!sameServerReconnect) bridgeLoadedPath = null
         client.closeWebSocket()
         connectionJob = viewModelScope.launch {
             runOperation("连接失败") {
+                val connectionStartedAt = SystemClock.elapsedRealtime()
                 val activeBridge = bridge ?: error("前端桥接尚未初始化")
                 _state.update {
                     it.copy(
@@ -315,19 +317,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 setConnectionStep(2, "地址检查通过，正在读取服务器版本和显卡信息")
                 val (stats, profile) = client.probe(normalized)
 
-                bridgeOperationMutex.withLock {
-                    setConnectionStep(3, "服务器接口正常，正在打开 ComfyUI 网页")
-                    activeBridge.loadServer(normalized)
-
-                    setConnectionStep(4, "网页已经打开，正在初始化 ComfyUI 前端")
-                    activeBridge.awaitReady()
+                val reusedFrontend = bridgeOperationMutex.withLock {
+                    if (sameServerReconnect && activeBridge.tryReuseServer(normalized)) {
+                        setConnectionStep(4, "网页仍然就绪，正在恢复连接")
+                        true
+                    } else {
+                        bridgeLoadedPath = null
+                        setConnectionStep(3, "服务器接口正常，正在打开 ComfyUI 网页")
+                        activeBridge.loadServer(normalized)
+                        setConnectionStep(4, "网页已经打开，正在初始化 ComfyUI 前端")
+                        activeBridge.awaitReady()
+                        false
+                    }
                 }
 
-                setConnectionStep(5, "前端已经就绪，正在读取节点定义")
-                client.features()
-                require(client.objectInfo().length() > 0) { "服务器没有返回节点定义" }
-
-                setConnectionStep(6, "节点定义正常，正在保存连接并同步数据")
+                // ComfyUI already fetched and registered /object_info during setup.
+                // Downloading it again here discarded several MB on every connect.
+                setConnectionStep(6, "前端已经就绪，正在同步数据")
                 preferences.saveServer(profile)
                 _state.update {
                     val reconnectingSameServer = it.activeServer?.baseUrl?.let { currentUrl ->
@@ -346,22 +352,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         bridgeReady = true,
                         loading = false,
                         selectedWorkflow = sameServerDocument,
-                        previewWorkflow = sameServerDocument,
+                        previewWorkflow = if (reusedFrontend) it.previewWorkflow else sameServerDocument,
                         activeJobId = if (reconnectingSameServer) it.activeJobId else null,
                         currentExecutingNodeId = if (reconnectingSameServer) it.currentExecutingNodeId else null,
                         generationProgress = if (reconnectingSameServer) it.generationProgress else null,
                         generationMessage = if (reconnectingSameServer) it.generationMessage else "",
                         jobs = if (reconnectingSameServer) it.jobs else emptyList(),
-                        fields = sameServerDocument?.fields.orEmpty(),
+                        fields = if (reusedFrontend) it.fields else sameServerDocument?.fields.orEmpty(),
                         workflowDraftConflictRequired = if (sameServerDocument == null) false else it.workflowDraftConflictRequired,
                         workflowDraftConflictReason = if (sameServerDocument == null) "" else it.workflowDraftConflictReason,
                     )
                 }
                 takenOverJobIds.clear()
                 takenOverJobIds.addAll(TaskLifecycle.trackedIds(preferences.settings.first().trackedJobs, profile.baseUrl))
-                if (_state.value.selectedWorkflow != null) {
+                if (!reusedFrontend && _state.value.selectedWorkflow != null) {
                     restoreWorkingCopyAfterReconnect(activeBridge, profile.baseUrl)
                 }
+                AppLogger.info("服务器连接完成：复用前端=$reusedFrontend，耗时=${SystemClock.elapsedRealtime() - connectionStartedAt}ms")
                 openSocket()
                 refreshAll()
                 restoreNotificationWorkflow()
@@ -1886,7 +1893,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun scheduleReconnect() {
-        if (_state.value.activeServer == null || reconnectJob?.isActive == true) return
+        if (_state.value.activeServer == null || reconnectJob?.isActive == true || connectionJob?.isActive == true) return
         reconnectJob = viewModelScope.launch {
             _state.update {
                 it.copy(
@@ -1903,12 +1910,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val restored = runCatching {
                     val activeBridge = bridge ?: error("前端桥接不可用")
                     bridgeOperationMutex.withLock {
-                        activeBridge.loadServer(server.baseUrl, timeoutMillis = 20_000L)
-                        activeBridge.awaitReady(timeoutMillis = 45_000L)
-                        restoreWorkingCopyAfterReconnect(activeBridge, server.baseUrl, bridgeLocked = true)
+                        if (!activeBridge.tryReuseServer(server.baseUrl)) {
+                            bridgeLoadedPath = null
+                            activeBridge.loadServer(server.baseUrl, timeoutMillis = 20_000L)
+                            activeBridge.awaitReady(timeoutMillis = 45_000L)
+                            restoreWorkingCopyAfterReconnect(activeBridge, server.baseUrl, bridgeLocked = true)
+                        }
                     }
                 }.onFailure { error ->
-                    if (error !is CancellationException) AppLogger.error("重连后恢复本地工作副本失败", error)
+                    if (error is CancellationException) throw error
+                    AppLogger.error("重连后恢复本地工作副本失败", error)
                 }.isSuccess
                 if (!restored) continue
                 _state.update {

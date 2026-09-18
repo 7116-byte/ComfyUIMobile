@@ -2,7 +2,7 @@
 
 ComfyUI Mobile 是一个连接自有 ComfyUI 服务器的原生 Android 客户端。它把 ComfyUI 工作流转换成手机友好的纵向参数表单，不在主界面显示节点画布。
 
-> 当前版本：v0.1.62。针对 ComfyUI 0.36.0、ComfyUI Frontend 1.52.7 做了兼容修复。
+> 当前版本：v0.1.63。针对 ComfyUI 0.36.0、ComfyUI Frontend 1.52.7 做了兼容修复，并优化初始化、重连和图片全屏查看。
 
 ## 功能
 

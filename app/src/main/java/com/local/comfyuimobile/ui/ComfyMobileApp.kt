@@ -7,8 +7,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
 import android.provider.OpenableColumns
-import android.view.Window
-import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -43,6 +41,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -153,13 +158,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogWindowProvider
-import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -1449,7 +1448,6 @@ private fun ResultScreen(
     selectedAlbumId: String?,
     onSelectedAlbumChange: (String?) -> Unit,
 ) {
-    val hostView = LocalView.current
     var selectedMedia by remember { mutableStateOf<ResultMedia?>(null) }
     var selectedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
     var confirmDeleteSelection by remember { mutableStateOf(false) }
@@ -1472,7 +1470,6 @@ private fun ResultScreen(
         if (item.kind == MediaKind.IMAGE) {
             val images = context.filter { it.kind == MediaKind.IMAGE }
             galleryInitialIndex = images.indexOfFirst { (it.localPath ?: it.url) == (item.localPath ?: item.url) }.coerceAtLeast(0)
-            hostView.context.findActivity()?.window?.let { enterGalleryFullscreen(it, hostView) }
             galleryItems = images
         } else {
             selectedMedia = item
@@ -1738,7 +1735,7 @@ private fun albumTitle(album: ResultAlbum): String {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun ImageGalleryViewer(
     items: List<ResultMedia>,
@@ -1769,12 +1766,10 @@ private fun ImageGalleryViewer(
             saveFeedback = null
         }
     }
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
-    ) {
+    FullscreenGalleryDialog(onDismiss = onDismiss) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
-            GallerySystemBars()
+            // Reserve stable control insets even when system bars are transiently shown.
+            val controlInsets = WindowInsets.systemBarsIgnoringVisibility.union(WindowInsets.displayCutout)
             Box(Modifier.fillMaxSize()) {
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                     ZoomableGalleryImage(
@@ -1809,7 +1804,9 @@ private fun ImageGalleryViewer(
                 if (chromeVisible) {
                     Row(
                         Modifier.fillMaxWidth().align(Alignment.TopCenter)
-                            .background(Color.Black.copy(alpha = 0.62f)).padding(horizontal = 8.dp, vertical = 10.dp),
+                            .background(Color.Black.copy(alpha = 0.62f))
+                            .windowInsetsPadding(controlInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                            .padding(horizontal = 8.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
@@ -1831,6 +1828,7 @@ private fun ImageGalleryViewer(
                     Row(
                         Modifier.fillMaxWidth().align(Alignment.BottomCenter)
                             .background(Color.Black.copy(alpha = 0.68f))
+                            .windowInsetsPadding(controlInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                             .padding(horizontal = 4.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -1919,34 +1917,6 @@ private fun ImageGalleryViewer(
             confirmButton = { TextButton(onClick = { showInfo = false }) { Text("关闭") } },
         )
     }
-}
-
-@Composable
-private fun GallerySystemBars() {
-    val view = LocalView.current
-    val dialogWindow = remember(view) { (view.parent as? DialogWindowProvider)?.window }
-    val hostWindow = remember(view) { view.context.findActivity()?.window }
-    DisposableEffect(dialogWindow, hostWindow) {
-        dialogWindow?.let { enterGalleryFullscreen(it, view) }
-        hostWindow?.let { enterGalleryFullscreen(it, view) }
-        onDispose {
-            dialogWindow?.let { exitGalleryFullscreen(it, view) }
-            hostWindow?.let { exitGalleryFullscreen(it, view) }
-        }
-    }
-}
-
-private fun enterGalleryFullscreen(window: Window, view: android.view.View) {
-    window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-    WindowCompat.getInsetsController(window, view).apply {
-        systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        hide(WindowInsetsCompat.Type.systemBars())
-    }
-}
-
-private fun exitGalleryFullscreen(window: Window, view: android.view.View) {
-    window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-    WindowCompat.getInsetsController(window, view).show(WindowInsetsCompat.Type.systemBars())
 }
 
 private class GalleryTransformState {
