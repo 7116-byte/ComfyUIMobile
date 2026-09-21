@@ -16,6 +16,7 @@ import androidx.lifecycle.viewModelScope
 import com.local.comfyuimobile.bridge.ComfyBridge
 import com.local.comfyuimobile.bridge.AdvancedEditorSession
 import com.local.comfyuimobile.bridge.WorkflowImageReader
+import com.local.comfyuimobile.bridge.ImageListValue
 import com.local.comfyuimobile.data.AppPreferences
 import com.local.comfyuimobile.data.AppLogger
 import com.local.comfyuimobile.data.LocalResultCache
@@ -659,22 +660,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runOperation("文件上传失败") {
                 _state.update { it.copy(loading = true) }
-                val resolver = app.contentResolver
-                var size = -1L
-                val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-                    if (!cursor.moveToFirst()) null else {
-                        val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-                        if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex)
-                        cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
-                    }
-                } ?: "upload_${System.currentTimeMillis()}"
-                val mime = resolver.getType(uri)
-                val subfolder = "ComfyUIMobile/${UUID.randomUUID()}"
-                val result = client.upload(name, mime, size, { resolver.openInputStream(uri) ?: error("无法读取所选文件") }, subfolder)
-                updateField(field.key, listOf(result.subfolder, result.name).filter { it.isNotBlank() }.joinToString("/"))
-                _state.update { it.copy(loading = false, notice = "已上传 ${result.name}") }
+                val path = uploadUri(uri)
+                updateField(field.key, path)
+                _state.update { it.copy(loading = false, notice = "已上传 ${path.substringAfterLast('/')}") }
             }
         }
+    }
+
+    fun uploadImageListField(field: ParameterField, uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            runOperation("多图上传失败") {
+                _state.update { it.copy(loading = true) }
+                var value = field.displayValue
+                uris.forEachIndexed { index, uri ->
+                    _state.update { it.copy(notice = "正在上传第 ${index + 1}/${uris.size} 张参考图") }
+                    val path = uploadUri(uri)
+                    value = ImageListValue.append(value, listOf(path))
+                    updateField(field.key, value)
+                }
+                _state.update { it.copy(loading = false, notice = "已按顺序上传 ${uris.size} 张参考图") }
+            }
+        }
+    }
+
+    private suspend fun uploadUri(uri: Uri): String {
+        val resolver = app.contentResolver
+        var size = -1L
+        val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (!cursor.moveToFirst()) null else {
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex)
+                cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
+            }
+        } ?: "upload_${System.currentTimeMillis()}"
+        val mime = resolver.getType(uri)
+        val subfolder = "ComfyUIMobile/${UUID.randomUUID()}"
+        val result = client.upload(name, mime, size, { resolver.openInputStream(uri) ?: error("无法读取所选文件") }, subfolder)
+        return listOf(result.subfolder, result.name).filter(String::isNotBlank).joinToString("/")
     }
 
     fun finishAdvancedEditor(saved: Boolean) {

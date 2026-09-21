@@ -470,6 +470,7 @@ class ComfyBridge(private val activity: Activity) {
                     maximum = maximum,
                     step = step,
                     precision = item.optInt("precision", -1).takeIf { it >= 0 },
+                    imageListUpload = item.optBoolean("imageListUpload"),
                 )
                 val stored = layout.optJSONObject(key)
                 val label = stored?.optString("label").takeUnless { it.isNullOrBlank() }
@@ -1497,6 +1498,7 @@ class ComfyBridge(private val activity: Activity) {
                     max: numericOption('max'),
                     step: numericOption('step'),
                     precision: numericOption('precision'),
+                    imageListUpload: inputOptions?.image_list_upload === true,
                     linked: input?.link != null,
                   });
                 }

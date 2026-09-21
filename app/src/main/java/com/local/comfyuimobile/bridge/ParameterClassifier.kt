@@ -20,8 +20,10 @@ object ParameterClassifier {
         maximum: Double? = null,
         step: Double? = null,
         precision: Int? = null,
+        imageListUpload: Boolean = false,
     ): ParameterKind {
         val token = "$nodeType $name $widgetType".lowercase()
+        if (imageListUpload) return ParameterKind.IMAGE_LIST
         if (token.contains("image") && (token.contains("upload") || name.equals("image", true))) return ParameterKind.IMAGE
         if (token.contains("video") && (token.contains("upload") || name.equals("video", true))) return ParameterKind.VIDEO
         if (options.isNotEmpty() || widgetType.contains("combo", true)) return ParameterKind.COMBO
@@ -53,7 +55,7 @@ object ParameterClassifier {
     fun section(nodeType: String, name: String, kind: ParameterKind): ParameterSection {
         val normalized = name.lowercase()
         return if (
-            normalized in primaryNames || kind in setOf(ParameterKind.MULTILINE, ParameterKind.IMAGE, ParameterKind.VIDEO) ||
+            normalized in primaryNames || kind in setOf(ParameterKind.MULTILINE, ParameterKind.IMAGE, ParameterKind.IMAGE_LIST, ParameterKind.VIDEO) ||
             nodeType.contains("KSampler", true)
         ) ParameterSection.PRIMARY else ParameterSection.MORE
     }
@@ -77,6 +79,7 @@ object ParameterClassifier {
             "sampler_name" -> "采样器"
             "scheduler" -> "调度器"
             "image" -> "输入图片"
+            "images" -> "参考图片（按顺序）"
             "video" -> "输入视频"
             "filename_prefix" -> "文件名前缀"
             else -> original.ifBlank { name }

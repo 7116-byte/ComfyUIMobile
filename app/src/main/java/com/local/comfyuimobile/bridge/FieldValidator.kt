@@ -12,6 +12,7 @@ object FieldValidator {
                 ParameterKind.DECIMAL -> if (field.displayValue.toDoubleOrNull()?.isFinite() != true) "${field.label} 不是有效数字" else null
                 ParameterKind.COMBO -> if (field.options.isNotEmpty() && field.displayValue !in field.options) "${field.label} 的选项已经失效" else null
                 ParameterKind.IMAGE, ParameterKind.VIDEO -> if (field.displayValue.isBlank()) "${field.label} 尚未选择文件" else null
+                ParameterKind.IMAGE_LIST -> if (ImageListValue.parse(field.displayValue) == null) "${field.label} 的图片列表格式无效" else null
                 else -> null
             }
             if (message != null) add(FieldProblem(field.key, field.nodeId, message))

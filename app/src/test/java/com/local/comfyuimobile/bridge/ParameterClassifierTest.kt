@@ -31,6 +31,25 @@ class ParameterClassifierTest {
         )
     }
 
+    @Test fun recognizesCustomOrderedImageListUpload() {
+        assertEquals(
+            ParameterKind.IMAGE_LIST,
+            ParameterClassifier.kind(
+                nodeType = "QwenImage21MultiImageUpload",
+                name = "images",
+                widgetType = "string",
+                value = "[]",
+                options = emptyList(),
+                dataType = "STRING",
+                imageListUpload = true,
+            ),
+        )
+        assertEquals(
+            ParameterSection.PRIMARY,
+            ParameterClassifier.section("QwenImage21MultiImageUpload", "images", ParameterKind.IMAGE_LIST),
+        )
+    }
+
     @Test fun putsPromptMediaAndSamplerFieldsInPrimarySection() {
         assertEquals(ParameterSection.PRIMARY, ParameterClassifier.section("CLIPTextEncode", "text", ParameterKind.MULTILINE))
         assertEquals(ParameterSection.PRIMARY, ParameterClassifier.section("KSampler", "control_after_generate", ParameterKind.COMBO))

@@ -167,6 +167,7 @@ import com.local.comfyuimobile.MainViewModel
 import com.local.comfyuimobile.AdvancedEditorActivity
 import com.local.comfyuimobile.bridge.ComfyBridge
 import com.local.comfyuimobile.bridge.FieldValidator
+import com.local.comfyuimobile.bridge.ImageListValue
 import com.local.comfyuimobile.data.CachePolicy
 import com.local.comfyuimobile.data.RecentWorkflows
 import com.local.comfyuimobile.data.WorkflowBrowser
@@ -694,6 +695,13 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         if (uri != null && field != null) viewModel.uploadField(field, uri)
         uploadField = null
     }
+    val imageListUploadLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(maxItems = 16),
+    ) { uris ->
+        val field = uploadField
+        if (uris.isNotEmpty() && field != null) viewModel.uploadImageListField(field, uris)
+        uploadField = null
+    }
     val videoUploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         val field = uploadField
         if (uri != null && field != null) viewModel.uploadField(field, uri)
@@ -879,6 +887,10 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                                 if (field.kind == ParameterKind.VIDEO) {
                                     videoUploadLauncher.launch(
                                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly),
+                                    )
+                                } else if (field.kind == ParameterKind.IMAGE_LIST) {
+                                    imageListUploadLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                                     )
                                 } else {
                                     imageUploadLauncher.launch(
@@ -1234,6 +1246,7 @@ private fun ParameterEditor(
                     Text(if (field.kind == ParameterKind.VIDEO) "从视频相册选择并上传" else "从相册选择并上传")
                 }
             }
+            ParameterKind.IMAGE_LIST -> ImageListField(field, viewModel, onUpload)
             ParameterKind.MULTILINE -> MultilineTextField(
                 field,
                 viewModel,
@@ -2399,6 +2412,84 @@ private fun MoveWorkflowDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+@Composable
+private fun ImageListField(field: ParameterField, viewModel: MainViewModel, onUpload: () -> Unit) {
+    val images = ImageListValue.parse(field.displayValue)
+    if (images == null) {
+        Text(
+            "当前图片列表格式无效，请清空后重新选择",
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    } else if (images.isEmpty()) {
+        Text("尚未添加参考图；不添加时仍可作为纯文本生成", style = MaterialTheme.typography.bodySmall)
+    } else {
+        images.forEachIndexed { index, path ->
+            OutlinedCard(Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 10.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("${index + 1}.", style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.width(7.dp))
+                    Text(path, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 2)
+                    IconButton(
+                        onClick = {
+                            val reordered = images.toMutableList().also {
+                                val item = it.removeAt(index)
+                                it.add(index - 1, item)
+                            }
+                            viewModel.updateField(field.key, ImageListValue.encode(reordered))
+                        },
+                        enabled = !field.linked && index > 0,
+                        modifier = Modifier.size(34.dp),
+                    ) { Icon(Icons.Default.ArrowUpward, "前移", modifier = Modifier.size(18.dp)) }
+                    IconButton(
+                        onClick = {
+                            val reordered = images.toMutableList().also {
+                                val item = it.removeAt(index)
+                                it.add(index + 1, item)
+                            }
+                            viewModel.updateField(field.key, ImageListValue.encode(reordered))
+                        },
+                        enabled = !field.linked && index < images.lastIndex,
+                        modifier = Modifier.size(34.dp),
+                    ) { Icon(Icons.Default.ArrowDownward, "后移", modifier = Modifier.size(18.dp)) }
+                    IconButton(
+                        onClick = {
+                            viewModel.updateField(
+                                field.key,
+                                ImageListValue.encode(images.filterIndexed { itemIndex, _ -> itemIndex != index }),
+                            )
+                        },
+                        enabled = !field.linked,
+                        modifier = Modifier.size(34.dp),
+                    ) { Icon(Icons.Default.Delete, "移除", modifier = Modifier.size(18.dp)) }
+                }
+            }
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilledTonalButton(onClick = onUpload, enabled = !field.linked) {
+            Icon(Icons.Default.UploadFile, null)
+            Spacer(Modifier.width(6.dp))
+            Text("选择多张并上传")
+        }
+        if (!images.isNullOrEmpty()) {
+            OutlinedButton(
+                onClick = { viewModel.updateField(field.key, "[]") },
+                enabled = !field.linked,
+            ) { Text("清空") }
+        } else if (images == null) {
+            OutlinedButton(
+                onClick = { viewModel.updateField(field.key, "[]") },
+                enabled = !field.linked,
+            ) { Text("重置") }
+        }
+    }
+    Text("顺序会传给 Qwen：第 1 张是主图，提示词可用 <image1>、<image2>…引用", style = MaterialTheme.typography.labelSmall)
 }
 
 @Composable

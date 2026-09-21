@@ -30,7 +30,7 @@ data class WorkflowEntry(
     val modified: Double = 0.0,
 )
 
-enum class ParameterKind { TEXT, MULTILINE, INTEGER, DECIMAL, BOOLEAN, COMBO, IMAGE, VIDEO, UNSUPPORTED }
+enum class ParameterKind { TEXT, MULTILINE, INTEGER, DECIMAL, BOOLEAN, COMBO, IMAGE, IMAGE_LIST, VIDEO, UNSUPPORTED }
 enum class ParameterSection { PRIMARY, MORE }
 
 data class ParameterField(

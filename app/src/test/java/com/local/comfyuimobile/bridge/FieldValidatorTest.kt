@@ -23,6 +23,12 @@ class FieldValidatorTest {
         assertTrue(FieldValidator.problems(listOf(field("steps", ParameterKind.INTEGER, "x", linked = true))).isEmpty())
     }
 
+    @Test fun acceptsEmptyOrOrderedImageListsAndRejectsMalformedOnes() {
+        assertTrue(FieldValidator.problems(listOf(field("images", ParameterKind.IMAGE_LIST, "[]"))).isEmpty())
+        assertTrue(FieldValidator.problems(listOf(field("images", ParameterKind.IMAGE_LIST, "[\"a.png\",\"b.png\"]"))).isEmpty())
+        assertEquals(1, FieldValidator.problems(listOf(field("images", ParameterKind.IMAGE_LIST, "a.png"))).size)
+    }
+
     private fun field(
         name: String,
         kind: ParameterKind,
