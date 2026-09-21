@@ -21,11 +21,13 @@ object ParameterClassifier {
         step: Double? = null,
         precision: Int? = null,
         imageListUpload: Boolean = false,
+        multiline: Boolean = false,
     ): ParameterKind {
         val token = "$nodeType $name $widgetType".lowercase()
+        val fieldToken = "$name $widgetType".lowercase()
         if (imageListUpload) return ParameterKind.IMAGE_LIST
-        if (token.contains("image") && (token.contains("upload") || name.equals("image", true))) return ParameterKind.IMAGE
-        if (token.contains("video") && (token.contains("upload") || name.equals("video", true))) return ParameterKind.VIDEO
+        if (fieldToken.contains("image") && (fieldToken.contains("upload") || name.equals("image", true))) return ParameterKind.IMAGE
+        if (fieldToken.contains("video") && (fieldToken.contains("upload") || name.equals("video", true))) return ParameterKind.VIDEO
         if (options.isNotEmpty() || widgetType.contains("combo", true)) return ParameterKind.COMBO
         if (value is Boolean || widgetType.contains("toggle", true)) return ParameterKind.BOOLEAN
         when (dataType.trim().uppercase()) {
@@ -41,7 +43,7 @@ object ParameterClassifier {
         if (widgetType.contains("slider", true)) return ParameterKind.DECIMAL
         if (widgetType.equals("number", true) && value?.toString()?.toLongOrNull() != null) return ParameterKind.INTEGER
         if (value is String) {
-            return if (token.contains("multiline") || token.contains("cliptextencode") || name.equals("text", true)) {
+            return if (multiline || token.contains("multiline") || token.contains("cliptextencode") || name.equals("text", true)) {
                 ParameterKind.MULTILINE
             } else {
                 ParameterKind.TEXT
@@ -63,11 +65,12 @@ object ParameterClassifier {
     fun label(nodeTitle: String, name: String, original: String): String {
         val normalized = name.lowercase()
         return when (normalized) {
-            "text", "prompt" -> when {
+            "text", "prompt", "positive_prompt" -> when {
                 nodeTitle.contains("negative", true) || nodeTitle.contains("负", true) -> "负向提示词"
                 nodeTitle.contains("positive", true) || nodeTitle.contains("正", true) -> "正向提示词"
                 else -> "提示词"
             }
+            "negative_prompt" -> "负向提示词"
             "seed", "noise_seed" -> "种子"
             "control_after_generate" -> "生成后种子策略"
             "width" -> "宽度"
@@ -81,6 +84,7 @@ object ParameterClassifier {
             "image" -> "输入图片"
             "images" -> "参考图片（按顺序）"
             "video" -> "输入视频"
+            "resolution" -> "参考图分辨率"
             "filename_prefix" -> "文件名前缀"
             else -> original.ifBlank { name }
         }

@@ -1,3 +1,9 @@
+# v0.1.65
+
+- 修复 v0.1.64 将 Qwen Image 2.1 多图节点中的 `prompt`、`negative_prompt`、`resolution` 误判成图片上传字段的问题。
+- 图片上传识别范围从整个节点类型收紧到具体字段；现在只有声明 `image_list_upload=true` 的 `images` 显示多图上传。
+- `prompt`、`negative_prompt` 恢复为多行文本，`resolution` 恢复为整数输入；空负向提示词不再触发“尚未选择文件”，生成按钮可正常使用。
+
 # v0.1.64
 
 - 识别自定义节点定义中的 `image_list_upload` 字段；Qwen Image 2.1 多图上传节点不再被误当成普通文本框。

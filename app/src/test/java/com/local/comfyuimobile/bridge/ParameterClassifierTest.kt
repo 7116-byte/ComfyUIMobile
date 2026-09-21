@@ -50,6 +50,31 @@ class ParameterClassifierTest {
         )
     }
 
+    @Test fun doesNotTreatEveryFieldInAnImageUploadNodeAsMedia() {
+        val nodeType = "QwenImage21MultiImageUpload"
+        assertEquals(
+            ParameterKind.MULTILINE,
+            ParameterClassifier.kind(
+                nodeType, "prompt", "customtext", "编辑 <image1>", emptyList(),
+                dataType = "STRING", multiline = true,
+            ),
+        )
+        assertEquals(
+            ParameterKind.MULTILINE,
+            ParameterClassifier.kind(
+                nodeType, "negative_prompt", "customtext", "", emptyList(),
+                dataType = "STRING", multiline = true,
+            ),
+        )
+        assertEquals(
+            ParameterKind.INTEGER,
+            ParameterClassifier.kind(
+                nodeType, "resolution", "number", 1024, emptyList(),
+                dataType = "INT", minimum = 0.0, maximum = 4096.0, step = 32.0,
+            ),
+        )
+    }
+
     @Test fun putsPromptMediaAndSamplerFieldsInPrimarySection() {
         assertEquals(ParameterSection.PRIMARY, ParameterClassifier.section("CLIPTextEncode", "text", ParameterKind.MULTILINE))
         assertEquals(ParameterSection.PRIMARY, ParameterClassifier.section("KSampler", "control_after_generate", ParameterKind.COMBO))
@@ -60,6 +85,8 @@ class ParameterClassifierTest {
         assertEquals("负向提示词", ParameterClassifier.label("Negative Prompt", "text", "text"))
         assertEquals("采样步数", ParameterClassifier.label("KSampler", "steps", "steps"))
         assertEquals("输入图片", ParameterClassifier.label("LoadImage", "image", "image"))
+        assertEquals("负向提示词", ParameterClassifier.label("Qwen Image 2.1 多图上传编码", "negative_prompt", "negative_prompt"))
+        assertEquals("参考图分辨率", ParameterClassifier.label("Qwen Image 2.1 多图上传编码", "resolution", "resolution"))
         assertEquals("custom gain", ParameterClassifier.label("Custom", "gain", "custom gain"))
     }
 }

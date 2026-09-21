@@ -471,6 +471,7 @@ class ComfyBridge(private val activity: Activity) {
                     step = step,
                     precision = item.optInt("precision", -1).takeIf { it >= 0 },
                     imageListUpload = item.optBoolean("imageListUpload"),
+                    multiline = item.optBoolean("multiline"),
                 )
                 val stored = layout.optJSONObject(key)
                 val label = stored?.optString("label").takeUnless { it.isNullOrBlank() }
@@ -1499,6 +1500,7 @@ class ComfyBridge(private val activity: Activity) {
                     step: numericOption('step'),
                     precision: numericOption('precision'),
                     imageListUpload: inputOptions?.image_list_upload === true,
+                    multiline: inputOptions?.multiline === true || widget.options?.multiline === true,
                     linked: input?.link != null,
                   });
                 }
