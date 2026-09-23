@@ -54,6 +54,7 @@ import com.local.comfyuimobile.network.PromptSubmissionException
 import com.local.comfyuimobile.network.ProgressStateParser
 import com.local.comfyuimobile.service.JobMonitorService
 import com.local.comfyuimobile.service.JobNotificationNavigation
+import com.local.comfyuimobile.bridge.RgthreeSeedPolicy
 import com.local.comfyuimobile.update.UpdateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -80,6 +81,7 @@ import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application
@@ -118,6 +120,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var workflowLoadJob: Job? = null
     private var connectionJob: Job? = null
     private var networkChangeJob: Job? = null
+    private val networkChangedDuringConnect = AtomicBoolean(false)
     private var updateCleanupJob: Job? = null
     private val taskRefreshMutex = Mutex()
     private val completionMessages = ConcurrentHashMap<String, String>()
@@ -211,16 +214,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         _state.update {
             it.copy(
-                navigationRequest = AppNavigationRequest(
-                    id = SystemClock.elapsedRealtimeNanos(),
-                    destination = JobNotificationNavigation.destination(completed),
+                navigationRequest = JobNotificationNavigation.request(
+                    SystemClock.elapsedRealtimeNanos(), promptId, completed,
                 ),
             )
         }
-        if (!completed) {
-            pendingNotificationJobId = promptId.takeIf(String::isNotBlank)
-            pendingNotificationWorkflowPath = workflowPath.takeIf(String::isNotBlank)
-        }
+        pendingNotificationJobId = if (completed) null else promptId.takeIf(String::isNotBlank)
+        pendingNotificationWorkflowPath = if (completed) null else workflowPath.takeIf(String::isNotBlank)
 
         val normalized = runCatching { LanAddress.normalize(baseUrl) }.getOrNull()
         val current = _state.value
@@ -247,6 +247,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openAdvancedEditor() {
         if (_state.value.loading || _state.value.generating || generationJob?.isActive == true) return
+        if (!_state.value.bridgeReady) return
         val document = _state.value.selectedWorkflow ?: return
         _state.value.activeServer ?: return
         val activeBridge = bridge ?: return
@@ -297,6 +298,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         workflowLoadJob?.cancel()
         if (!sameServerReconnect) bridgeLoadedPath = null
         client.closeWebSocket()
+        networkChangedDuringConnect.set(false)
         connectionJob = viewModelScope.launch {
             runOperation("连接失败") {
                 val connectionStartedAt = SystemClock.elapsedRealtime()
@@ -318,23 +320,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 setConnectionStep(2, "地址检查通过，正在读取服务器版本和显卡信息")
                 val (stats, profile) = client.probe(normalized)
 
-                val reusedFrontend = bridgeOperationMutex.withLock {
-                    if (sameServerReconnect && activeBridge.tryReuseServer(normalized)) {
-                        setConnectionStep(4, "网页仍然就绪，正在恢复连接")
-                        true
-                    } else {
-                        bridgeLoadedPath = null
-                        setConnectionStep(3, "服务器接口正常，正在打开 ComfyUI 网页")
-                        activeBridge.loadServer(normalized)
-                        setConnectionStep(4, "网页已经打开，正在初始化 ComfyUI 前端")
-                        activeBridge.awaitReady()
-                        false
-                    }
-                }
-
-                // ComfyUI already fetched and registered /object_info during setup.
-                // Downloading it again here discarded several MB on every connect.
-                setConnectionStep(6, "前端已经就绪，正在同步数据")
+                // The server APIs are usable before the full ComfyUI browser app
+                // finishes registering its custom nodes. Let the user browse
+                // the small workflow directory while the hidden WebView warms up;
+                // defer the potentially large history download until it is ready.
                 preferences.saveServer(profile)
                 _state.update {
                     val reconnectingSameServer = it.activeServer?.baseUrl?.let { currentUrl ->
@@ -346,33 +335,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     it.copy(
                         status = ConnectionStatus.CONNECTED,
-                        connectionMessage = "已连接 ${profile.name}",
-                        connectionStep = it.connectionTotalSteps,
+                        connectionMessage = "服务器已连接，工作流前端正在后台初始化",
+                        connectionStep = 3,
                         activeServer = profile,
                         systemStats = stats,
-                        bridgeReady = true,
+                        bridgeReady = false,
                         loading = false,
                         selectedWorkflow = sameServerDocument,
-                        previewWorkflow = if (reusedFrontend) it.previewWorkflow else sameServerDocument,
+                        previewWorkflow = if (reconnectingSameServer) it.previewWorkflow else sameServerDocument,
                         activeJobId = if (reconnectingSameServer) it.activeJobId else null,
                         currentExecutingNodeId = if (reconnectingSameServer) it.currentExecutingNodeId else null,
                         generationProgress = if (reconnectingSameServer) it.generationProgress else null,
                         generationMessage = if (reconnectingSameServer) it.generationMessage else "",
                         jobs = if (reconnectingSameServer) it.jobs else emptyList(),
-                        fields = if (reusedFrontend) it.fields else sameServerDocument?.fields.orEmpty(),
-                        workflowDraftConflictRequired = if (sameServerDocument == null) false else it.workflowDraftConflictRequired,
+                        fields = sameServerDocument?.fields.orEmpty(),
+                        workflowDraftConflictRequired = sameServerDocument != null && it.workflowDraftConflictRequired,
                         workflowDraftConflictReason = if (sameServerDocument == null) "" else it.workflowDraftConflictReason,
                     )
                 }
                 takenOverJobIds.clear()
                 takenOverJobIds.addAll(TaskLifecycle.trackedIds(preferences.settings.first().trackedJobs, profile.baseUrl))
+                viewModelScope.launch { refreshWorkflowsInternal() }
+                AppLogger.info("服务器接口已连接：首页可用，耗时=${SystemClock.elapsedRealtime() - connectionStartedAt}ms")
+
+                val reusedFrontend = bridgeOperationMutex.withLock {
+                    if (sameServerReconnect && activeBridge.tryReuseServer(normalized)) {
+                        _state.update { it.copy(connectionStep = 4, connectionMessage = "网页仍然就绪，正在恢复连接") }
+                        true
+                    } else {
+                        bridgeLoadedPath = null
+                        _state.update { it.copy(connectionStep = 3, connectionMessage = "正在打开 ComfyUI 网页") }
+                        activeBridge.loadServer(normalized)
+                        _state.update { it.copy(connectionStep = 4, connectionMessage = "网页已经打开，正在初始化 ComfyUI 前端") }
+                        activeBridge.awaitReady()
+                        false
+                    }
+                }
+
                 if (!reusedFrontend && _state.value.selectedWorkflow != null) {
-                    restoreWorkingCopyAfterReconnect(activeBridge, profile.baseUrl)
+                    bridgeOperationMutex.withLock {
+                        restoreWorkingCopyAfterReconnect(activeBridge, profile.baseUrl, bridgeLocked = true)
+                    }
+                }
+                _state.update {
+                    it.copy(
+                        connectionMessage = "已连接 ${profile.name}",
+                        connectionStep = it.connectionTotalSteps,
+                        bridgeReady = true,
+                        previewWorkflow = if (reusedFrontend) it.previewWorkflow else it.selectedWorkflow,
+                    )
                 }
                 AppLogger.info("服务器连接完成：复用前端=$reusedFrontend，耗时=${SystemClock.elapsedRealtime() - connectionStartedAt}ms")
                 openSocket()
                 refreshAll()
                 restoreNotificationWorkflow()
+            }
+            val retryAfterNetworkChange = networkChangedDuringConnect.getAndSet(false) &&
+                _state.value.status == ConnectionStatus.ERROR
+            val retryAddress = requestedAddress
+            if (retryAfterNetworkChange && retryAddress != null) {
+                viewModelScope.launch {
+                    delay(250)
+                    if (_state.value.status == ConnectionStatus.ERROR && client.serverUrl() == retryAddress) {
+                        connect(retryAddress)
+                    }
+                }
             }
         }
     }
@@ -465,9 +492,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onNetworkAvailableAfterChange() {
         val current = _state.value
         if (current.activeServer == null && current.status !in setOf(ConnectionStatus.ERROR, ConnectionStatus.RECONNECTING)) return
+        if (connectionJob?.isActive == true) {
+            networkChangedDuringConnect.set(true)
+            return
+        }
         networkChangeJob?.cancel()
         networkChangeJob = viewModelScope.launch {
             delay(350)
+            if (connectionJob?.isActive == true) {
+                networkChangedDuringConnect.set(true)
+                return@launch
+            }
             _state.update { it.copy(connectionMessage = "网络已变化，正在重新连接", error = null) }
             reconnectNow()
         }
@@ -811,6 +846,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.value.generating || _state.value.loading ||
             generationJob?.isActive == true || workflowSaveJob?.isActive == true
         ) return
+        if (!_state.value.bridgeReady) {
+            _state.update { it.copy(notice = "工作流前端仍在初始化，请稍后再生成") }
+            return
+        }
         val workflow = _state.value.selectedWorkflow ?: return
         AppLogger.info("开始提交生成：${workflow.entry.path}")
         _state.update {
@@ -829,7 +868,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     (bridge ?: error("前端桥接不可用")).buildPrompt(_state.value.fields)
                 }
                 _state.update { ui ->
-                    ui.copy(selectedWorkflow = ui.selectedWorkflow?.copy(rawJson = generated.workflowJson))
+                    ui.copy(selectedWorkflow = ui.selectedWorkflow?.copy(
+                        rawJson = RgthreeSeedPolicy.preserveModes(generated.workflowJson, ui.fields),
+                    ))
                 }
                 val response = try {
                     client.queuePrompt(

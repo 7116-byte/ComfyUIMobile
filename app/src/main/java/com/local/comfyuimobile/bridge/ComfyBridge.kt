@@ -9,8 +9,10 @@ import android.os.SystemClock
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.ConsoleMessage
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
+import android.webkit.WebChromeClient
 import android.webkit.WebViewClient
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,6 +72,8 @@ class ComfyBridge(private val activity: Activity) {
     @Volatile private var rendererEpoch: Int = 0
     @Volatile private var pageEpoch: Int = 0
     @Volatile private var finishedPageEpoch: Int = -1
+    @Volatile private var pageStartedAtMillis: Long = 0L
+    private var consoleMessagesThisPage: Int = 0
     @Volatile var lastLinkRepairReport: LinkRepairReport? = null
         private set
     private val pendingImageImports = ConcurrentHashMap<String, PendingImageImport>()
@@ -89,10 +93,28 @@ class ComfyBridge(private val activity: Activity) {
         target.settings.mediaPlaybackRequiresUserGesture = false
         target.settings.allowFileAccess = false
         target.settings.allowContentAccess = false
+        target.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                if (message.messageLevel() != ConsoleMessage.MessageLevel.ERROR &&
+                    message.messageLevel() != ConsoleMessage.MessageLevel.WARNING
+                ) return false
+                if (!AppLogger.isEnabled(activity)) return false
+                if (consoleMessagesThisPage++ >= 40) return false
+                val source = runCatching { Uri.parse(message.sourceId()).path }.getOrNull().orEmpty()
+                AppLogger.info(
+                    "ComfyUI 前端控制台：级别=${message.messageLevel()}，" +
+                        "资源=${source.takeLast(180)}，行=${message.lineNumber()}，" +
+                        "内容=${message.message().take(500)}",
+                )
+                return false
+            }
+        }
         target.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 pageEpoch += 1
                 finishedPageEpoch = -1
+                pageStartedAtMillis = SystemClock.elapsedRealtime()
+                consoleMessagesThisPage = 0
                 pageLoadError = null
                 AppLogger.info("ComfyUI 网页开始加载：轮次=$pageEpoch，地址=${url.orEmpty()}")
                 super.onPageStarted(view, url, favicon)
@@ -102,7 +124,8 @@ class ComfyBridge(private val activity: Activity) {
                 finishedPageEpoch = pageEpoch
                 AppLogger.info(
                     "ComfyUI 网页完成加载：轮次=$pageEpoch，进度=${view.progress}%，" +
-                        "已挂载=${view.isAttachedToWindow}，地址=${url.orEmpty()}",
+                        "已挂载=${view.isAttachedToWindow}，页面耗时=" +
+                        "${SystemClock.elapsedRealtime() - pageStartedAtMillis}ms，地址=${url.orEmpty()}",
                 )
                 super.onPageFinished(view, url)
             }
@@ -241,6 +264,7 @@ class ComfyBridge(private val activity: Activity) {
         val deadline = System.currentTimeMillis() + timeoutMillis
         var lastError = "ComfyUI 前端尚未初始化"
         var loggedError = ""
+        var lastDetailsLogAt = 0L
         while (System.currentTimeMillis() < deadline) {
             val remaining = deadline - System.currentTimeMillis()
             val response = runCatching {
@@ -253,17 +277,62 @@ class ComfyBridge(private val activity: Activity) {
             }
             val json = runCatching { JSONObject(response) }.getOrNull()
             if (json?.optBoolean("ok") == true) {
-                AppLogger.info("ComfyUI 前端就绪：耗时=${SystemClock.elapsedRealtime() - startedAt}ms")
+                AppLogger.info(
+                    "ComfyUI 前端就绪：耗时=${SystemClock.elapsedRealtime() - startedAt}ms，" +
+                        "前端状态=${json.optJSONObject("details") ?: "无"}",
+                )
+                if (AppLogger.isEnabled(activity)) logFrontendResourceTiming()
                 return
             }
             lastError = json?.optString("error").takeUnless { it.isNullOrBlank() } ?: lastError
-            if (lastError != loggedError) {
-                AppLogger.info("ComfyUI 初始化等待：$lastError，已耗时=${SystemClock.elapsedRealtime() - startedAt}ms")
+            val now = SystemClock.elapsedRealtime()
+            if (lastError != loggedError || now - lastDetailsLogAt >= 5_000L) {
+                AppLogger.info(
+                    "ComfyUI 初始化等待：$lastError，已耗时=${now - startedAt}ms，" +
+                        "前端状态=${json?.optJSONObject("details") ?: "脚本未返回状态"}",
+                )
                 loggedError = lastError
+                lastDetailsLogAt = now
             }
             delay(200)
         }
         throw IllegalStateException("前端桥接超时：$lastError")
+    }
+
+    private suspend fun logFrontendResourceTiming() {
+        val script = """
+            (() => {
+              const resources = performance.getEntriesByType('resource');
+              const extensions = resources.filter(item => item.name.includes('/extensions/'));
+              const assets = resources.filter(item => item.name.includes('/assets/'));
+              const navigation = performance.getEntriesByType('navigation')[0];
+              const slowest = [...resources].sort((a, b) => b.duration - a.duration).slice(0, 6)
+                .map(item => ({
+                  path: (() => { try { return new URL(item.name).pathname; } catch (_) { return 'unknown'; } })(),
+                  type: item.initiatorType,
+                  durationMs: Math.round(item.duration)
+                }));
+              return JSON.stringify({
+                pageMs: Math.round(performance.now()),
+                domReadyMs: Math.round(navigation?.domContentLoadedEventEnd || 0),
+                loadMs: Math.round(navigation?.loadEventEnd || 0),
+                requestMs: Math.round(navigation?.responseEnd - navigation?.requestStart || 0),
+                resourceCount: resources.length,
+                extensionCount: extensions.length,
+                assetCount: assets.length,
+                slowestExtensionMs: Math.round(Math.max(0, ...extensions.map(item => item.duration))),
+                slowestAssetMs: Math.round(Math.max(0, ...assets.map(item => item.duration))),
+                slowest
+              });
+            })()
+        """.trimIndent()
+        val summary = runCatching {
+            withContext(Dispatchers.Main.immediate) {
+                withTimeoutOrNull(1_500L) { evaluateImmediate(script) }
+            }
+        }.getOrNull()
+        currentCoroutineContext().ensureActive()
+        if (!summary.isNullOrBlank()) AppLogger.info("ComfyUI 页面资源耗时：$summary")
     }
 
     suspend fun refreshVisibleViewport() = withContext(Dispatchers.Main.immediate) {
@@ -1635,6 +1704,14 @@ class ComfyBridge(private val activity: Activity) {
                 try { restore(); } catch (_) {}
               }
             }
+            // rgthree random/last-seed modes are resolved by its queuePrompt hook,
+            // not by graphToPrompt or widget.beforeQueued. Native HTTP submission
+            // bypasses api.queuePrompt, so run the same pre-queue event here.
+            setPhase('执行 rgthree 排队前回调');
+            window.rgthree?.dispatchCustomEvent?.('comfy-api-queue-prompt-before', {
+              workflow: result.workflow,
+              output: result.output,
+            });
             const relevantIds = window.__comfyMobileRelevantNodeIds || new Set();
             if (!Object.keys(result.output || {}).length) {
               return JSON.stringify({ok:false, error:'当前工作流没有可执行的输出链'});
@@ -1730,15 +1807,40 @@ class ComfyBridge(private val activity: Activity) {
             (async () => {
               try {
                 const app = window.comfyAPI?.app?.app;
-                if (!(app?.rootGraph || app?.graph)) return JSON.stringify({ok:false,error:'工作流画布尚未就绪'});
+                const read = (getter) => { try { return getter(); } catch (_) { return null; } };
+                const details = () => {
+                  const manager = read(() => app?.extensionManager);
+                  const store = read(() => manager?.workflow);
+                  const tabs = read(() => store?.openWorkflows);
+                  const nav = typeof performance === 'undefined' ? null :
+                    read(() => performance.getEntriesByType('navigation')[0]);
+                  return {
+                    pageMs: typeof performance === 'undefined' ? null : Math.round(performance.now()),
+                    documentState: read(() => document.readyState),
+                    graphReady: !!(app?.rootGraph || app?.graph),
+                    vueReady: read(() => app?.vueAppReady),
+                    managerReady: !!manager,
+                    spinner: read(() => manager?.spinner),
+                    storeReady: !!store,
+                    workflowCount: read(() => store?.workflows?.length),
+                    tabCount: Array.isArray(tabs) ? tabs.length : null,
+                    invalidTabs: Array.isArray(tabs) ? tabs.filter(item => !item?.path).length : null,
+                    activeWorkflow: read(() => store?.activeWorkflow?.path),
+                    locale: read(() => app?.ui?.settings?.getSettingValue?.('Comfy.Locale')),
+                    vueNodes: read(() => app?.ui?.settings?.getSettingValue?.('Comfy.VueNodes.Enabled')),
+                    navigationLoadMs: nav ? Math.round(nav.loadEventEnd || 0) : null,
+                  };
+                };
+                const pending = error => JSON.stringify({ok:false,error,details:details()});
+                if (!(app?.rootGraph || app?.graph)) return pending('工作流画布尚未就绪');
                 const workspace = app.extensionManager;
                 if (!app.vueAppReady || !workspace) {
-                  return JSON.stringify({ok:false,error:'ComfyUI 网页应用尚未就绪'});
+                  return pending('ComfyUI 网页应用尚未就绪');
                 }
                 if (workspace.spinner === true) {
                   delete window.__comfyMobileReadySince;
                   delete window.__comfyMobileReadyKey;
-                  return JSON.stringify({ok:false,error:'ComfyUI 正在恢复工作流标签'});
+                  return pending('ComfyUI 前端管理器仍在加载（spinner=true）');
                 }
                 const settings = app?.ui?.settings;
                 const locale = settings?.getSettingValue?.('Comfy.Locale');
@@ -1747,7 +1849,7 @@ class ComfyBridge(private val activity: Activity) {
                   delete window.__comfyMobileReadyKey;
                   if (typeof settings?.setSettingValueAsync === 'function') await settings.setSettingValueAsync('Comfy.Locale', 'zh');
                   else settings?.setSettingValue?.('Comfy.Locale', 'zh');
-                  return JSON.stringify({ok:false,error:'正在切换 ComfyUI 网页语言'});
+                  return pending('正在切换 ComfyUI 网页语言');
                 }
                 // A fresh WebView profile enables Nodes 2.0 by default in
                 // Frontend 1.45.21, while the user's working browser uses the
@@ -1764,30 +1866,30 @@ class ComfyBridge(private val activity: Activity) {
                   } else {
                     settings?.setSettingValue?.('Comfy.VueNodes.Enabled', false);
                   }
-                  return JSON.stringify({ok:false,error:'正在切换为与浏览器一致的经典节点画布'});
+                  return pending('正在切换为与浏览器一致的经典节点画布');
                 }
                 const modernNodeElements = document.querySelectorAll('[data-node-id]').length;
                 if (window.LiteGraph?.vueNodesMode === true || modernNodeElements > 0) {
                   delete window.__comfyMobileReadySince;
                   delete window.__comfyMobileReadyKey;
-                  return JSON.stringify({ok:false,error:'正在等待经典节点画布接管'});
+                  return pending('正在等待经典节点画布接管');
                 }
                 const workflowStore = workspace.workflow;
                 if (!workflowStore?.getWorkflowByPath || !workflowStore?.syncWorkflows) {
-                  return JSON.stringify({ok:false,error:'ComfyUI 工作流仓库尚未就绪'});
+                  return pending('ComfyUI 工作流仓库尚未就绪');
                 }
                 const readyKey = String(workflowStore.activeWorkflow?.path || '') + ':' +
                   String(workflowStore.workflows?.length || 0);
                 if (window.__comfyMobileReadyKey !== readyKey) {
                   window.__comfyMobileReadyKey = readyKey;
                   window.__comfyMobileReadySince = Date.now();
-                  return JSON.stringify({ok:false,error:'正在等待 ComfyUI 工作流状态稳定'});
+                  return pending('正在等待 ComfyUI 工作流状态稳定');
                 }
                 if (Date.now() - Number(window.__comfyMobileReadySince || 0) < 750) {
-                  return JSON.stringify({ok:false,error:'正在等待 ComfyUI 工作流状态稳定'});
+                  return pending('正在等待 ComfyUI 工作流状态稳定');
                 }
                 window.__comfyMobileApp = app;
-                return JSON.stringify({ok:true});
+                return JSON.stringify({ok:true,details:details()});
               } catch (error) {
                 return JSON.stringify({ok:false,error:'前端初始化错误：' + String(error)});
               }

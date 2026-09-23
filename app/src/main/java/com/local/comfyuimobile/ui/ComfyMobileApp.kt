@@ -411,7 +411,23 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
             AppDestination.PARAMETERS -> MainPage.PARAMETERS
             AppDestination.RESULTS -> MainPage.RESULTS
         }
+        if (request.destination == AppDestination.RESULTS && request.jobId != null) {
+            resultLayout = ResultLayout.ALBUMS
+            resultAlbumId = request.jobId
+            resultSource = if (state.localResults.any { it.jobId == request.jobId }) {
+                ResultSource.LOCAL
+            } else {
+                ResultSource.CLOUD
+            }
+            viewModel.refreshResults()
+            viewModel.refreshLocalResults()
+        }
         viewModel.consumeNavigationRequest(request.id)
+    }
+    LaunchedEffect(resultAlbumId, state.localResults, state.results) {
+        val jobId = resultAlbumId ?: return@LaunchedEffect
+        if (state.localResults.any { it.jobId == jobId }) resultSource = ResultSource.LOCAL
+        else if (state.results.any { it.jobId == jobId }) resultSource = ResultSource.CLOUD
     }
     Scaffold(
         topBar = {
@@ -424,6 +440,15 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
                                 state.generationMessage.isNotBlank() && !state.generationMessage.startsWith("生成失败")
                             ) {
                                 state.generationMessage
+                            } else if (!state.bridgeReady && state.status == ConnectionStatus.ERROR) {
+                                if (state.connectionStep < 3) "服务器连接失败 · 请点重连"
+                                else "工作流前端初始化失败 · 请点重连"
+                            } else if (state.status == ConnectionStatus.RECONNECTING) {
+                                "正在重连"
+                            } else if (state.status == ConnectionStatus.CONNECTING) {
+                                "正在连接服务器"
+                            } else if (!state.bridgeReady) {
+                                "服务器已连接 · 工作流前端初始化中"
                             } else when (state.status) {
                                 ConnectionStatus.CONNECTED -> "在线 · 队列 ${state.queueRemaining} · ${state.systemStats?.comfyVersion.orEmpty()}"
                                 ConnectionStatus.RECONNECTING -> "正在重连"
@@ -499,6 +524,11 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
     var dialogText by remember { mutableStateOf("") }
     var exportRaw by remember { mutableStateOf<String?>(null) }
     var selectedEntryPath by rememberSaveable(state.activeServer?.baseUrl) { mutableStateOf<String?>(null) }
+    BackHandler(enabled = currentFolder != WorkflowBrowser.ROOT) {
+        currentFolder = WorkflowBrowser.up(currentFolder)
+        search = ""
+        selectedEntryPath = null
+    }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val name = displayName(context, uri) ?: "imported.json"
@@ -524,6 +554,26 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
         actionEntry?.let { WorkflowPath.availableFolders(state.workflows, it.path) }.orEmpty()
     }
     Column(Modifier.fillMaxSize()) {
+        if (!state.bridgeReady) {
+            OutlinedCard(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        when (state.status) {
+                            ConnectionStatus.ERROR -> if (state.connectionStep < 3) {
+                                "服务器连接失败，请点右上角重连"
+                            } else {
+                                "工作流前端初始化失败，请点右上角重连"
+                            }
+                            ConnectionStatus.RECONNECTING -> "连接中断，正在重连；当前工作流会尽量保留"
+                            ConnectionStatus.CONNECTING -> "正在连接服务器；连接完成后会自动读取工作流"
+                            else -> "服务器已连接，可先浏览工作流；参数编辑会等待前端就绪"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (state.status != ConnectionStatus.ERROR) LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+            }
+        }
         OutlinedTextField(
             value = search,
             onValueChange = { search = it },
@@ -1521,7 +1571,7 @@ private fun ResultScreen(
             }
         } else {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (selectedAlbum != null) {
+                if (selectedAlbumId != null) {
                     TextButton(onClick = { onSelectedAlbumChange(null) }) { Text("‹ 返回相册") }
                 } else {
                     Text(
@@ -1549,6 +1599,7 @@ private fun ResultScreen(
                     onToggleSelection = { toggleSelection(listOf(it)) },
                 )
             }
+            selectedAlbumId != null -> EmptyState(Icons.Default.Image, "正在读取此任务的结果；如果云端也没有，请确认任务已完成并刷新")
             media.isEmpty() -> EmptyState(
                 Icons.Default.Image,
                 if (source == ResultSource.LOCAL) "暂无本地作品\n请在参数页长按输出部件加入全工作流保存白名单" else "云端暂无图片或视频",

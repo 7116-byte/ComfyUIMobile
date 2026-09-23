@@ -31,7 +31,10 @@ async function main() {
   const reuse = () => vm.runInNewContext(script('REUSE_SCRIPT'), f.context) === 'ready';
   assert.equal(reuse(), false, 'an uninitialized context cannot skip readiness');
   const ready = () => vm.runInNewContext(script('READY_SCRIPT'), f.context).then(JSON.parse);
-  assert.equal((await ready()).ok, false, 'cold page waits for its first stable state');
+  const cold = await ready();
+  assert.equal(cold.ok, false, 'cold page waits for its first stable state');
+  assert.equal(cold.details.graphReady, true, 'wait logs distinguish graph from workflow readiness');
+  assert.equal(cold.details.spinner, false);
   f.tick();
   assert.equal((await ready()).ok, true);
   assert.equal(reuse(), true, 'a healthy page can reconnect without reloading');
@@ -39,6 +42,9 @@ async function main() {
   assert.equal(f.graph.nodes[0].value, 0.54, 'probe must preserve unsaved parameters');
   f.app.extensionManager.spinner = true;
   assert.equal(reuse(), false, 'an in-progress graph restore must not be treated as ready');
+  const busy = await ready();
+  assert.equal(busy.details.spinner, true);
+  assert.match(busy.error, /spinner=true/, 'busy state is reported without guessing tab restoration');
   f.app.extensionManager.spinner = false;
   f.context.window.__comfyMobileApp = {};
   assert.equal(reuse(), false, 'old app object after navigation cannot be reused');

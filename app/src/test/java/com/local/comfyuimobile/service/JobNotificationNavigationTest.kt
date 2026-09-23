@@ -19,6 +19,10 @@ class JobNotificationNavigationTest {
     @Test fun runningAndCompletedNotificationsOpenExpectedPages() {
         assertEquals(AppDestination.PARAMETERS, JobNotificationNavigation.destination(completed = false))
         assertEquals(AppDestination.RESULTS, JobNotificationNavigation.destination(completed = true))
+        val completed = JobNotificationNavigation.request(7L, "prompt-one", completed = true)
+        assertEquals(AppDestination.RESULTS, completed.destination)
+        assertEquals("prompt-one", completed.jobId)
+        assertEquals("prompt-one", JobNotificationNavigation.request(8L, "prompt-one", completed = false).jobId)
     }
 
     @Test fun differentJobsDoNotSharePendingIntentRequestCode() {

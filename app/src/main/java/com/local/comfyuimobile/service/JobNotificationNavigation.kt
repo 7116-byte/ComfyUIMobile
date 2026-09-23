@@ -2,6 +2,7 @@ package com.local.comfyuimobile.service
 
 import android.content.Intent
 import com.local.comfyuimobile.model.AppDestination
+import com.local.comfyuimobile.model.AppNavigationRequest
 
 /** 通知点击必须复用已有主页面，不能重新创建一套应用状态。 */
 object JobNotificationNavigation {
@@ -10,6 +11,9 @@ object JobNotificationNavigation {
 
     fun destination(completed: Boolean): AppDestination =
         if (completed) AppDestination.RESULTS else AppDestination.PARAMETERS
+
+    fun request(id: Long, promptId: String, completed: Boolean): AppNavigationRequest =
+        AppNavigationRequest(id, destination(completed), promptId.takeIf(String::isNotBlank))
 
     fun requestCode(promptId: String): Int = promptId.hashCode()
 

@@ -114,6 +114,7 @@ enum class AppDestination { PARAMETERS, RESULTS }
 data class AppNavigationRequest(
     val id: Long,
     val destination: AppDestination,
+    val jobId: String? = null,
 )
 
 enum class MediaKind { IMAGE, VIDEO }

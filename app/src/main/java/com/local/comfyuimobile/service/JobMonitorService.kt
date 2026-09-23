@@ -40,6 +40,7 @@ class JobMonitorService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val client = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS).build()
     private val monitors = ConcurrentHashMap<String, Job>()
+    private val savingJobs = ConcurrentHashMap.newKeySet<String>()
     private val workflowNames = ConcurrentHashMap<String, String>()
     private val workflowPaths = ConcurrentHashMap<String, String>()
     private val serverUrls = ConcurrentHashMap<String, String>()
@@ -71,6 +72,8 @@ class JobMonitorService : Service() {
         val baseUrl = intent?.getStringExtra(EXTRA_BASE_URL).orEmpty().ifBlank {
             serverUrls[promptId].orEmpty()
         }
+        // A late WebSocket progress event must not replace the save-stage notification.
+        if (intent?.action == ACTION_PROGRESS && promptId in savingJobs) return START_STICKY
         return try {
             // startForegroundService() 启动后必须立刻建立前台通知。日志、锁和任务恢复均放在其后，
             // 避免系统在进程繁忙或锁获取变慢时抛出 ForegroundServiceDidNotStartInTimeException。
@@ -100,6 +103,7 @@ class JobMonitorService : Service() {
         if (intent?.action == ACTION_STOP) {
             monitorStore.edit().remove(promptId).apply()
             monitors.remove(promptId)?.cancel()
+            savingJobs.remove(promptId)
             workflowNames.remove(promptId)
             workflowPaths.remove(promptId)
             serverUrls.remove(promptId)
@@ -173,6 +177,7 @@ class JobMonitorService : Service() {
                                 )
                             broadcastCompletion(baseUrl, promptId, 0, failed = true, requested = false, executionFailed = true)
                         } else {
+                            savingJobs.add(promptId)
                             val localSaveRequested = runCatching { hasLocalSaveRequested(baseUrl, promptId) }.getOrDefault(false)
                             startForeground(
                                 FOREGROUND_ID,
@@ -201,7 +206,7 @@ class JobMonitorService : Service() {
                                             detail = it.message.orEmpty(),
                                         )
                                     }
-                                if (report.failed == 0) break
+                                if (report.failed == 0 || !report.retryable) break
                                 if (attempt < 11) {
                                     startForeground(
                                         FOREGROUND_ID,
@@ -235,6 +240,7 @@ class JobMonitorService : Service() {
                         preferences.setTaskTracked(baseUrl, promptId, false)
                         monitorStore.edit().remove(promptId).apply()
                         monitors.remove(promptId)
+                        savingJobs.remove(promptId)
                         workflowNames.remove(promptId)
                         workflowPaths.remove(promptId)
                         serverUrls.remove(promptId)
@@ -315,11 +321,13 @@ class JobMonitorService : Service() {
             )
         }
         if (localSaveRequested && eligible.isEmpty()) {
+            val outputCount = history.optJSONObject(promptId)?.optJSONObject("outputs")?.length() ?: 0
             return SaveReport(
                 total = 0,
                 failed = 1,
                 localSaveRequested = true,
-                detail = "尚未读取到白名单输出",
+                detail = if (outputCount == 0) "任务历史尚未写入输出" else "输出与本地保存白名单不匹配（输出节点 $outputCount 个）",
+                retryable = outputCount == 0,
             )
         }
         var failed = 0
@@ -337,6 +345,10 @@ class JobMonitorService : Service() {
                     saved = true
                 }.onFailure { error ->
                     lastError = error.message.orEmpty()
+                    AppLogger.error(
+                        "后台保存输出失败：任务=$promptId，节点=${media.nodeId}，文件=${media.filename}，尝试=${attempt + 1}/3",
+                        error,
+                    )
                     destination.delete()
                     if (error is kotlinx.coroutines.CancellationException) throw error
                     if (attempt < 2) delay((attempt + 1) * 1_000L)
@@ -465,6 +477,7 @@ class JobMonitorService : Service() {
         val failed: Int,
         val localSaveRequested: Boolean = false,
         val detail: String = "",
+        val retryable: Boolean = true,
     )
 
     companion object {

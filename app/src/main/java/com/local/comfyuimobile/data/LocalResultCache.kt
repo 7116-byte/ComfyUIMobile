@@ -2,6 +2,7 @@ package com.local.comfyuimobile.data
 
 import android.content.Context
 import android.net.Uri
+import android.util.AtomicFile
 import com.local.comfyuimobile.model.MediaKind
 import com.local.comfyuimobile.model.ResultMedia
 import com.local.comfyuimobile.model.ResultSource
@@ -71,16 +72,22 @@ class LocalResultCache(context: Context) {
     }
 
     private fun readIndex(): List<JSONObject> = runCatching {
-        val array = JSONArray(indexFile.takeIf { it.isFile }?.readText(Charsets.UTF_8).orEmpty().ifBlank { "[]" })
+        val text = AtomicFile(indexFile).openRead().bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val array = JSONArray(text.ifBlank { "[]" })
         List(array.length()) { array.getJSONObject(it) }
     }.getOrDefault(emptyList())
 
     private fun writeIndex(records: List<JSONObject>) {
         root.mkdirs()
-        val temporary = File(root, "index.tmp")
-        temporary.writeText(JSONArray(records).toString(), Charsets.UTF_8)
-        if (indexFile.exists()) indexFile.delete()
-        check(temporary.renameTo(indexFile)) { "无法更新本地缓存索引" }
+        val atomic = AtomicFile(indexFile)
+        val stream = atomic.startWrite()
+        try {
+            stream.write(JSONArray(records).toString().toByteArray(Charsets.UTF_8))
+            atomic.finishWrite(stream)
+        } catch (error: Throwable) {
+            atomic.failWrite(stream)
+            throw error
+        }
     }
 
     private fun encodeRecord(media: ResultMedia, file: File, key: String) = JSONObject()
