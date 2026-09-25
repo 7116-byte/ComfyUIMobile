@@ -11,6 +11,12 @@ class WorkflowWorkingCopyTest {
         assertNull(WorkflowWorkingCopy.frontendPath(snapshot))
         assertEquals("workflows/deleted.json", WorkflowWorkingCopy.frontendPath(snapshot.copy(sourceJobId = null)))
     }
+
+    @Test fun importedTemporaryWorkflowDoesNotResolveToServerFile() {
+        val temporary = document("from-image.json").copy(isTemporary = true, hasUnsavedChanges = true)
+        assertNull(WorkflowWorkingCopy.frontendPath(temporary))
+        assertEquals("workflows/from-image.json", WorkflowWorkingCopy.frontendPath(temporary.copy(isTemporary = false)))
+    }
     private fun document(name: String, server: String = "http://a") = WorkflowDocument(
         WorkflowEntry(name, "workflows/$name", false), "graph-$name", emptyList(), serverUrl = server)
 

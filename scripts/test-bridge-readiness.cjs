@@ -12,16 +12,26 @@ function script(name) {
 }
 function fixture() {
   let clock = 0;
+  let graphReady = true;
+  let prematureGraphReads = 0;
   const graph = {nodes: [{id: 7, value: 0.54}]};
   const app = {
-    rootGraph: graph, vueAppReady: true,
+    get isGraphReady() { return graphReady; },
+    get rootGraph() {
+      if (!graphReady) prematureGraphReads++;
+      return graphReady ? graph : undefined;
+    },
+    get graph() { return graphReady ? graph : undefined; },
+    vueAppReady: true,
     ui: {settings: {getSettingValue: name => name === 'Comfy.Locale' ? 'zh' : false}},
     extensionManager: {spinner: false, workflow: {
       getWorkflowByPath() {}, syncWorkflows() {},
       activeWorkflow: {path: 'workflows/example.json'}, workflows: [],
     }},
   };
-  return {app, graph, tick: () => { clock += 800; }, context: {
+  return {app, graph, tick: () => { clock += 800; },
+    setGraphReady: value => { graphReady = value; },
+    prematureGraphReads: () => prematureGraphReads, context: {
     window: {comfyAPI: {app: {app}}, LiteGraph: {vueNodesMode: false}},
     document: {querySelectorAll: () => []}, Date: {now: () => clock},
   }};
@@ -31,6 +41,11 @@ async function main() {
   const reuse = () => vm.runInNewContext(script('REUSE_SCRIPT'), f.context) === 'ready';
   assert.equal(reuse(), false, 'an uninitialized context cannot skip readiness');
   const ready = () => vm.runInNewContext(script('READY_SCRIPT'), f.context).then(JSON.parse);
+  f.setGraphReady(false);
+  const waitingForGraph = await ready();
+  assert.equal(waitingForGraph.details.graphReady, false);
+  assert.equal(f.prematureGraphReads(), 0, 'readiness probes must not access rootGraph before initialization');
+  f.setGraphReady(true);
   const cold = await ready();
   assert.equal(cold.ok, false, 'cold page waits for its first stable state');
   assert.equal(cold.details.graphReady, true, 'wait logs distinguish graph from workflow readiness');

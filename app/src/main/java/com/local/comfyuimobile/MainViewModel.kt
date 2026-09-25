@@ -260,9 +260,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (document.hasUnsavedChanges) {
                         val updated = document.copy(rawJson = currentWorkflow, fields = _state.value.fields)
                         _state.update { it.copy(selectedWorkflow = updated) }
-                        persistDraftSnapshot(draftSnapshot(updated, _state.value.fields))
+                        if (!document.isTemporary) {
+                            persistDraftSnapshot(draftSnapshot(updated, _state.value.fields))
+                        }
                     }
-                    AdvancedEditorSession.begin(currentWorkflow, document.entry.path, snapshot = document.sourceJobId != null)
+                    AdvancedEditorSession.begin(
+                        currentWorkflow,
+                        document.entry.path,
+                        snapshot = document.sourceJobId != null || document.isTemporary,
+                    )
                 }
             }.onSuccess {
                 _state.update { it.copy(advancedEditor = true, loading = false) }
@@ -613,7 +619,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun recordSelectedWorkflowOpened() {
-        val path = _state.value.selectedWorkflow?.entry?.path ?: return
+        val document = _state.value.selectedWorkflow ?: return
+        if (document.isTemporary) return
+        val path = document.entry.path
         updateRecentWorkflowState(path)
         viewModelScope.launch { preferences.setRecentWorkflow(path) }
     }
@@ -774,17 +782,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // 用户临时断开了输出连线（正常中间状态）。保留编辑后的 JSON 为结构草稿，
             // 不重新加载桥接（那会再次因无输出节点失败），避免卡死。
             viewModelScope.launch {
-                persistDraftSnapshot(structuralDraftSnapshot(edited, result.workflowJson, document.fields))
+                if (!document.isTemporary) {
+                    persistDraftSnapshot(structuralDraftSnapshot(edited, result.workflowJson, document.fields))
+                }
             }
             return
         }
         viewModelScope.launch {
             runOperation("高级编辑同步失败") {
                 val structural = !sameNodeStructure(document.nodes, result.manifest.nodes)
-                if (structural) {
-                    persistDraftSnapshot(structuralDraftSnapshot(edited, result.workflowJson, result.manifest.fields))
-                } else {
-                    persistDraftSnapshot(draftSnapshot(edited, result.manifest.fields))
+                if (!document.isTemporary) {
+                    if (structural) {
+                        persistDraftSnapshot(structuralDraftSnapshot(edited, result.workflowJson, result.manifest.fields))
+                    } else {
+                        persistDraftSnapshot(draftSnapshot(edited, result.manifest.fields))
+                    }
                 }
                 val manifest = bridgeOperationMutex.withLock {
                     (bridge ?: error("前端桥接不可用")).loadWorkflow(
@@ -934,6 +946,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runOperation("工作流保存失败") {
                 flushCurrentDraft()
                 val current = client.listWorkflows().firstOrNull { it.path == document.entry.path }
+                require(!document.isTemporary || current == null) {
+                    "服务器上已有同名工作流，请使用“另存”选择新名称，不能直接覆盖"
+                }
                 if (!force && current != null) {
                     val changed = WorkflowPolicy.hasModifiedConflict(document.baseModified, current.modified)
                     _state.update {
@@ -949,30 +964,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     return@runOperation
                 }
-                val workflowJson = bridgeOperationMutex.withLock {
+                val currentJson = bridgeOperationMutex.withLock {
                     ensureSelectedWorkflowLoaded()
                     (bridge ?: error("前端桥接不可用")).syncWorkflow(_state.value.fields)
                 }
+                val workflowJson = if (document.isTemporary) {
+                    JSONObject(currentJson)
+                        .put("id", UUID.randomUUID().toString())
+                        .put("revision", 0)
+                        .toString()
+                } else {
+                    currentJson
+                }
                 val saved = client.writeWorkflow(document.entry.path, workflowJson, overwrite = current != null)
+                val manifest = if (document.isTemporary) {
+                    runCatching {
+                        bridgeOperationMutex.withLock {
+                            (bridge ?: error("前端桥接不可用")).loadWorkflow(
+                                rawJson = workflowJson,
+                                workflowPath = saved.path,
+                            )
+                        }
+                    }.onFailure {
+                        if (it is CancellationException) throw it
+                        AppLogger.error("工作流已保存，但前端标签同步失败；下次操作会重新加载", it)
+                    }
+                        .getOrNull()
+                } else {
+                    null
+                }
+                if (document.isTemporary) bridgeLoadedPath = if (manifest != null) saved.path else null
                 val updated = document.copy(
                     entry = saved,
                     rawJson = workflowJson,
-                    fields = _state.value.fields,
+                    fields = manifest?.fields ?: _state.value.fields,
+                    nodes = manifest?.nodes ?: document.nodes,
                     baseModified = saved.modified,
                     hasUnsavedChanges = false,
+                    dirtyFieldKeys = emptySet(),
                     sourceJobId = null,
+                    isTemporary = false,
                 )
                 runCatching { workflowDrafts.delete(document.serverUrl, document.entry.path) }
                     .onFailure { AppLogger.error("清理已保存工作流草稿失败", it) }
                 _state.update {
                     it.copy(
                         selectedWorkflow = updated,
+                        fields = updated.fields,
                         loading = false,
                         workflowOverwriteRequired = false,
                         workflowOverwriteReason = "",
                         workflowDraftConflictRequired = false,
                         workflowDraftConflictReason = "",
-                        notice = "工作流已保存到服务器",
+                        notice = if (document.isTemporary && manifest == null) {
+                            "工作流已保存到服务器；网页标签会在下次操作时重新同步"
+                        } else {
+                            "工作流已保存到服务器"
+                        },
                     )
                 }
                 refreshWorkflowsInternal()
@@ -993,7 +1041,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 flushCurrentDraft()
                 val fileName = WorkflowPath.fileName(name)
                 val destination = "${WorkflowPath.folder(folder)}/$fileName"
-                require(destination != document.entry.path) { "另存名称不能与当前工作流相同" }
+                require(document.isTemporary || destination != document.entry.path) { "另存名称不能与当前工作流相同" }
                 require(client.listWorkflows().none { it.path == destination }) { "同名工作流已存在，请换一个名称" }
 
                 val workflowJson = bridgeOperationMutex.withLock {
@@ -1005,22 +1053,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .put("revision", 0)
                     .toString()
                 val saved = client.writeWorkflow(destination, savedJson, overwrite = false)
-                val manifest = bridgeOperationMutex.withLock {
-                    (bridge ?: error("前端桥接不可用")).loadWorkflow(
-                        rawJson = savedJson,
-                        workflowPath = saved.path,
-                    )
+                val manifest = runCatching {
+                    bridgeOperationMutex.withLock {
+                        (bridge ?: error("前端桥接不可用")).loadWorkflow(
+                            rawJson = savedJson,
+                            workflowPath = saved.path,
+                        )
+                    }
+                }.onFailure {
+                    if (it is CancellationException) throw it
+                    AppLogger.error("工作流已另存，但前端标签同步失败；下次操作会重新加载", it)
                 }
-                bridgeLoadedPath = saved.path
+                    .getOrNull()
+                bridgeLoadedPath = if (manifest != null) saved.path else null
                 val updated = document.copy(
                     entry = saved,
                     rawJson = savedJson,
-                    fields = manifest.fields,
-                    nodes = manifest.nodes,
+                    fields = manifest?.fields ?: _state.value.fields,
+                    nodes = manifest?.nodes ?: document.nodes,
                     serverUrl = _state.value.activeServer?.baseUrl ?: document.serverUrl,
                     baseModified = saved.modified,
                     hasUnsavedChanges = false,
+                    dirtyFieldKeys = emptySet(),
                     sourceJobId = null,
+                    isTemporary = false,
                 )
                 runCatching { workflowDrafts.delete(document.serverUrl, document.entry.path) }
                     .onFailure { AppLogger.error("清理另存前的工作流草稿失败", it) }
@@ -1030,12 +1086,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update {
                     it.copy(
                         selectedWorkflow = updated,
-                        fields = manifest.fields,
+                        fields = updated.fields,
                         loading = false,
                         nodeProblems = emptyMap(),
                         workflowDraftConflictRequired = false,
                         workflowDraftConflictReason = "",
-                        notice = "已另存为 $fileName",
+                        notice = if (manifest == null) {
+                            "已另存为 $fileName；网页标签会在下次操作时重新同步"
+                        } else {
+                            "已另存为 $fileName"
+                        },
                     )
                 }
                 refreshWorkflowsInternal()
@@ -1354,6 +1414,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         isImage: Boolean,
         openParameters: Boolean,
     ) {
+        flushCurrentDraft()
         val json = JSONObject(raw)
         require(json.optJSONArray("nodes") != null) { "不是 ComfyUI 画布工作流 JSON" }
         val sourceName = filename.substringAfterLast('/').substringAfterLast('\\')
@@ -1367,12 +1428,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             candidateName = "$baseName-$copyNumber.json"
             copyNumber += 1
         }
-        val entry = client.writeWorkflow("workflows/$candidateName", json.toString(), overwrite = false)
-        refreshWorkflowsInternal()
+        // Opening an image or a local JSON file is only a preview. ComfyUI's
+        // null-path load creates an in-memory temporary tab; the server file is
+        // created only when the user explicitly taps Save or Save As.
+        val entry = WorkflowEntry(
+            name = candidateName,
+            path = "workflows/$candidateName",
+            isDirectory = false,
+        )
         val manifest = bridgeOperationMutex.withLock {
             (bridge ?: error("前端桥接不可用")).loadWorkflow(
                 rawJson = json.toString(),
-                workflowPath = entry.path,
+                workflowPath = null,
             )
         }
         bridgeLoadedPath = entry.path
@@ -1382,7 +1449,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             fields = manifest.fields,
             nodes = manifest.nodes,
             serverUrl = _state.value.activeServer?.baseUrl.orEmpty(),
-            baseModified = entry.modified,
+            hasUnsavedChanges = true,
+            isTemporary = true,
         )
         _state.update {
             it.copy(
@@ -1391,7 +1459,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fields = manifest.fields,
                 loading = false,
                 nodeProblems = emptyMap(),
-                notice = "已从${if (isImage) "图片" else "文件"}导入 $candidateName",
+                workflowDraftConflictRequired = false,
+                workflowDraftConflictReason = "",
+                workflowOverwriteRequired = false,
+                workflowOverwriteReason = "",
+                notice = "已从${if (isImage) "图片" else "文件"}临时打开 $candidateName；点“保存”后才会写入服务器",
                 navigationRequest = if (openParameters) {
                     AppNavigationRequest(SystemClock.elapsedRealtimeNanos(), AppDestination.PARAMETERS)
                 } else {
@@ -2172,8 +2244,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (_state.value.activeServer?.baseUrl != server) return@onSuccess
             _state.update { ui ->
                 val document = ui.selectedWorkflow
-                val current = document?.let { selected -> entries.firstOrNull { it.path == selected.entry.path } }
-                val conflict = document?.hasUnsavedChanges == true &&
+                val current = document?.takeUnless { it.isTemporary }
+                    ?.let { selected -> entries.firstOrNull { it.path == selected.entry.path } }
+                val conflict = document?.hasUnsavedChanges == true && document.isTemporary.not() &&
                     (current == null || WorkflowPolicy.hasModifiedConflict(document.baseModified, current.modified))
                 ui.copy(
                     workflows = entries,
@@ -2649,7 +2722,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!_state.value.localDraftsEnabled) return null
         val ui = _state.value
         val document = ui.selectedWorkflow ?: return null
-        if (!document.hasUnsavedChanges || document.serverUrl.isBlank()) return null
+        if (!document.hasUnsavedChanges || document.isTemporary || document.serverUrl.isBlank()) return null
         return draftSnapshot(document, ui.fields)
     }
 
@@ -2743,8 +2816,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val document = _state.value.selectedWorkflow ?: return
         if (WorkflowDraftStore.normalizeServer(document.serverUrl) != WorkflowDraftStore.normalizeServer(serverUrl)) return
 
-        val current = client.listWorkflows().firstOrNull { it.path == document.entry.path }
-        val serverChanged = current == null || WorkflowPolicy.hasModifiedConflict(document.baseModified, current.modified)
+        val current = if (document.isTemporary) null else {
+            client.listWorkflows().firstOrNull { it.path == document.entry.path }
+        }
+        val serverChanged = !document.isTemporary &&
+            (current == null || WorkflowPolicy.hasModifiedConflict(document.baseModified, current.modified))
         val loadServerVersion = !document.hasUnsavedChanges && current != null && serverChanged
         val raw = if (loadServerVersion) client.readWorkflow(current.path) else document.rawJson
         val manifest = if (bridgeLocked) {

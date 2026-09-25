@@ -4,7 +4,8 @@ import com.local.comfyuimobile.model.ParameterField
 import com.local.comfyuimobile.model.WorkflowDocument
 
 object WorkflowWorkingCopy {
-    fun frontendPath(document: WorkflowDocument): String? = document.entry.path.takeIf { document.sourceJobId == null }
+    fun frontendPath(document: WorkflowDocument): String? =
+        document.entry.path.takeIf { document.sourceJobId == null && !document.isTemporary }
 
     suspend fun serialize(document: WorkflowDocument, load: suspend (WorkflowDocument) -> Unit,
                           sync: suspend (List<ParameterField>) -> String): String {

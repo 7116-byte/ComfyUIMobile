@@ -1794,8 +1794,10 @@ class ComfyBridge(private val activity: Activity) {
         private val REUSE_SCRIPT = """
             (() => {
               const app = window.comfyAPI?.app?.app;
+              const graphReady = typeof app?.isGraphReady === 'boolean'
+                ? app.isGraphReady : !!app?.graph;
               return !!(app && window.__comfyMobileApp === app && app.vueAppReady &&
-                (app.rootGraph || app.graph) && app.extensionManager?.spinner !== true &&
+                graphReady && app.extensionManager?.spinner !== true &&
                 typeof app.extensionManager?.workflow?.getWorkflowByPath === 'function' &&
                 typeof app.extensionManager?.workflow?.syncWorkflows === 'function' &&
                 window.LiteGraph?.vueNodesMode !== true &&
@@ -1808,6 +1810,10 @@ class ComfyBridge(private val activity: Activity) {
               try {
                 const app = window.comfyAPI?.app?.app;
                 const read = (getter) => { try { return getter(); } catch (_) { return null; } };
+                // ComfyUI's rootGraph getter logs an ERROR before setup() assigns
+                // the graph. isGraphReady is the frontend's safe readiness API.
+                const graphReady = typeof app?.isGraphReady === 'boolean'
+                  ? app.isGraphReady : !!read(() => app?.graph);
                 const details = () => {
                   const manager = read(() => app?.extensionManager);
                   const store = read(() => manager?.workflow);
@@ -1817,11 +1823,12 @@ class ComfyBridge(private val activity: Activity) {
                   return {
                     pageMs: typeof performance === 'undefined' ? null : Math.round(performance.now()),
                     documentState: read(() => document.readyState),
-                    graphReady: !!(app?.rootGraph || app?.graph),
+                    graphReady,
                     vueReady: read(() => app?.vueAppReady),
                     managerReady: !!manager,
                     spinner: read(() => manager?.spinner),
                     storeReady: !!store,
+                    workflowSyncLoading: read(() => store?.isSyncLoading),
                     workflowCount: read(() => store?.workflows?.length),
                     tabCount: Array.isArray(tabs) ? tabs.length : null,
                     invalidTabs: Array.isArray(tabs) ? tabs.filter(item => !item?.path).length : null,
@@ -1832,7 +1839,11 @@ class ComfyBridge(private val activity: Activity) {
                   };
                 };
                 const pending = error => JSON.stringify({ok:false,error,details:details()});
-                if (!(app?.rootGraph || app?.graph)) return pending('工作流画布尚未就绪');
+                if (!graphReady) {
+                  return pending(read(() => app?.extensionManager?.workflow?.isSyncLoading) === true
+                    ? 'ComfyUI 正在同步工作流列表'
+                    : 'ComfyUI 正在初始化画布或扩展');
+                }
                 const workspace = app.extensionManager;
                 if (!app.vueAppReady || !workspace) {
                   return pending('ComfyUI 网页应用尚未就绪');

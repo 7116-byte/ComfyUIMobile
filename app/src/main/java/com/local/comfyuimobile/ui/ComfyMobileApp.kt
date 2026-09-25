@@ -811,7 +811,11 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                             Text(workflow.entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 1)
                             Text(
                                 "${nodes.size} 个流程部件 · ${state.fields.count { it.visible }} 个参数" +
-                                    if (workflow.hasUnsavedChanges) " · 本地草稿" else "",
+                                    when {
+                                        workflow.isTemporary -> " · 临时工作流，尚未保存"
+                                        workflow.hasUnsavedChanges -> " · 本地草稿"
+                                        else -> ""
+                                    },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (workflow.hasUnsavedChanges) {
                                     MaterialTheme.colorScheme.primary

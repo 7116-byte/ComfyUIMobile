@@ -92,6 +92,7 @@ data class WorkflowDocument(
     val hasUnsavedChanges: Boolean = false,
     val dirtyFieldKeys: Set<String> = emptySet(),
     val sourceJobId: String? = null,
+    val isTemporary: Boolean = false,
 )
 
 enum class JobState { RUNNING, PENDING, SUCCESS, ERROR, CANCELLED, UNKNOWN }
