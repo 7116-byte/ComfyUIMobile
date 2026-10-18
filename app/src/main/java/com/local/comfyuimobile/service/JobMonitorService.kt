@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import com.local.comfyuimobile.MainActivity
 import com.local.comfyuimobile.R
@@ -28,6 +29,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -38,7 +40,11 @@ import java.util.concurrent.ConcurrentHashMap
 
 class JobMonitorService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val client = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS).build()
+    private val client by lazy { OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS).build() }
+    private var latestStartId = 0
+    private var idleStopJob: Job? = null
+    private var monitorsRestored = false
+    @Volatile private var foregroundNotification: Notification? = null
     private val monitors = ConcurrentHashMap<String, Job>()
     private val savingJobs = ConcurrentHashMap.newKeySet<String>()
     private val workflowNames = ConcurrentHashMap<String, String>()
@@ -60,36 +66,39 @@ class JobMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        // Satisfy the foreground-service deadline before preferences, logs,
+        // task restoration or network-client initialization can block startup.
+        showForegroundNotification(notification("正在准备后台任务", "ComfyUI", true))
+        runningInstance = this
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        latestStartId = startId
+        idleStopJob?.cancel()
+        // Every delivered start must promote the service, including duplicate
+        // starts and late progress events racing with an idle shutdown.
+        showForegroundNotification(foregroundNotification ?: notification("正在准备后台任务", "ComfyUI", true))
         val promptId = intent?.getStringExtra(EXTRA_PROMPT_ID).orEmpty()
-        if (intent?.action == null && monitors[promptId]?.isActive == true) return START_REDELIVER_INTENT
-        val workflowName = intent?.getStringExtra(EXTRA_WORKFLOW_NAME).orEmpty().ifBlank {
-            workflowNames[promptId].orEmpty().ifBlank { "ComfyUI 工作流" }
-        }
-        val workflowPath = intent?.getStringExtra(EXTRA_WORKFLOW_PATH).orEmpty().ifBlank {
-            workflowPaths[promptId].orEmpty()
-        }
-        val baseUrl = intent?.getStringExtra(EXTRA_BASE_URL).orEmpty().ifBlank {
-            serverUrls[promptId].orEmpty()
-        }
         // A late WebSocket progress event must not replace the save-stage notification.
         if (intent?.action == ACTION_PROGRESS && promptId in savingJobs) return START_STICKY
         return try {
-            // startForegroundService() 启动后必须立刻建立前台通知。日志、锁和任务恢复均放在其后，
-            // 避免系统在进程繁忙或锁获取变慢时抛出 ForegroundServiceDidNotStartInTimeException。
-            startForeground(
-                FOREGROUND_ID,
-                notification("正在准备后台任务", workflowName, true, promptId = promptId, baseUrl = baseUrl, workflowPath = workflowPath),
-            )
-            AppLogger.info("后台前台通知已建立：任务=${promptId.ifBlank { "待恢复" }}")
-            restoreMonitors(excluding = if (intent?.action == ACTION_STOP) promptId else null)
+            if (intent?.action != ACTION_PROGRESS) {
+                scope.launch { AppLogger.info("后台前台通知已建立：任务=${promptId.ifBlank { "待恢复" }}，启动序号=$startId") }
+            }
+            if (!monitorsRestored) {
+                monitorsRestored = true
+                restoreMonitors(excluding = if (intent?.action == ACTION_STOP) promptId else null)
+            }
             if (intent == null) {
                 stopIfIdle()
                 if (monitors.isEmpty()) START_NOT_STICKY else START_STICKY
-            } else handleStartCommand(intent, startId)
+            } else handleStartCommand(intent)
         } catch (error: Throwable) {
             AppLogger.error("后台任务服务启动失败，任务=${promptId.ifBlank { "未知" }}", error)
             monitors.remove(promptId)?.cancel()
+            savingJobs.remove(promptId)
             workflowNames.remove(promptId)
             workflowPaths.remove(promptId)
             serverUrls.remove(promptId)
@@ -98,7 +107,7 @@ class JobMonitorService : Service() {
         }
     }
 
-    private fun handleStartCommand(intent: Intent?, startId: Int): Int {
+    private fun handleStartCommand(intent: Intent?): Int {
         val promptId = intent?.getStringExtra(EXTRA_PROMPT_ID).orEmpty()
         if (intent?.action == ACTION_STOP) {
             monitorStore.edit().remove(promptId).apply()
@@ -118,8 +127,7 @@ class JobMonitorService : Service() {
             val percent = intent.getIntExtra(EXTRA_PROGRESS, -1)
             val node = intent.getStringExtra(EXTRA_NODE).orEmpty()
             val name = workflowNames[promptId].orEmpty().ifBlank { "ComfyUI 工作流" }
-            startForeground(
-                FOREGROUND_ID,
+            showForegroundNotification(
                 notification(
                     "正在生成${if (percent >= 0) " $percent%" else ""}",
                     listOf(name, node).filter { it.isNotBlank() }.joinToString(" · "),
@@ -136,8 +144,8 @@ class JobMonitorService : Service() {
         val workflowName = intent?.getStringExtra(EXTRA_WORKFLOW_NAME).orEmpty().ifBlank { "ComfyUI 工作流" }
         val workflowPath = intent?.getStringExtra(EXTRA_WORKFLOW_PATH).orEmpty()
         if (baseUrl.isBlank() || promptId.isBlank()) {
-            stopSelf(startId)
-            return START_NOT_STICKY
+            stopIfIdle()
+            return if (monitors.isEmpty()) START_NOT_STICKY else START_STICKY
         }
         if (monitors[promptId]?.isActive == true && serverUrls[promptId] == baseUrl) return START_REDELIVER_INTENT
         workflowNames[promptId] = workflowName
@@ -146,8 +154,7 @@ class JobMonitorService : Service() {
         monitorStore.edit().putString(promptId, JSONObject().put("server", baseUrl)
             .put("name", workflowName).put("path", workflowPath).toString()).apply()
         AppLogger.info("后台开始监控任务：$promptId，工作流=$workflowName")
-        startForeground(
-            FOREGROUND_ID,
+        showForegroundNotification(
             notification("正在生成", workflowName, true, promptId = promptId, baseUrl = baseUrl, workflowPath = workflowPath),
         )
         holdBackgroundLocks()
@@ -179,8 +186,7 @@ class JobMonitorService : Service() {
                         } else {
                             savingJobs.add(promptId)
                             val localSaveRequested = runCatching { hasLocalSaveRequested(baseUrl, promptId) }.getOrDefault(false)
-                            startForeground(
-                                FOREGROUND_ID,
+                            showForegroundNotification(
                                 notification(
                                     "正在整理并保存本地作品",
                                     workflowName,
@@ -208,8 +214,7 @@ class JobMonitorService : Service() {
                                     }
                                 if (report.failed == 0 || !report.retryable) break
                                 if (attempt < 11) {
-                                    startForeground(
-                                        FOREGROUND_ID,
+                                    showForegroundNotification(
                                         notification(
                                             "本地保存未完成，正在重试 ${attempt + 1}/12",
                                             workflowName,
@@ -238,13 +243,15 @@ class JobMonitorService : Service() {
                             broadcastCompletion(baseUrl, promptId, savedCount, report.failed > 0, report.localSaveRequested)
                         }
                         preferences.setTaskTracked(baseUrl, promptId, false)
-                        monitorStore.edit().remove(promptId).apply()
-                        monitors.remove(promptId)
-                        savingJobs.remove(promptId)
-                        workflowNames.remove(promptId)
-                        workflowPaths.remove(promptId)
-                        serverUrls.remove(promptId)
-                        stopIfIdle()
+                        withContext(Dispatchers.Main.immediate) {
+                            monitorStore.edit().remove(promptId).apply()
+                            monitors.remove(promptId)
+                            savingJobs.remove(promptId)
+                            workflowNames.remove(promptId)
+                            workflowPaths.remove(promptId)
+                            serverUrls.remove(promptId)
+                            stopIfIdle()
+                        }
                         return@launch
                     }
                 }.onFailure { error ->
@@ -272,13 +279,16 @@ class JobMonitorService : Service() {
             handleStartCommand(Intent(this, JobMonitorService::class.java)
                 .putExtra(EXTRA_PROMPT_ID, id).putExtra(EXTRA_BASE_URL, server)
                 .putExtra(EXTRA_WORKFLOW_NAME, data.optString("name"))
-                .putExtra(EXTRA_WORKFLOW_PATH, data.optString("path")), 0)
+                .putExtra(EXTRA_WORKFLOW_PATH, data.optString("path")))
         }
     }
 
     override fun onDestroy() {
+        if (runningInstance === this) runningInstance = null
+        idleStopJob?.cancel()
         releaseBackgroundLocks()
         scope.cancel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
@@ -365,13 +375,30 @@ class JobMonitorService : Service() {
     }
 
     private fun stopIfIdle() {
+        scope.launch(Dispatchers.Main.immediate) { updateIdleState() }
+    }
+
+    private fun showForegroundNotification(value: Notification) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            promote(value)
+        } else {
+            scope.launch(Dispatchers.Main.immediate) { promote(value) }
+        }
+    }
+
+    private fun promote(value: Notification) {
+        startForeground(FOREGROUND_ID, value)
+        foregroundNotification = value
+    }
+
+    private fun updateIdleState() {
+        idleStopJob?.cancel()
         if (monitors.isNotEmpty()) {
             val promptId = monitors.keys.firstOrNull().orEmpty()
             val name = workflowNames[promptId].orEmpty().ifBlank { "ComfyUI 工作流" }
-            startForeground(
-                FOREGROUND_ID,
+            showForegroundNotification(
                 notification(
-                    "正在生成",
+                    if (promptId in savingJobs) "正在整理并保存本地作品" else "正在生成",
                     name,
                     ongoing = true,
                     promptId = promptId,
@@ -381,9 +408,14 @@ class JobMonitorService : Service() {
             )
             return
         }
-        releaseBackgroundLocks()
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        val idleStartId = latestStartId
+        idleStopJob = scope.launch(Dispatchers.Main.immediate) {
+            delay(500)
+            if (monitors.isEmpty() && latestStartId == idleStartId && stopSelfResult(idleStartId)) {
+                releaseBackgroundLocks()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+        }
     }
 
     private fun holdBackgroundLocks() {
@@ -481,6 +513,11 @@ class JobMonitorService : Service() {
     )
 
     companion object {
+        @Volatile private var runningInstance: JobMonitorService? = null
+
+        fun isMonitoring(baseUrl: String, promptId: String): Boolean = runningInstance?.let {
+            it.monitors[promptId]?.isActive == true && it.serverUrls[promptId] == baseUrl.trimEnd('/')
+        } == true
         const val CHANNEL_ID = "comfy_jobs"
         const val COMPLETION_CHANNEL_ID = "comfy_job_completion_v1"
         const val EXTRA_BASE_URL = "base_url"

@@ -12,6 +12,10 @@ import java.io.StringWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 object AppLogger {
     private const val TAG = "ComfyUIMobile"
@@ -25,7 +29,9 @@ object AppLogger {
         RegexOption.IGNORE_CASE,
     )
     private val lock = Any()
-    private val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.CHINA)
+    private val formatter = ThreadLocal.withInitial { SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.CHINA) }
+    private val diagnosticsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val exitScanLock = Any()
     @Volatile private var context: Context? = null
     @Volatile private var enabled = false
     @Volatile private var installed = false
@@ -34,8 +40,10 @@ object AppLogger {
         context = value.applicationContext
         enabled = isEnabled(value)
         installCrashHandler()
-        info("应用启动，日志记录=${if (enabled) "开启" else "关闭"}")
-        if (enabled) recordHistoricalExits(value)
+        diagnosticsScope.launch {
+            info("应用启动，日志记录=${if (enabled) "开启" else "关闭"}")
+            if (enabled) synchronized(exitScanLock) { recordHistoricalExits(value.applicationContext) }
+        }
     }
 
     fun isEnabled(value: Context): Boolean =
@@ -47,7 +55,7 @@ object AppLogger {
         enabled = valueEnabled
         if (valueEnabled) {
             info("用户开启诊断日志")
-            recordHistoricalExits(value)
+            diagnosticsScope.launch { synchronized(exitScanLock) { recordHistoricalExits(value.applicationContext) } }
         }
     }
 
@@ -90,7 +98,7 @@ object AppLogger {
                     previous.delete()
                     file.renameTo(previous)
                 }
-                file.appendText("${formatter.format(Date())} [$level] $message\n", Charsets.UTF_8)
+                file.appendText("${formatter.get()!!.format(Date())} [$level] $message\n", Charsets.UTF_8)
             }
         }
     }
@@ -119,7 +127,7 @@ object AppLogger {
                 .sortedBy { it.timestamp }
             exits.forEach { exit ->
                 info(
-                    "系统历史退出：时间=${formatter.format(Date(exit.timestamp))}，原因=${exitReason(exit.reason)}，" +
+                    "系统历史退出：时间=${formatter.get()!!.format(Date(exit.timestamp))}，原因=${exitReason(exit.reason)}，" +
                         "进程=${exit.processName.orEmpty()}，PID=${exit.pid}，状态=${exit.status}，" +
                         "重要性=${exit.importance}，PSS=${exit.pss}KB，RSS=${exit.rss}KB，" +
                         "描述=${exit.description.orEmpty()}",

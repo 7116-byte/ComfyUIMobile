@@ -16,6 +16,11 @@ import androidx.lifecycle.viewModelScope
 import com.local.comfyuimobile.bridge.ComfyBridge
 import com.local.comfyuimobile.bridge.AdvancedEditorSession
 import com.local.comfyuimobile.bridge.WorkflowImageReader
+import com.local.comfyuimobile.bridge.ImageMetadataReader
+import com.local.comfyuimobile.bridge.ImageGenerationMetadata
+import com.local.comfyuimobile.data.ResultParameters
+import com.local.comfyuimobile.data.ResultParameterReport
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import com.local.comfyuimobile.bridge.ImageListValue
 import com.local.comfyuimobile.data.AppPreferences
 import com.local.comfyuimobile.data.AppLogger
@@ -107,7 +112,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var workflowDraftSaveJob: Job? = null
     private var visibleNodeJob: Job? = null
     private val bridgeOperationMutex = Mutex()
-    private val monitoredJobIds = ConcurrentHashMap.newKeySet<String>()
+    private val monitorStartRequests = ConcurrentHashMap<String, Long>()
     private val awaitingQueueJobIds = ConcurrentHashMap.newKeySet<String>()
     private val takenOverJobIds = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var pendingReconnectNodeId: String? = null
@@ -1381,6 +1386,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    suspend fun readResultParameters(media: ResultMedia): ResultParameterReport = withContext(Dispatchers.IO) {
+        require(media.kind == MediaKind.IMAGE) { "仅支持查看图片的生成参数" }
+        var fallback: ResultParameterReport? = null
+        var embedded: ImageGenerationMetadata? = null
+        var lastFailure: Throwable? = null
+        fun failed(error: Throwable) {
+            if (error is CancellationException) throw error
+            lastFailure = error
+        }
+        val localFile = media.localPath?.let(::File)?.takeIf { it.isFile }
+        if (localFile != null) {
+            runCatching { ImageMetadataReader.read(localFile) }.onFailure(::failed).getOrNull()?.let { metadata ->
+                embedded = metadata
+                ResultParameters.parse(metadata, media.nodeId, "图片内嵌生成记录")?.let { report ->
+                    if (report.isRuntimeRecord) return@withContext report
+                    fallback = report
+                }
+            }
+        }
+        val origin = media.url.toHttpUrlOrNull()?.newBuilder()?.encodedPath("/")?.query(null)?.fragment(null)
+            ?.build()?.toString()?.trimEnd('/')
+        val resultClient = ComfyClient(File(app.cacheDir, "original-downloads"))
+        if (origin != null && media.jobId.isNotBlank()) {
+            resultClient.setServer(origin)
+            runCatching {
+                val history = resultClient.history(media.jobId)
+                // A different server or a recycled filename must not supply another image's parameters.
+                require(ResultParser.parse(origin, history).any { it.stableKey() == media.stableKey() }) {
+                    "服务器历史中找不到这张图片对应的输出"
+                }
+                val queued = history.optJSONObject(media.jobId)?.optJSONArray("prompt")
+                val extra = queued?.optJSONObject(3)?.optJSONObject("extra_pnginfo")
+                val metadata = ImageGenerationMetadata(
+                    promptJson = queued?.optJSONObject(2)?.toString(),
+                    workflowJson = embedded?.workflowJson ?: extra?.opt("workflow")?.toString(),
+                )
+                ResultParameters.parse(metadata, media.nodeId, "服务器任务记录（对应本图输出）")
+            }.onFailure(::failed).getOrNull()?.let { report ->
+                if (report.isRuntimeRecord) return@withContext report
+                if (fallback == null) fallback = report
+            }
+        }
+        if (localFile == null) {
+            val folder = File(app.cacheDir, "parameter-metadata").apply { mkdirs() }
+            val temporary = File(folder, "${UUID.randomUUID()}.${media.filename.substringAfterLast('.', "img")}")
+            try {
+                runCatching {
+                    resultClient.downloadToFile(media.url, temporary)
+                    ResultParameters.parse(ImageMetadataReader.read(temporary), media.nodeId, "图片内嵌生成记录")
+                }.onFailure(::failed).getOrNull()?.let { report ->
+                    if (report.isRuntimeRecord || fallback == null) return@withContext report
+                }
+            } finally {
+                temporary.delete()
+            }
+        }
+        fallback ?: error("此图片未找到可读取的生成参数。${lastFailure?.message?.let { "\n$it" }.orEmpty()}")
+    }
+
     fun openWorkflowFromResult(media: ResultMedia) {
         if (media.kind != MediaKind.IMAGE) return
         viewModelScope.launch {
@@ -1517,7 +1581,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onLocalResultsSaved(count: Int, failed: Boolean, localSaveRequested: Boolean,
                             promptId: String, serverUrl: String, executionFailed: Boolean) = viewModelScope.launch {
         val local = localResultCache.load()
-        monitoredJobIds.remove(promptId)
+        monitorStartRequests.remove(promptId)
         val message = when {
             executionFailed -> "任务失败或已取消"
             localSaveRequested && failed -> "生成完成，但本地作品保存失败"
@@ -2388,10 +2452,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun refreshResultsInternal() {
+        val server = client.serverUrl()
         runCatching {
             val history = client.history()
-            ResultParser.parse(client.serverUrl(), history)
+            withContext(Dispatchers.Default) { ResultParser.parse(server, history) }
         }.onSuccess { results ->
+            if (client.serverUrl() != server) return@onSuccess
             _state.update { it.copy(results = results) }
         }
     }
@@ -2441,15 +2507,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun startMonitor(promptId: String, workflowName: String, workflowPath: String) {
-        monitoredJobIds.add(promptId)
+        val server = client.serverUrl()
+        if (completionMessages.containsKey(TaskLifecycle.key(server, promptId))) return
+        if (JobMonitorService.isMonitoring(server, promptId)) return
+        val now = SystemClock.elapsedRealtime()
+        val lastRequest = monitorStartRequests[promptId]
+        if (lastRequest != null && now - lastRequest < 10_000L) return
+        monitorStartRequests[promptId] = now
         val intent = Intent(app, JobMonitorService::class.java)
-            .putExtra(JobMonitorService.EXTRA_BASE_URL, client.serverUrl())
+            .putExtra(JobMonitorService.EXTRA_BASE_URL, server)
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
             .putExtra(JobMonitorService.EXTRA_WORKFLOW_NAME, workflowName)
             .putExtra(JobMonitorService.EXTRA_WORKFLOW_PATH, workflowPath)
         runCatching { ContextCompat.startForegroundService(app, intent) }
             .onFailure { error ->
-                monitoredJobIds.remove(promptId)
+                monitorStartRequests.remove(promptId)
                 AppLogger.error("后台监控启动失败，任务=$promptId", error)
                 _state.update {
                     it.copy(notice = "任务已提交，但后台监控启动失败：${error.message.orEmpty()}")
@@ -2459,6 +2531,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateMonitor(promptId: String, progress: Int, node: String?) {
         if (promptId !in _state.value.submittedJobIds && promptId !in takenOverJobIds) return
+        if (!JobMonitorService.isMonitoring(client.serverUrl(), promptId)) return
         val intent = Intent(app, JobMonitorService::class.java)
             .setAction(JobMonitorService.ACTION_PROGRESS)
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)
@@ -2469,7 +2542,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun stopMonitor(promptId: String) {
-        monitoredJobIds.remove(promptId)
+        val requested = monitorStartRequests.remove(promptId) != null
+        if (!requested && !JobMonitorService.isMonitoring(client.serverUrl(), promptId)) return
         val intent = Intent(app, JobMonitorService::class.java)
             .setAction(JobMonitorService.ACTION_STOP)
             .putExtra(JobMonitorService.EXTRA_PROMPT_ID, promptId)

@@ -10,7 +10,6 @@ import com.local.comfyuimobile.service.JobMonitorService
 class ComfyMobileApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        AppLogger.initialize(this)
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(JobMonitorService.CHANNEL_ID, getString(R.string.monitor_channel), NotificationManager.IMPORTANCE_LOW),
@@ -27,5 +26,6 @@ class ComfyMobileApplication : Application() {
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             },
         )
+        AppLogger.initialize(this)
     }
 }

@@ -169,6 +169,7 @@ import com.local.comfyuimobile.bridge.ComfyBridge
 import com.local.comfyuimobile.bridge.FieldValidator
 import com.local.comfyuimobile.bridge.ImageListValue
 import com.local.comfyuimobile.data.CachePolicy
+import com.local.comfyuimobile.data.ResultParameterReport
 import com.local.comfyuimobile.data.RecentWorkflows
 import com.local.comfyuimobile.data.WorkflowBrowser
 import com.local.comfyuimobile.data.WorkflowPath
@@ -1665,6 +1666,7 @@ private fun ResultScreen(
             onSave = viewModel::saveResultWithFeedback,
             onShare = viewModel::shareResult,
             onOpen = viewModel::openResult,
+            onViewParameters = viewModel::readResultParameters,
             onOpenWorkflow = { item ->
                 galleryItems = emptyList()
                 viewModel.openWorkflowFromResult(item)
@@ -1812,6 +1814,7 @@ private fun ImageGalleryViewer(
     onSave: (ResultMedia, (String) -> Unit) -> Unit,
     onShare: (ResultMedia) -> Unit,
     onOpen: (ResultMedia) -> Unit,
+    onViewParameters: suspend (ResultMedia) -> ResultParameterReport,
     onOpenWorkflow: (ResultMedia) -> Unit,
     favoriteKeys: Set<String>,
     onFavorite: (ResultMedia) -> Unit,
@@ -1824,6 +1827,7 @@ private fun ImageGalleryViewer(
     var chromeVisible by remember { mutableStateOf(true) }
     var moreExpanded by remember { mutableStateOf(false) }
     var showInfo by remember { mutableStateOf(false) }
+    var parameterMedia by remember { mutableStateOf<ResultMedia?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     var saveFeedback by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
@@ -1933,6 +1937,12 @@ private fun ImageGalleryViewer(
                             }
                             DropdownMenu(expanded = moreExpanded, onDismissRequest = { moreExpanded = false }) {
                                 DropdownMenuItem(
+                                    text = { Text("查看参数") },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.List, null) },
+                                    enabled = current.kind == MediaKind.IMAGE,
+                                    onClick = { moreExpanded = false; parameterMedia = current },
+                                )
+                                DropdownMenuItem(
                                     text = { Text("打开工作流") },
                                     leadingIcon = { Icon(Icons.Default.Tune, null) },
                                     enabled = current.kind == MediaKind.IMAGE,
@@ -1963,6 +1973,9 @@ private fun ImageGalleryViewer(
                 }
             }
         }
+    }
+    parameterMedia?.let { item ->
+        ResultParametersDialog(item, onViewParameters) { parameterMedia = null }
     }
     if (confirmDelete) {
         ConfirmDialog("删除本地作品", "将从 App 本地缓存中删除 ${current.filename}，不会删除电脑上的原文件。", { confirmDelete = false }) {
