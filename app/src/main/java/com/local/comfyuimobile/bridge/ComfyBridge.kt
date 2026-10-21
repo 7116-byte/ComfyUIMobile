@@ -22,6 +22,7 @@ import com.local.comfyuimobile.data.PromptGraphPolicy
 import com.local.comfyuimobile.data.WorkflowPolicy
 import com.local.comfyuimobile.model.GeneratedPrompt
 import com.local.comfyuimobile.model.ParameterField
+import com.local.comfyuimobile.model.ParameterAction
 import com.local.comfyuimobile.model.ParameterSection
 import com.local.comfyuimobile.model.WorkflowConnectionMarker
 import com.local.comfyuimobile.model.WorkflowManifest
@@ -46,6 +47,9 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 class ComfyBridge(private val activity: Activity) {
+    private val seedSupportScript by lazy {
+        activity.assets.open("seed_support.js").bufferedReader().use { it.readText() }
+    }
     data class LinkRepairReport(
         val paintedBeforeRefresh: Int,
         val paintedAfterRefresh: Int,
@@ -586,6 +590,12 @@ class ComfyBridge(private val activity: Activity) {
                         widgetIndex = item.optInt("widgetIndex", -1),
                         refreshesWorkflow = item.optBoolean("refreshesWorkflow"),
                         nodeOrder = item.optInt("nodeOrder"),
+                        actions = item.optJSONArray("actions")?.let { actions ->
+                            List(actions.length()) { actionIndex ->
+                                val action = actions.getJSONObject(actionIndex)
+                                ParameterAction(action.getString("label"), action.toString(), action.optBoolean("enabled", true))
+                            }
+                        } ?: emptyList(),
                     ),
                 )
             }
@@ -652,6 +662,7 @@ class ComfyBridge(private val activity: Activity) {
 
     suspend fun buildPrompt(fields: List<ParameterField>): GeneratedPrompt {
         awaitReady()
+        evaluateImmediate(seedSupportScript)
         lastBridgePhase = "准备参数，共 ${fields.size} 项"
         AppLogger.info("前端桥接：$lastBridgePhase")
         val changedFields = ParameterSync.editable(fields)
@@ -707,7 +718,34 @@ class ComfyBridge(private val activity: Activity) {
         if (prompt.length() == 0) throw IllegalStateException("当前工作流没有可执行的输出链")
         val workflow = root.getJSONObject("workflow")
         WorkflowPolicy.writeMobileLayout(workflow, fields)
-        return GeneratedPrompt(prompt.toString(), workflow.toString())
+        val editable = root.getJSONObject("editableWorkflow")
+        WorkflowPolicy.writeMobileLayout(editable, fields)
+        return GeneratedPrompt(prompt.toString(), workflow.toString(), editable.toString())
+    }
+
+    /** Only advance widget controls after the server has accepted the request. */
+    suspend fun afterPromptQueued(fields: List<ParameterField>): Pair<String, WorkflowManifest> {
+        evaluateImmediate(seedSupportScript)
+        val result = JSONObject(evaluateImmediate("""
+            (() => {
+              try {
+                window.__comfyMobileSeeds.runHooks(window.__comfyMobileApp, 'afterQueued');
+                return JSON.stringify({ok:true});
+              } catch (error) { return JSON.stringify({ok:false,error:String(error?.stack || error)}); }
+            })()
+        """.trimIndent()))
+        check(result.optBoolean("ok")) { result.optString("error", "排队后控件更新失败") }
+        return captureCurrentParameters(fields)
+    }
+
+    suspend fun captureCurrentParameters(fields: List<ParameterField>): Pair<String, WorkflowManifest> {
+        val raw = exportCurrentWorkflow()
+        val workflow = JSONObject(raw)
+        WorkflowPolicy.writeMobileLayout(workflow, fields)
+        val updated = workflow.toString()
+        val encoded = Base64.getEncoder().encodeToString(updated.toByteArray(Charsets.UTF_8))
+        val manifest = evaluate(workflowManifestScript(encoded, null, false, inspectCurrentGraph = true))
+        return updated to parseWorkflowManifest(updated, manifest)
     }
 
     suspend fun syncWorkflow(fields: List<ParameterField>): String {
@@ -739,10 +777,10 @@ class ComfyBridge(private val activity: Activity) {
         return root.getJSONObject("workflow").toString()
     }
 
-    suspend fun invokeWidgetButton(nodeId: String, actionToken: String): String {
+    suspend fun invokeWidgetAction(payloadJson: String): String {
         awaitReady()
-        val payload = JSONObject().put("nodeId", nodeId).put("actionToken", actionToken)
-        val encoded = Base64.getEncoder().encodeToString(payload.toString().toByteArray(Charsets.UTF_8))
+        evaluateImmediate(seedSupportScript)
+        val encoded = Base64.getEncoder().encodeToString(payloadJson.toByteArray(Charsets.UTF_8))
         val response = evaluate(widgetButtonScript(encoded))
         val root = JSONObject(response)
         if (!root.optBoolean("ok")) throw IllegalStateException(root.optString("error", "网页按钮操作失败"))
@@ -1004,6 +1042,7 @@ class ComfyBridge(private val activity: Activity) {
             if (!app) return JSON.stringify({ok:false, error:'ComfyUI 前端对象尚未就绪'});
             const text = new TextDecoder().decode(Uint8Array.from(atob('$encodedWorkflow'), c => c.charCodeAt(0)));
             const workflow = JSON.parse(text);
+            $seedSupportScript
             let sourceWorkflow = workflow;
             const cloneValue = (value) => {
               if (value == null || typeof value !== 'object') return value;
@@ -1119,8 +1158,10 @@ class ComfyBridge(private val activity: Activity) {
                         else widget.value.toggled = nextToggle;
                       }
                     } else {
-                      widget.value = nextValue;
-                      try { widget.callback?.(nextValue, app.canvas, targetNode); } catch (_) {}
+                      if (JSON.stringify(widget.value) !== JSON.stringify(nextValue)) {
+                        widget.value = nextValue;
+                        try { widget.callback?.(nextValue, app.canvas, targetNode); } catch (_) {}
+                      }
                     }
                   });
                 }
@@ -1571,6 +1612,7 @@ class ComfyBridge(private val activity: Activity) {
                     imageListUpload: inputOptions?.image_list_upload === true,
                     multiline: inputOptions?.multiline === true || widget.options?.multiline === true,
                     linked: input?.link != null,
+                    actions: input?.link != null ? [] : window.__comfyMobileSeeds.actionsFor(node, widget, nodeKey, widgetIndex),
                   });
                 }
             }
@@ -1641,21 +1683,7 @@ class ComfyBridge(private val activity: Activity) {
             const app = window.__comfyMobileApp || window.comfyAPI?.app?.app;
             const graph = app?.rootGraph || app?.graph;
             if (!graph) return JSON.stringify({ok:false, error:'ComfyUI 工作流画布尚未就绪'});
-            const nodeMap = new Map((graph._nodes || []).map(node => [String(node.id), node]));
-            const relevantIds = window.__comfyMobileRelevantNodeIds || new Set();
-            for (const [nodeId, node] of nodeMap.entries()) {
-              if (!relevantIds.has(String(nodeId))) continue;
-              for (const widget of (node.widgets || [])) {
-                if (typeof widget.beforeQueued !== 'function') continue;
-                try {
-                  widget.beforeQueued({isPartialExecution:false});
-                } catch (error) {
-                  throw new Error('节点 ' + String(node.title || node.type || node.id) +
-                    '（' + String(node.id) + '）控件 ' + String(widget.name || widget.label || '?') +
-                    ' 的排队前回调失败：' + String(error?.stack || error));
-                }
-              }
-            }
+            window.__comfyMobileSeeds.runHooks(app, 'beforeQueued');
             return JSON.stringify({ok:true});
           } catch (error) {
             return JSON.stringify({ok:false, error:'排队前回调错误：' + String(error?.stack || error)});
@@ -1712,6 +1740,7 @@ class ComfyBridge(private val activity: Activity) {
               workflow: result.workflow,
               output: result.output,
             });
+            window.__comfyMobileSeeds.resolveNestedSeeds(app, result);
             const relevantIds = window.__comfyMobileRelevantNodeIds || new Set();
             if (!Object.keys(result.output || {}).length) {
               return JSON.stringify({ok:false, error:'当前工作流没有可执行的输出链'});
@@ -1721,6 +1750,7 @@ class ComfyBridge(private val activity: Activity) {
               ok:true,
               prompt:result.output,
               workflow:result.workflow,
+              editableWorkflow:graph.serialize(),
               relevantNodeIds:[...relevantIds].map(String)
             });
           } catch (error) {
@@ -1927,16 +1957,7 @@ class ComfyBridge(private val activity: Activity) {
                 const app = window.__comfyMobileApp;
                 const graph = app?.rootGraph || app?.graph;
                 if (!graph) return JSON.stringify({ok:false,error:'工作流画布尚未就绪'});
-                const node = (graph._nodes || []).find(item => String(item.id) === String(payload.nodeId));
-                if (!node) return JSON.stringify({ok:false,error:'找不到种子部件 ' + payload.nodeId});
-                const widget = (node.widgets || []).find(item => item?.type === 'button' && String(item.name || '').includes(payload.actionToken));
-                if (!widget) return JSON.stringify({ok:false,error:'网页中没有此种子操作'});
-                if (widget.disabled) return JSON.stringify({ok:false,error:'当前还没有可使用的上次排队种子'});
-                const action = widget.callback || widget.onClick;
-                if (typeof action !== 'function') return JSON.stringify({ok:false,error:'种子按钮没有可执行回调'});
-                const result = action.call(widget);
-                if (result && typeof result.then === 'function') await result;
-                await new Promise(resolve => setTimeout(resolve, 50));
+                await window.__comfyMobileSeeds.invoke(app, payload);
                 return JSON.stringify({ok:true, workflow:graph.serialize()});
               } catch (error) {
                 return JSON.stringify({ok:false,error:'种子操作错误：' + String(error?.stack || error)});

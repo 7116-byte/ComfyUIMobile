@@ -59,7 +59,6 @@ import com.local.comfyuimobile.network.PromptSubmissionException
 import com.local.comfyuimobile.network.ProgressStateParser
 import com.local.comfyuimobile.service.JobMonitorService
 import com.local.comfyuimobile.service.JobNotificationNavigation
-import com.local.comfyuimobile.bridge.RgthreeSeedPolicy
 import com.local.comfyuimobile.update.UpdateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -826,14 +825,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun invokeSeedAction(nodeId: String, actionToken: String, successMessage: String) {
+    fun invokeSeedAction(action: com.local.comfyuimobile.model.ParameterAction) {
+        if (_state.value.generating || _state.value.loading || generationJob?.isActive == true) return
         val document = _state.value.selectedWorkflow ?: return
+        _state.update { it.copy(loading = true) }
         viewModelScope.launch {
             runOperation("种子操作失败") {
                 val activeBridge = bridge ?: error("前端桥接不可用")
                 val (raw, manifest) = bridgeOperationMutex.withLock {
-                    val updatedRaw = activeBridge.invokeWidgetButton(nodeId, actionToken)
-                    updatedRaw to activeBridge.loadWorkflow(updatedRaw, workflowPath = WorkflowWorkingCopy.frontendPath(document))
+                    ensureSelectedWorkflowLoaded()
+                    activeBridge.syncWorkflow(_state.value.fields)
+                    activeBridge.invokeWidgetAction(action.payloadJson)
+                    activeBridge.captureCurrentParameters(_state.value.fields)
                 }
                 bridgeLoadedPath = document.entry.path
                 _state.update {
@@ -846,7 +849,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         ),
                         fields = manifest.fields,
                         nodeProblems = emptyMap(),
-                        notice = successMessage,
+                        loading = false,
+                        notice = "已执行：${action.label}",
                     )
                 }
                 scheduleDraftSave(immediate = true)
@@ -886,7 +890,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 _state.update { ui ->
                     ui.copy(selectedWorkflow = ui.selectedWorkflow?.copy(
-                        rawJson = RgthreeSeedPolicy.preserveModes(generated.workflowJson, ui.fields),
+                        rawJson = generated.editableWorkflowJson,
                     ))
                 }
                 val response = try {
@@ -904,6 +908,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 awaitingQueueJobIds.add(response.promptId)
                 val submitted = _state.value.submittedJobIds + response.promptId
                 preferences.saveSubmittedJobs(submitted)
+                _state.update { it.copy(submittedJobIds = submitted) }
+                startMonitor(response.promptId, workflow.entry.name, workflow.entry.path)
+                // Queue acceptance must not be reported as failure if a post-queue UI refresh fails.
+                runCatching {
+                    bridgeOperationMutex.withLock {
+                        if (_state.value.selectedWorkflow?.entry?.path == workflow.entry.path &&
+                            bridgeLoadedPath == workflow.entry.path) {
+                            val (raw, manifest) = (bridge ?: error("前端桥接不可用"))
+                                .afterPromptQueued(_state.value.fields)
+                            _state.update { ui ->
+                                ui.copy(fields = manifest.fields, selectedWorkflow = ui.selectedWorkflow?.copy(
+                                    rawJson = raw, fields = manifest.fields, nodes = manifest.nodes,
+                                ))
+                            }
+                        }
+                    }
+                }.onFailure {
+                    if (it is CancellationException) throw it
+                    AppLogger.error("任务已提交，但排队后参数刷新失败", it)
+                    bridgeLoadedPath = null
+                }
                 var history = _state.value.promptHistory
                 _state.value.fields
                     .filter { it.kind == ParameterKind.MULTILINE && it.nodeType.contains("TextEncode", true) }
@@ -926,7 +951,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 AppLogger.info("生成任务已加入队列：${response.promptId}")
-                startMonitor(response.promptId, workflow.entry.name, workflow.entry.path)
                 refreshTasksInternal()
             }
         }.also { job ->

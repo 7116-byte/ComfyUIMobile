@@ -7,11 +7,12 @@ const source = fs.readFileSync(path.join(__dirname,
   '../app/src/main/java/com/local/comfyuimobile/bridge/ComfyBridge.kt'), 'utf8');
 const match = source.match(/private val PROMPT_CONVERT_SCRIPT = """([\s\S]*?)"""\.trimIndent\(\)/);
 assert.ok(match, 'production prompt conversion script exists');
+const support = fs.readFileSync(path.join(__dirname, '../app/src/main/assets/seed_support.js'), 'utf8');
 
 async function run(seedMode) {
   const widget = { name: 'seed', value: seedMode, serializeValue: () => seedMode };
   const node = { id: 477, type: 'Seed (rgthree)', widgets: [widget] };
-  const app = { graph: { _nodes: [node] }, graphToPrompt: async () => ({
+  const app = { graph: { _nodes: [node], serialize: () => ({nodes:[{id:477,type:'Seed (rgthree)',widgets_values:[widget.value]}]}) }, graphToPrompt: async () => ({
     output: { '477': { class_type: 'Seed (rgthree)', inputs: { seed: seedMode } } },
     workflow: { nodes: [{ id: 477, type: 'Seed (rgthree)', widgets_values: [seedMode] }] },
   }) };
@@ -27,11 +28,13 @@ async function run(seedMode) {
       }
     } },
   } };
+  vm.runInNewContext(support, context);
   const result = JSON.parse(await vm.runInNewContext(match[1], context));
   assert.equal(result.ok, true, result.error);
   assert.equal(events, 1);
   assert.equal(result.prompt['477'].inputs.seed, seedMode === -1 ? 123456 : seedMode);
   assert.equal(widget.value, seedMode, 'the editable graph keeps its seed mode');
+  assert.equal(result.editableWorkflow.nodes[0].widgets_values[0], seedMode);
 }
 
 Promise.all([run(-1), run(777)]).then(() => {

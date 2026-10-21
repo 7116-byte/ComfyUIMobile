@@ -33,6 +33,8 @@ data class WorkflowEntry(
 enum class ParameterKind { TEXT, MULTILINE, INTEGER, DECIMAL, BOOLEAN, COMBO, IMAGE, IMAGE_LIST, VIDEO, UNSUPPORTED }
 enum class ParameterSection { PRIMARY, MORE }
 
+data class ParameterAction(val label: String, val payloadJson: String, val enabled: Boolean = true)
+
 data class ParameterField(
     val key: String,
     val nodeId: String,
@@ -57,6 +59,7 @@ data class ParameterField(
     val widgetIndex: Int = -1,
     val refreshesWorkflow: Boolean = false,
     val nodeOrder: Int = 0,
+    val actions: List<ParameterAction> = emptyList(),
 )
 
 data class WorkflowNode(
@@ -156,6 +159,7 @@ data class FieldProblem(val fieldKey: String, val nodeId: String, val message: S
 data class GeneratedPrompt(
     val promptJson: String,
     val workflowJson: String,
+    val editableWorkflowJson: String = workflowJson,
 )
 
 data class UpdateInfo(

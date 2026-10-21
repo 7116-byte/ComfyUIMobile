@@ -193,7 +193,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.launch
-import kotlin.random.Random
 
 private const val IME_RELOCATION_SUPPRESSION_MILLIS = 700L
 
@@ -1139,11 +1138,10 @@ private fun NodeParameterCard(
                     HorizontalDivider()
                     Column(Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         problems.forEach { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-                        val hasSeedActions = node.type.contains("Seed (rgthree)", ignoreCase = true)
-                        if (fields.isEmpty() && !hasSeedActions) {
+                        if (fields.isEmpty()) {
                             Text("此部件没有可调整参数。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        if (fields.isNotEmpty() || hasSeedActions) {
+                        if (fields.isNotEmpty()) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
                                 shape = RoundedCornerShape(8.dp),
@@ -1159,22 +1157,7 @@ private fun NodeParameterCard(
                                             multilineEditorStates = multilineEditorStates,
                                             onMultilineFocusGained = onMultilineFocusGained,
                                         )
-                                        if (index < fields.lastIndex || hasSeedActions) HorizontalDivider()
-                                    }
-                                    if (hasSeedActions) {
-                                        Text("种子快捷操作", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
-                                        FilledTonalButton(
-                                            onClick = { viewModel.invokeSeedAction(node.id, "Randomize Each Time", "已设为每次生成随机") },
-                                            modifier = Modifier.fillMaxWidth(),
-                                        ) { Text("每次生成随机") }
-                                        FilledTonalButton(
-                                            onClick = { viewModel.invokeSeedAction(node.id, "New Fixed Random", "已生成新的固定种子") },
-                                            modifier = Modifier.fillMaxWidth(),
-                                        ) { Text("生成新的固定种子") }
-                                        OutlinedButton(
-                                            onClick = { viewModel.invokeSeedAction(node.id, "Use Last Queued Seed", "已使用上次排队种子") },
-                                            modifier = Modifier.fillMaxWidth(),
-                                        ) { Text("使用上次排队种子") }
+                                        if (index < fields.lastIndex) HorizontalDivider()
                                     }
                                 }
                             }
@@ -1280,11 +1263,11 @@ private fun ParameterEditor(
             ParameterKind.COMBO -> ComboField(field, viewModel)
             ParameterKind.INTEGER, ParameterKind.DECIMAL -> {
                 NumberField(field, viewModel)
-                if (field.name.contains("seed", ignoreCase = true) && !field.nodeType.contains("Seed (rgthree)", ignoreCase = true)) {
-                    FilledTonalButton(onClick = {
-                        val upper = field.maximum?.toLong()?.coerceAtMost(Long.MAX_VALUE - 1) ?: Long.MAX_VALUE - 1
-                        viewModel.updateField(field.key, Random.nextLong(0, upper.coerceAtLeast(1) + 1).toString())
-                    }, enabled = !field.linked) { Text("随机种子") }
+                field.actions.forEach { action ->
+                    FilledTonalButton(
+                        onClick = { viewModel.invokeSeedAction(action) },
+                        enabled = !field.linked && action.enabled,
+                    ) { Text(action.label) }
                 }
             }
             ParameterKind.IMAGE, ParameterKind.VIDEO -> {
