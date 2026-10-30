@@ -40,7 +40,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
@@ -446,7 +445,9 @@ internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar:
                 }
             }
         },
-        snackbarHost = { SnackbarHost(snackbar) },
+        snackbarHost = {
+            if (page != MainPage.PARAMETERS || state.selectedWorkflow == null) SnackbarHost(snackbar)
+        },
     ) { padding ->
         Row(Modifier.padding(padding).fillMaxSize()) {
             if (expanded) {
@@ -475,7 +476,7 @@ internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar:
                 pageStates.SaveableStateProvider(page.name) {
                     when (page) {
                         MainPage.WORKFLOWS -> WorkflowScreen(state, viewModel, onOpenParameters = { page = MainPage.PARAMETERS })
-                        MainPage.PARAMETERS -> ParameterScreen(state, viewModel)
+                        MainPage.PARAMETERS -> ParameterScreen(state, viewModel, snackbar)
                         MainPage.RESULTS -> ResultScreen(
                             state = state,
                             viewModel = viewModel,
@@ -737,7 +738,7 @@ private fun WorkflowRow(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
+private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState) {
     val workflow = state.selectedWorkflow
     if (workflow == null) {
         ParameterHistoryScreen(state, viewModel)
@@ -790,6 +791,14 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     val localProblems = FieldValidator.detailedProblems(state.fields)
     val localProblemsByNode = localProblems.groupBy { it.nodeId }.mapValues { (_, items) -> items.map { it.message } }
     val problemNodeIds = localProblemsByNode.keys + state.nodeProblems.keys
+    val firstProblem = localProblems.firstOrNull()?.let { problem ->
+        val title = workflow.nodes.firstOrNull { it.id == problem.nodeId }?.title ?: "节点 ${problem.nodeId}"
+        "$title：${problem.message}"
+    } ?: state.nodeProblems.entries.firstOrNull()?.let { (nodeId, messages) ->
+        val title = workflow.nodes.firstOrNull { it.id == nodeId }?.title ?: "节点 $nodeId"
+        "$title：${messages.firstOrNull().orEmpty()}"
+    }
+    val showActions = WindowInsets.ime.getBottom(LocalDensity.current) == 0
     val recentWorkflows = RecentWorkflows.resolveEntries(state.recentWorkflowPaths, state.workflows)
         .let { entries -> listOf(workflow.entry) + entries.filterNot { it.path == workflow.entry.path } }
         .distinctBy { it.path }
@@ -817,7 +826,7 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
             LocalBringIntoViewSpec provides parameterBringIntoViewSpec,
         ) {
             Column(
-                modifier.verticalScroll(parameterScroll).padding(vertical = 4.dp),
+                modifier.verticalScroll(parameterScroll).padding(top = 4.dp, bottom = if (showActions) 96.dp else 16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Card(
@@ -876,13 +885,20 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                                 color = MaterialTheme.colorScheme.primary,
                             )
                         }
-                    }
-                }
-                if (state.generationMessage.isNotBlank()) {
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(state.generationMessage, style = MaterialTheme.typography.bodyMedium)
-                            state.generationProgress?.let { progress -> LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth()) }
+                        if (firstProblem != null || state.generationMessage.isNotBlank() || snackbar.currentSnackbarData != null) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                        firstProblem?.let { ParameterFeedback(it, isError = true) }
+                        if (state.generationMessage.isNotBlank()) ParameterFeedback(
+                            message = state.generationMessage,
+                            isError = state.generationMessage.contains("失败"),
+                            completed = state.generationProgress == 1f && !state.generationMessage.contains("正在确认"),
+                            progress = state.generationProgress,
+                        )
+                        if (snackbar.currentSnackbarData != null) SnackbarHost(snackbar) { data ->
+                            if (data.visuals.message != state.generationMessage && data.visuals.message != firstProblem) {
+                                ParameterFeedback(data.visuals.message, isError = state.error != null, onDismiss = data::dismiss)
+                            }
                         }
                     }
                 }
@@ -933,9 +949,9 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
             }
         }
     }
-    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Box(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         if (LocalConfiguration.current.screenWidthDp >= 720) {
-            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Card(
                     modifier = Modifier.width(174.dp).fillMaxHeight(),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -960,34 +976,15 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                 }
                 parameterCards(Modifier.weight(1f).fillMaxHeight())
             }
-        } else parameterCards(Modifier.weight(1f).fillMaxWidth())
-        if (WindowInsets.ime.getBottom(LocalDensity.current) == 0) Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface) {
-            Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = viewModel::openAdvancedEditor,
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                    enabled = state.bridgeReady && !state.loading && !state.generating,
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                ) { Text("高级编辑", maxLines = 1) }
-                Button(
-                    onClick = { if (hasConfiguredLocalOutput) viewModel.generate() else confirmGenerateWithoutLocalOutput = true },
-                    enabled = !state.generating && !state.loading && state.bridgeReady && localProblems.isEmpty(),
-                    modifier = Modifier.weight(1.3f).heightIn(min = 48.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                ) { Icon(Icons.Default.PlayArrow, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("生成", maxLines = 1) }
-            }
-        }
-        val firstProblem = localProblems.firstOrNull()?.let { problem ->
-            val title = workflow.nodes.firstOrNull { it.id == problem.nodeId }?.title ?: "节点 ${problem.nodeId}"
-            "$title：${problem.message}"
-        } ?: state.nodeProblems.entries.firstOrNull()?.let { (nodeId, messages) ->
-            val title = workflow.nodes.firstOrNull { it.id == nodeId }?.title ?: "节点 $nodeId"
-            "$title：${messages.firstOrNull().orEmpty()}"
-        }
-        if (firstProblem != null) {
-            Text(firstProblem, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
-        }
-        Spacer(Modifier.height(2.dp))
+        } else parameterCards(Modifier.fillMaxSize())
+        if (showActions) ParameterActionDock(
+            onAdvancedEditor = viewModel::openAdvancedEditor,
+            onGenerate = { if (hasConfiguredLocalOutput) viewModel.generate() else confirmGenerateWithoutLocalOutput = true },
+            advancedEnabled = state.bridgeReady && !state.loading && !state.generating,
+            generateEnabled = !state.generating && !state.loading && state.bridgeReady && localProblems.isEmpty(),
+            modifier = Modifier.align(if (LocalConfiguration.current.screenWidthDp >= 720) Alignment.BottomEnd else Alignment.BottomCenter)
+                .padding(bottom = 16.dp).widthIn(max = 360.dp),
+        )
     }
 
     if (state.workflowDraftConflictRequired) {

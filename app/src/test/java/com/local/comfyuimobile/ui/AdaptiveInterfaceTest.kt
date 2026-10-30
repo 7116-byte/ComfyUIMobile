@@ -25,6 +25,7 @@ import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import coil.Coil
 import coil.ImageLoader
 import coil.decode.DataSource
@@ -60,6 +61,7 @@ import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowDialog
+import kotlinx.coroutines.launch
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class, qualifiers = "w393dp-h852dp-mdpi")
@@ -73,6 +75,7 @@ class AdaptiveInterfaceTest {
     private var scans = 0
     private var settings = false
     private lateinit var viewModel: MainViewModel
+    private lateinit var snackbar: SnackbarHostState
     private val fixtureBitmaps = mutableListOf<Bitmap>()
     private var fixtureLoader: ImageLoader? = null
 
@@ -110,6 +113,49 @@ class AdaptiveInterfaceTest {
 
     @Test @Config(qualifiers = "w1163dp-h776dp-land-night-mdpi")
     fun tabletLandscapeDarkUsesAvailableWidth() { checkLayouts("tablet-landscape-dark", true) }
+
+    @Test @Config(qualifiers = "w320dp-h740dp-mdpi")
+    fun parameterFeedbackStaysInSummaryAndDockClearsLastCardOnSmallPhone() {
+        RuntimeEnvironment.setFontScale(1.3f)
+        show(true, longContent = true) { state -> state.copy(
+            nodeProblems = mapOf("1" to listOf("输入参数不完整")),
+            generationMessage = "生成完成，已保存 2 张作品", generationProgress = 1f,
+        ) }
+        click("参数")
+        val error = text("创作提示词：输入参数不完整")
+        val complete = text("生成完成，已保存 2 张作品")
+        assertTrue(error.boundsInRoot.top > text("当前工作流").boundsInRoot.bottom)
+        assertTrue(complete.boundsInRoot.bottom < text("创作提示词").boundsInRoot.top)
+        screenshot("phone-320-parameter-feedback")
+        scrollToEnd()
+        val lastNode = text("预览部件 24")
+        val advanced = text("高级编辑", clickable = true)
+        assertTrue(lastNode.boundsInRoot.height > 1f)
+        assertTrue(lastNode.boundsInRoot.bottom < advanced.boundsInRoot.top)
+        assertTrue(text("生成", clickable = true).boundsInRoot.width >= 48f)
+        screenshot("phone-320-parameter-floating-end")
+    }
+
+    @Test fun parameterActionErrorsUseSummaryAndCanBeDismissed() {
+        show(true) { it.copy(error = "保存失败，请检查连接") }
+        click("参数")
+        activity.lifecycleScope.launch { snackbar.showSnackbar("保存失败，请检查连接") }
+        settle()
+        val message = text("保存失败，请检查连接")
+        assertTrue(message.boundsInRoot.top > text("当前工作流").boundsInRoot.bottom)
+        assertTrue(message.boundsInRoot.bottom < text("创作提示词").boundsInRoot.top)
+        screenshot("phone-393-parameter-action-error")
+        clickDescription("关闭提示")
+        assertNull(snackbar.currentSnackbarData)
+    }
+
+    @Test fun floatingGenerateRetainsLocalOutputConfirmation() {
+        show(true)
+        click("参数")
+        click("生成")
+        dismissConfirmation()
+        assertNull(viewModel.state.value.error)
+    }
 
     @Test fun longPagesScrollPastControlsAndReachLastContent() {
         show(true, longContent = true)
@@ -214,12 +260,13 @@ class AdaptiveInterfaceTest {
         assertFalse(dialog.isShowing)
     }
 
-    private fun show(connected: Boolean, longContent: Boolean = false) {
+    private fun show(connected: Boolean, longContent: Boolean = false, transformState: (AppUiState) -> AppUiState = { it }) {
         if (!::controller.isInitialized) {
             controller = Robolectric.buildActivity(ComponentActivity::class.java).setup().visible()
             activity = controller.get()
         }
         viewModel = ViewModelProvider(activity)[MainViewModel::class.java]
+        snackbar = SnackbarHostState()
         val fields = listOf(
             ParameterField("prompt", "1", "创作提示词", "CLIPTextEncode", "text", "提示词", "STRING", ParameterKind.MULTILINE, "\"柔和自然光的人像摄影\"", displayValue = "柔和自然光的人像摄影"),
             ParameterField("steps", "2", "采样设置", "KSampler", "steps", "采样步数", "INT", ParameterKind.INTEGER, "24", displayValue = "24", minimum = 1.0, maximum = 100.0),
@@ -256,7 +303,7 @@ class AdaptiveInterfaceTest {
         val localMedia = mediaNames.mapIndexed { index, filename ->
             ResultMedia("job-${index / 2}", "3", filename = filename, subfolder = "", type = "output", kind = MediaKind.IMAGE, url = sample.toURI().toString(), localPath = sample.absolutePath, workflowName = "人像精修", createdAt = 1_793_400_000_000L + index)
         }
-        val state = AppUiState(
+        val state = transformState(AppUiState(
             serverInput = server.baseUrl, savedServers = listOf(server, server.copy(id = "remote", name = "远程工作站", baseUrl = "http://100.64.0.10:8188")),
             activeServer = if (connected) server else null,
             status = if (connected) ConnectionStatus.CONNECTED else ConnectionStatus.DISCONNECTED,
@@ -271,14 +318,14 @@ class AdaptiveInterfaceTest {
                 JobSummary("pending-job", JobState.PENDING, workflowName = "产品摄影"),
                 JobSummary("finished-job", JobState.SUCCESS, workflowName = "千问多图", durationMillis = 58000),
             ) + if (longContent) (1..24).map { JobSummary("extra-$it", JobState.SUCCESS, workflowName = "后台任务 $it") } else emptyList(),
-        )
+        ))
         activity.setContent {
             ComfyMobileTheme {
                 var settingsOpen by remember { mutableStateOf(false) }
                 Box {
-                    if (connected) ConnectedApp(state, viewModel, SnackbarHostState()) { settingsOpen = true }
-                    else ConnectionScreen(state, SnackbarHostState(), { settings = true }, {}, { connectedAddress = it }, { scans++ }, {})
-                    if (settingsOpen) SettingsScreen(state, viewModel, SnackbarHostState()) { settingsOpen = false }
+                    if (connected) ConnectedApp(state, viewModel, snackbar) { settingsOpen = true }
+                    else ConnectionScreen(state, snackbar, { settings = true }, {}, { connectedAddress = it }, { scans++ }, {})
+                    if (settingsOpen) SettingsScreen(state, viewModel, snackbar) { settingsOpen = false }
                 }
             }
         }
