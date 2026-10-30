@@ -1,0 +1,11 @@
+import org.gradle.api.tasks.testing.Test
+
+allprojects {
+    tasks.withType(Test).configureEach {
+        def dependencyDirectory = System.getenv('COMFY_BACKUP_ROBOLECTRIC_DIR')
+        if (dependencyDirectory) {
+            systemProperty 'robolectric.dependency.dir', dependencyDirectory
+            systemProperty 'robolectric.offline', 'true'
+        }
+    }
+}

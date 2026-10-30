@@ -2,7 +2,7 @@
 
 ComfyUI Mobile 是一个连接自有 ComfyUI 服务器的原生 Android 客户端。它把 ComfyUI 工作流转换成手机友好的纵向参数表单，不在主界面显示节点画布。
 
-> 当前版本：v0.1.69。种子快捷操作按节点实际控件识别，支持子图暴露的种子；补齐提交成功后的控件处理，区分可编辑随机模式和图片中的真实生成种子。
+> 当前版本：v0.1.70。设置改为完整页面，按连接、本地数据和应用分类；服务器、作品保存规则、草稿、日志及更新各自独立管理。
 
 ## 功能
 
@@ -48,6 +48,8 @@ ComfyUI Mobile 是一个连接自有 ComfyUI 服务器的原生 Android 客户�
 
 ## 构建
 
+本机恢复后的开发入口为根目录 `dev.ps1`，默认离线完成回归、构建和正式签名校验，详见 [本地开发](docs/development.md) 和 [迁移记录](docs/recovery-2026-10-30.md)。
+
 原图下载支持大文件 2–4 路 HTTP Range 并发、完整性校验和不支持时自动回退，覆盖手动保存及后台自动下载，不压缩原图。详细行为见 [原图分段下载](docs/original-downloads.md)。
 
 要求 JDK 17、Android SDK 36：
@@ -56,10 +58,10 @@ ComfyUI Mobile 是一个连接自有 ComfyUI 服务器的原生 Android 客户�
 .\gradlew.bat testDebugUnitTest assembleDebug
 ```
 
-Release 签名配置必须位于仓库外：
+Release 签名配置必须保存在未跟踪的私密位置。本机使用 Git 忽略目录：
 
 ```text
-../tools/signing/ComfyUIMobile-signing.properties
+.local/android/signing/ComfyUIMobile-signing.properties
 ```
 
 配置格式：
@@ -71,7 +73,7 @@ keyAlias=comfyuimobile
 keyPassword=...
 ```
 
-缺少该文件时，任何 Release 任务都会直接失败。密钥和密码不得提交到 Git。
+可通过环境变量 `COMFY_SIGNING_PROPERTIES` 指定仓库外的配置文件，并兼容旧目录 `../app/tools/signing/ComfyUIMobile-signing.properties`。缺少配置时，任何 Release 任务都会直接失败。密钥和密码不得提交到 Git。
 
 ## 截图
 

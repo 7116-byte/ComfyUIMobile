@@ -6,7 +6,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val signingPropertiesFile = rootProject.file("../app/tools/signing/ComfyUIMobile-signing.properties")
+val signingPropertiesFile = System.getenv("COMFY_SIGNING_PROPERTIES")?.let { rootProject.file(it) }
+    ?: rootProject.file(".local/android/signing/ComfyUIMobile-signing.properties").takeIf { it.isFile }
+    ?: rootProject.file("../app/tools/signing/ComfyUIMobile-signing.properties")
 val signingProperties = Properties().apply {
     if (signingPropertiesFile.isFile) {
         signingPropertiesFile.inputStream().use(::load)
@@ -21,8 +23,8 @@ android {
         applicationId = "com.local.comfyuimobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 169
-        versionName = "0.1.69"
+        versionCode = 170
+        versionName = "0.1.70"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"7116-byte/ComfyUIMobile\"")

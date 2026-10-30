@@ -153,6 +153,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.TextRange
@@ -210,6 +211,7 @@ private data class ResultAlbum(val jobId: String, val media: List<ResultMedia>)
 fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val advancedEditorLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         viewModel.finishAdvancedEditor(result.resultCode == Activity.RESULT_OK)
@@ -238,10 +240,12 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
     }
 
     Box(Modifier.fillMaxSize()) {
-        if (state.activeServer == null) {
-            ConnectionPage(state, viewModel, snackbar)
-        } else {
-            ConnectedApp(state, viewModel, snackbar)
+        Box(if (showSettings) Modifier.clearAndSetSemantics { } else Modifier) {
+            if (state.activeServer == null) {
+                ConnectionPage(state, viewModel, snackbar, onOpenSettings = { showSettings = true })
+            } else {
+                ConnectedApp(state, viewModel, snackbar, onOpenSettings = { showSettings = true })
+            }
         }
         key(bridge.webView) {
             AndroidView(
@@ -265,19 +269,21 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
                 }
             }
         }
+        if (showSettings) {
+            SettingsScreen(state, viewModel, snackbar) { showSettings = false }
+        }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState) {
-    var settings by remember { mutableStateOf(false) }
+private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState, onOpenSettings: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {},
                 actions = {
-                    IconButton(onClick = { settings = true }) {
+                    IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Default.Settings, "设置")
                     }
                 },
@@ -330,7 +336,6 @@ private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar
             Text("电脑端需要使用 --listen 0.0.0.0 启动，并允许 Windows 防火墙放行 8188 端口。", style = MaterialTheme.typography.bodySmall)
         }
     }
-    if (settings) SettingsDialog(state, viewModel) { settings = false }
 }
 
 private val connectionStepNames = listOf(
@@ -396,9 +401,8 @@ private fun ServerCard(profile: ServerProfile, onClick: () -> Unit, onDelete: ((
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState) {
+private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState, onOpenSettings: () -> Unit) {
     var page by rememberSaveable { mutableStateOf(MainPage.WORKFLOWS) }
-    var settings by remember { mutableStateOf(false) }
     var resultSource by rememberSaveable { mutableStateOf(ResultSource.LOCAL) }
     var resultLayout by rememberSaveable { mutableStateOf(ResultLayout.ALBUMS) }
     var resultAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -465,7 +469,7 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
                         Spacer(Modifier.width(4.dp))
                         Text("重连")
                     }
-                    IconButton(onClick = { settings = true }) { Icon(Icons.Default.Settings, "设置") }
+                    IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "设置") }
                 },
             )
         },
@@ -509,7 +513,6 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
             }
         }
     }
-    if (settings) SettingsDialog(state, viewModel) { settings = false }
 }
 
 @Composable
@@ -2158,167 +2161,6 @@ private fun JobCard(job: JobSummary, viewModel: MainViewModel, tracked: Boolean)
             }
         }
     }
-}
-
-@Composable
-private fun SettingsDialog(state: AppUiState, viewModel: MainViewModel, onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    var confirmDeleteLocal by remember { mutableStateOf(false) }
-    var confirmClearDrafts by remember { mutableStateOf(false) }
-    var showDiagnosticLog by remember { mutableStateOf(false) }
-    var diagnosticLog by remember { mutableStateOf("") }
-    var pendingLogExport by remember { mutableStateOf("") }
-    val logExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-        val success = uri != null && runCatching {
-            context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(pendingLogExport) }
-                ?: error("无法创建日志文件")
-        }.isSuccess
-        pendingLogExport = ""
-        if (uri != null) viewModel.reportDiagnosticLogExport(success)
-    }
-    LaunchedEffect(Unit) { viewModel.refreshLocalDraftCount() }
-    if (showDiagnosticLog) {
-        AlertDialog(
-            onDismissRequest = { showDiagnosticLog = false },
-            title = { Text("诊断日志") },
-            text = {
-                Text(
-                    diagnosticLog,
-                    modifier = Modifier.fillMaxWidth().height(420.dp).verticalScroll(rememberScrollState()),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            },
-            confirmButton = { TextButton(onClick = { showDiagnosticLog = false }) { Text("关闭") } },
-        )
-        return
-    }
-    if (confirmDeleteLocal) {
-        ConfirmDialog(
-            title = "删除全部本地作品",
-            message = "只删除手机中现有的 ${state.localResults.size} 项本地作品，不会删除电脑端云端资产。白名单仍会生效，之后新生成的结果仍会保存到手机；已经保存的本地作品不会因云端以后删除而消失。",
-            onDismiss = { confirmDeleteLocal = false },
-            onConfirm = {
-                viewModel.clearLocalCache()
-                confirmDeleteLocal = false
-            },
-        )
-        return
-    }
-    if (confirmClearDrafts) {
-        ConfirmDialog(
-            title = "清除全部本地草稿",
-            message = "将删除手机中所有工作流的本地未保存草稿（共 ${state.localDraftCount} 个），不影响服务器上的工作流文件。是否继续？",
-            onDismiss = { confirmClearDrafts = false },
-            onConfirm = {
-                viewModel.clearAllWorkflowDrafts()
-                confirmClearDrafts = false
-            },
-        )
-        return
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("设置") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("服务器", style = MaterialTheme.typography.titleSmall)
-                Text(state.activeServer?.baseUrl ?: "尚未连接")
-                state.activeServer?.lastSeen?.takeIf { it > 0L }?.let { Text("最后在线：${formatTime(it)}") }
-                state.systemStats?.let { stats ->
-                    Text("ComfyUI ${stats.comfyVersion} · 前端 ${stats.frontendVersion}")
-                    stats.devices.forEach { Text("${it.name}\n显存 ${formatSize(it.vramFree)} / ${formatSize(it.vramTotal)} 可用") }
-                }
-                HorizontalDivider()
-                Text("本地作品保存白名单", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "白名单按输出部件类型对所有工作流生效，不再绑定某一个工作流。只保存本 App 提交的任务；电脑浏览器提交的任务不会进入本地。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                if (state.cacheOutputRules.isEmpty()) {
-                    Text("尚未添加输出部件", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    state.cacheOutputRules.forEach { rule ->
-                        OutlinedCard(Modifier.fillMaxWidth()) {
-                            Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(rule.nodeTitle.ifBlank { rule.nodeType }, style = MaterialTheme.typography.titleSmall)
-                                    Text("${rule.nodeType} · 适用于所有工作流", maxLines = 1, style = MaterialTheme.typography.bodySmall)
-                                    Text(rule.serverUrl, maxLines = 1, style = MaterialTheme.typography.labelSmall)
-                                }
-                                Switch(rule.enabled, { viewModel.setCacheRuleEnabled(rule, it) })
-                                IconButton(onClick = { viewModel.removeCacheRule(rule) }) { Icon(Icons.Default.Delete, "删除白名单") }
-                            }
-                        }
-                    }
-                }
-                OutlinedButton(onClick = { confirmDeleteLocal = true }, enabled = state.localResults.isNotEmpty()) {
-                    Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("删除全部本地作品（${state.localResults.size} 项）")
-                }
-                HorizontalDivider()
-                Text("本地草稿", style = MaterialTheme.typography.titleSmall)
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("保存本地草稿")
-                        Text(
-                            "关闭后打开工作流直接读取服务器版本，不再保存或恢复未保存修改",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    Switch(state.localDraftsEnabled, viewModel::setLocalDraftsEnabled)
-                }
-                if (state.localDraftsEnabled) {
-                    Text("当前 ${state.localDraftCount} 个工作流有本地草稿", style = MaterialTheme.typography.bodySmall)
-                    OutlinedButton(onClick = { confirmClearDrafts = true }, enabled = state.localDraftCount > 0) {
-                        Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("清除全部本地草稿（${state.localDraftCount}）")
-                    }
-                }
-                HorizontalDivider()
-                Text("诊断日志", style = MaterialTheme.typography.titleSmall)
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("记录运行和闪退日志")
-                        Text("不记录提示词、工作流正文或生成图片", style = MaterialTheme.typography.bodySmall)
-                    }
-                    Switch(state.loggingEnabled, viewModel::setLoggingEnabled)
-                }
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = {
-                        diagnosticLog = viewModel.diagnosticLog()
-                        showDiagnosticLog = true
-                    }) { Text("查看日志") }
-                    OutlinedButton(onClick = {
-                        pendingLogExport = viewModel.diagnosticLog()
-                        logExportLauncher.launch("ComfyUIMobile-${System.currentTimeMillis()}.log")
-                    }) { Text("导出日志") }
-                    TextButton(onClick = viewModel::clearDiagnosticLog) { Text("清空日志") }
-                }
-                HorizontalDivider()
-                 Text("软件更新", style = MaterialTheme.typography.titleSmall)
-                 OutlinedButton(onClick = { viewModel.checkUpdate() }) { Text("检查更新") }
-                 state.updateInfo?.let { info ->
-                     Text("发现 ${info.tag}")
-                     if (state.updateDownloading) {
-                         LinearProgressIndicator(
-                             progress = { state.updateDownloadProgress ?: 0f },
-                             modifier = Modifier.fillMaxWidth(),
-                         )
-                         Text(
-                             "下载中 ${((state.updateDownloadProgress ?: 0f) * 100).toInt()}% · ${state.updateDownloadSource.orEmpty()}",
-                             style = MaterialTheme.typography.bodySmall,
-                         )
-                     } else {
-                         Button(onClick = viewModel::downloadUpdate) {
-                             Icon(Icons.Default.Download, null); Spacer(Modifier.width(4.dp)); Text("下载并安装")
-                         }
-                     }
-                 }
-                if (state.activeServer != null) {
-                    OutlinedButton(onClick = { viewModel.disconnect(); onDismiss() }) { Icon(Icons.Default.CloudOff, null); Spacer(Modifier.width(4.dp)); Text("断开连接") }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
-    )
 }
 
 @Composable
