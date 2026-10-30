@@ -486,6 +486,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         connect(address)
     }
 
+    fun onAppForegrounded() {
+        val current = _state.value
+        if (current.activeServer == null || current.status !in setOf(ConnectionStatus.RECONNECTING, ConnectionStatus.ERROR)) return
+        if (connectionJob?.isActive == true || reconnectJob?.isActive == true) return
+        // A background network loss may not be followed by a new onAvailable
+        // callback. Resume the existing session, without auto-connecting a
+        // fresh launch or a server the user explicitly disconnected from.
+        reconnectNow()
+    }
+
     fun onNetworkLost() {
         if (_state.value.activeServer == null) return
         reconnectJob?.cancel()

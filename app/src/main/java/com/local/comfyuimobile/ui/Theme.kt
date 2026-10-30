@@ -1,5 +1,8 @@
 package com.local.comfyuimobile.ui
 
+import android.app.Activity
+import android.content.ContextWrapper
+import androidx.core.view.WindowCompat
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -7,8 +10,11 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,8 +64,25 @@ private val typography = Typography().let {
 
 @Composable
 fun ComfyMobileTheme(content: @Composable () -> Unit) {
+    val darkTheme = isSystemInDarkTheme()
+    val colors = if (darkTheme) dark else light
+    val view = LocalView.current
+    if (!view.isInEditMode) SideEffect {
+        val activity = generateSequence(view.context) { (it as? ContextWrapper)?.baseContext }
+            .filterIsInstance<Activity>().firstOrNull()
+        activity?.window?.let { window ->
+            WindowCompat.getInsetsController(window, view).apply {
+                isAppearanceLightStatusBars = !darkTheme
+                isAppearanceLightNavigationBars = !darkTheme
+            }
+            @Suppress("DEPRECATION")
+            window.statusBarColor = colors.background.toArgb()
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = colors.background.toArgb()
+        }
+    }
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) dark else light,
+        colorScheme = colors,
         typography = typography,
         shapes = Shapes(
             extraSmall = RoundedCornerShape(6.dp), small = RoundedCornerShape(10.dp),

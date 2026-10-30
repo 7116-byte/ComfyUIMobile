@@ -3,12 +3,20 @@ package com.local.comfyuimobile.ui
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Color
+import android.graphics.drawable.BitmapDrawable
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.platform.ViewRootForTest
@@ -17,10 +25,25 @@ import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.lifecycle.ViewModelProvider
+import coil.Coil
+import coil.ImageLoader
+import coil.decode.DataSource
+import coil.intercept.Interceptor
+import coil.request.ImageResult
+import coil.request.SuccessResult
 import com.local.comfyuimobile.MainViewModel
 import com.local.comfyuimobile.model.AppUiState
 import com.local.comfyuimobile.model.ConnectionStatus
+import com.local.comfyuimobile.model.ParameterField
+import com.local.comfyuimobile.model.ParameterKind
+import com.local.comfyuimobile.model.WorkflowNode
+import com.local.comfyuimobile.model.ResultMedia
+import com.local.comfyuimobile.model.MediaKind
+import com.local.comfyuimobile.model.JobSummary
+import com.local.comfyuimobile.model.JobState
 import com.local.comfyuimobile.model.ServerProfile
+import com.local.comfyuimobile.model.SystemStats
+import com.local.comfyuimobile.model.DeviceStats
 import com.local.comfyuimobile.model.WorkflowDocument
 import com.local.comfyuimobile.model.WorkflowEntry
 import java.io.File
@@ -36,6 +59,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.shadows.ShadowDialog
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class, qualifiers = "w393dp-h852dp-mdpi")
@@ -48,6 +72,9 @@ class AdaptiveInterfaceTest {
     private var connectedAddress = ""
     private var scans = 0
     private var settings = false
+    private lateinit var viewModel: MainViewModel
+    private val fixtureBitmaps = mutableListOf<Bitmap>()
+    private var fixtureLoader: ImageLoader? = null
 
     private val server = ServerProfile("studio", "我的工作站", "http://192.168.1.20:8188")
     private val entries = listOf(
@@ -59,6 +86,9 @@ class AdaptiveInterfaceTest {
 
     @After fun tearDown() {
         if (::controller.isInitialized) { controller.pause().stop().destroy(); shadowOf(Looper.getMainLooper()).idle() }
+        fixtureLoader?.shutdown()
+        Coil.reset()
+        fixtureBitmaps.forEach { it.recycle() }
     }
 
     @Test fun phone393UsesSingleColumnAndBottomNavigation() { checkLayouts("phone-393", false) }
@@ -73,10 +103,50 @@ class AdaptiveInterfaceTest {
     }
 
     @Test @Config(qualifiers = "w776dp-h1163dp-mdpi")
-    fun tabletPortraitUsesTwoColumnsAndSideNavigation() { checkLayouts("tablet-portrait", true) }
+    fun tabletPortraitUsesTwoColumnsAndSideNavigation() {
+        RuntimeEnvironment.setFontScale(1.25f)
+        checkLayouts("tablet-portrait", true)
+    }
 
     @Test @Config(qualifiers = "w1163dp-h776dp-land-night-mdpi")
     fun tabletLandscapeDarkUsesAvailableWidth() { checkLayouts("tablet-landscape-dark", true) }
+
+    @Test fun longPagesScrollPastControlsAndReachLastContent() {
+        show(true, longContent = true)
+        assertTrue(isVisible("搜索工作流"))
+        scrollToEnd()
+        assertFalse(isVisible("搜索工作流"))
+        assertTrue(isVisible("预览流程 024"))
+
+        click("参数")
+        assertFalse(isVisible(server.baseUrl))
+        assertTrue(isVisible("当前工作流"))
+        scrollToEnd()
+        assertFalse(isVisible("当前工作流"))
+        assertTrue(isVisible("预览部件 24"))
+        assertTrue(isVisible("生成"))
+
+        click("结果")
+        clickDescription("切换到全部平铺")
+        scrollToEnd()
+        assertFalse(isVisible("本地作品"))
+        assertTrue(nodes().any { it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains("sample-0.png") == true && it.boundsInRoot.height > 0f })
+
+        click("后台")
+        assertTrue(isVisible(server.baseUrl))
+        click("服务器信息")
+        assertTrue(isVisible("ComfyUI test-version"))
+        click("收起服务器信息")
+        scrollToEnd()
+        assertFalse(isVisible(server.baseUrl))
+        assertTrue(isVisible("后台任务 24"))
+        screenshot("phone-393-scrolled-backend")
+        click("工作流")
+        assertFalse(isVisible("搜索工作流"))
+        assertTrue(isVisible("预览流程 024"))
+        click("参数")
+        assertTrue(isVisible("预览部件 24"))
+    }
 
     private fun checkLayouts(name: String, expanded: Boolean) {
         show(false)
@@ -97,25 +167,119 @@ class AdaptiveInterfaceTest {
         assertTrue(text("打开参数").boundsInRoot.width > 0f)
         assertFalse(nodes().any { it.config.getOrNull(SemanticsProperties.Text)?.any { value -> value.text == "删除工作流" } == true })
         screenshot("$name-workflows")
+        checkOtherPages(name, expanded)
     }
 
-    private fun show(connected: Boolean) {
+    private fun checkOtherPages(name: String, expanded: Boolean) {
+        click("参数")
+        assertTrue(text("保存").boundsInRoot.width > 0f)
+        assertTrue(text("生成").boundsInRoot.width > 0f)
+        click("创作提示词")
+        assertTrue(text("提示词").boundsInRoot.width > 0f)
+        if (expanded) assertTrue(text("流程目录").boundsInRoot.width > 0f)
+        screenshot("$name-parameters")
+        click("结果")
+        assertTrue(text("本地作品").boundsInRoot.width > 0f)
+        clickDescription("切换到全部平铺")
+        assertTrue(text("全部作品").boundsInRoot.width > 0f)
+        screenshot("$name-results")
+        click("后台")
+        assertTrue(isVisible(server.baseUrl))
+        click("服务器信息")
+        assertTrue(isVisible("ComfyUI test-version"))
+        click("收起服务器信息")
+        assertTrue(text("任务记录").boundsInRoot.width > 0f)
+        click("取消任务")
+        dismissConfirmation()
+        assertNull(viewModel.state.value.error)
+        click("清空等待")
+        dismissConfirmation()
+        assertNull(viewModel.state.value.error)
+        screenshot("$name-backend")
+        clickDescription("设置")
+        if (expanded) assertTrue(text("设置概览").boundsInRoot.width > 0f)
+        else assertTrue(text("本地数据").boundsInRoot.width > 0f)
+        screenshot("$name-settings")
+        clickDescription("关闭设置")
+    }
+
+    private fun dismissConfirmation() {
+        val dialog = ShadowDialog.getLatestDialog() ?: error("Confirmation missing")
+        val dialogRoot = findRoot(dialog.window!!.decorView) ?: error("Dialog Compose root missing")
+        val cancel = nodes(dialogRoot.semanticsOwner.rootSemanticsNode).first {
+            it.config.getOrNull(SemanticsProperties.Text)?.any { value -> value.text == "取消" } == true
+        }
+        assertTrue(cancel.config[SemanticsActions.OnClick].action!!.invoke())
+        settle()
+        assertFalse(dialog.isShowing)
+    }
+
+    private fun show(connected: Boolean, longContent: Boolean = false) {
         if (!::controller.isInitialized) {
             controller = Robolectric.buildActivity(ComponentActivity::class.java).setup().visible()
             activity = controller.get()
         }
-        val viewModel = ViewModelProvider(activity)[MainViewModel::class.java]
+        viewModel = ViewModelProvider(activity)[MainViewModel::class.java]
+        val fields = listOf(
+            ParameterField("prompt", "1", "创作提示词", "CLIPTextEncode", "text", "提示词", "STRING", ParameterKind.MULTILINE, "\"柔和自然光的人像摄影\"", displayValue = "柔和自然光的人像摄影"),
+            ParameterField("steps", "2", "采样设置", "KSampler", "steps", "采样步数", "INT", ParameterKind.INTEGER, "24", displayValue = "24", minimum = 1.0, maximum = 100.0),
+        ) + if (longContent) (1..24).map { index ->
+            ParameterField("extra-$index", "extra-$index", "预览部件 $index", "KSampler", "steps", "采样步数", "INT", ParameterKind.INTEGER, "24", displayValue = "24")
+        } else emptyList()
+        val workflow = WorkflowDocument(entries[1], "{}", fields, listOf(
+            WorkflowNode("1", "创作提示词", "CLIPTextEncode", 0),
+            WorkflowNode("2", "采样设置", "KSampler", 1),
+            WorkflowNode("3", "保存图像", "SaveImage", 2, isOutput = true),
+        ) + if (longContent) (1..24).map { WorkflowNode("extra-$it", "预览部件 $it", "KSampler", it + 2) } else emptyList(), serverUrl = server.baseUrl)
+        val sample = File(activity.cacheDir, "preview-image.png")
+        val bitmap = Bitmap.createBitmap(320, 320, Bitmap.Config.ARGB_8888)
+        Canvas(bitmap).apply {
+            drawColor(Color.rgb(221, 228, 242))
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            paint.color = Color.rgb(149, 166, 208); drawCircle(225f, 95f, 72f, paint)
+            paint.color = Color.rgb(86, 111, 169); drawRoundRect(25f, 150f, 270f, 325f, 45f, 45f, paint)
+        }
+        sample.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        fixtureBitmaps += bitmap
+        fixtureLoader?.shutdown()
+        fixtureLoader = ImageLoader.Builder(activity).components {
+            add(object : Interceptor {
+                override suspend fun intercept(chain: Interceptor.Chain): ImageResult = SuccessResult(
+                    drawable = BitmapDrawable(activity.resources, bitmap),
+                    request = chain.request,
+                    dataSource = DataSource.MEMORY_CACHE,
+                )
+            })
+        }.build()
+        Coil.setImageLoader(fixtureLoader!!)
+        val mediaNames = if (longContent) (0..39).map { "sample-$it.png" } else listOf("sample-a.png", "sample-b.png", "sample-c.png")
+        val localMedia = mediaNames.mapIndexed { index, filename ->
+            ResultMedia("job-${index / 2}", "3", filename = filename, subfolder = "", type = "output", kind = MediaKind.IMAGE, url = sample.toURI().toString(), localPath = sample.absolutePath, workflowName = "人像精修", createdAt = 1_793_400_000_000L + index)
+        }
         val state = AppUiState(
             serverInput = server.baseUrl, savedServers = listOf(server, server.copy(id = "remote", name = "远程工作站", baseUrl = "http://100.64.0.10:8188")),
             activeServer = if (connected) server else null,
             status = if (connected) ConnectionStatus.CONNECTED else ConnectionStatus.DISCONNECTED,
-            bridgeReady = connected, workflows = entries,
-            previewWorkflow = if (connected) WorkflowDocument(entries[1], "{}", emptyList()) else null,
+            bridgeReady = connected, workflows = entries + if (longContent) (1..24).map { WorkflowEntry("预览流程 %03d.json".format(it), "workflows/extra-$it.json", false) } else emptyList(),
+            systemStats = SystemStats("test-version", "test-frontend", listOf(DeviceStats("预览显卡", 24L * 1024 * 1024 * 1024, 16L * 1024 * 1024 * 1024))),
+            previewWorkflow = if (connected) workflow else null,
+            selectedWorkflow = if (connected) workflow else null,
+            fields = if (connected) fields else emptyList(),
+            localResults = localMedia,
+            jobs = listOf(
+                JobSummary("running-job", JobState.RUNNING, workflowName = "人像精修", submittedByApp = true, progress = 0.45f, currentNode = "采样设置"),
+                JobSummary("pending-job", JobState.PENDING, workflowName = "产品摄影"),
+                JobSummary("finished-job", JobState.SUCCESS, workflowName = "千问多图", durationMillis = 58000),
+            ) + if (longContent) (1..24).map { JobSummary("extra-$it", JobState.SUCCESS, workflowName = "后台任务 $it") } else emptyList(),
         )
         activity.setContent {
             ComfyMobileTheme {
-                if (connected) ConnectedApp(state, viewModel, SnackbarHostState()) { settings = true }
-                else ConnectionScreen(state, SnackbarHostState(), { settings = true }, {}, { connectedAddress = it }, { scans++ }, {})
+                var settingsOpen by remember { mutableStateOf(false) }
+                Box {
+                    if (connected) ConnectedApp(state, viewModel, SnackbarHostState()) { settingsOpen = true }
+                    else ConnectionScreen(state, SnackbarHostState(), { settings = true }, {}, { connectedAddress = it }, { scans++ }, {})
+                    if (settingsOpen) SettingsScreen(state, viewModel, SnackbarHostState()) { settingsOpen = false }
+                }
             }
         }
         settle()
@@ -148,6 +312,22 @@ class AdaptiveInterfaceTest {
         it.config.getOrNull(SemanticsProperties.Text)?.any { text -> text.text == value } == true && (!clickable || it.config.contains(SemanticsActions.OnClick))
     } ?: error("Text missing: $value")
     private fun click(value: String) { assertTrue(text(value, true).config[SemanticsActions.OnClick].action!!.invoke()); settle() }
+    private fun isVisible(value: String): Boolean = nodes().any {
+        it.config.getOrNull(SemanticsProperties.Text)?.any { text -> text.text == value } == true && it.boundsInRoot.height > 1f
+    }
+    private fun scrollToEnd() {
+        repeat(12) {
+            val scroll = nodes().firstOrNull { it.config.contains(SemanticsActions.ScrollBy) && it.config.contains(SemanticsProperties.VerticalScrollAxisRange) }
+                ?: error("Vertical scrolling unavailable")
+            assertTrue(scroll.config[SemanticsActions.ScrollBy].action!!.invoke(0f, 650f))
+            settle()
+        }
+    }
+    private fun clickDescription(value: String) {
+        val node = nodes().first { it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains(value) == true }
+        assertTrue(node.config[SemanticsActions.OnClick].action!!.invoke())
+        settle()
+    }
 
     private fun screenshot(name: String) {
         val view = activity.window.decorView

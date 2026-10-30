@@ -13,14 +13,18 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -32,6 +36,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -53,6 +58,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -65,6 +71,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -94,6 +102,7 @@ internal fun SettingsScreen(
 ) {
     val context = LocalContext.current
     var page by rememberSaveable { mutableStateOf(SettingsPage.OVERVIEW) }
+    val expanded = LocalConfiguration.current.screenWidthDp >= 720
     var confirmation by remember { mutableStateOf<SettingsConfirmation?>(null) }
     var diagnosticLog by remember { mutableStateOf("") }
     var pendingLogExport by remember { mutableStateOf("") }
@@ -133,224 +142,253 @@ internal fun SettingsScreen(
             },
             snackbarHost = { SnackbarHost(snackbar) },
         ) { padding ->
-            key(page) {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(padding),
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 32.dp),
-                    verticalArrangement = Arrangement.spacedBy(20.dp),
-                ) {
-                    when (page) {
-                        SettingsPage.OVERVIEW -> {
-                            item {
-                                SettingsGroup("连接") {
-                                    SettingsLink(Icons.Default.Wifi, "服务器连接", serverSummary(state)) { page = SettingsPage.SERVER }
-                                }
-                            }
-                            item {
-                                SettingsGroup("本地数据") {
-                                    SettingsLink(
-                                        Icons.Default.Image, "本地作品",
-                                        "${state.localResults.size} 项作品 · ${state.cacheOutputRules.count { it.enabled }} 条保存规则已启用",
-                                    ) { page = SettingsPage.RESULTS }
-                                    SettingsDivider()
-                                    SettingsLink(
-                                        Icons.Default.Save, "工作流草稿",
-                                        "${if (state.localDraftsEnabled) "已开启" else "已关闭"} · ${state.localDraftCount} 个草稿",
-                                    ) { page = SettingsPage.DRAFTS }
-                                }
-                            }
-                            item {
-                                SettingsGroup("应用") {
-                                    SettingsLink(
-                                        Icons.Default.Description, "诊断日志",
-                                        if (state.loggingEnabled) "正在记录运行和闪退日志" else "日志记录已关闭",
-                                    ) { page = SettingsPage.LOGS }
-                                    SettingsDivider()
-                                    SettingsLink(
-                                        Icons.Default.SystemUpdate, "软件更新",
-                                        when {
-                                            state.updateDownloading -> "正在下载更新"
-                                            state.updateInfo != null -> "发现新版本 ${state.updateInfo.tag}"
-                                            else -> "当前版本 ${BuildConfig.VERSION_NAME}"
-                                        },
-                                    ) { page = SettingsPage.UPDATE }
-                                }
-                            }
-                            item {
-                                Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("ComfyUI Mobile", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    SettingsHint("版本 ${BuildConfig.VERSION_NAME}")
+            Row(Modifier.fillMaxSize().padding(padding)) {
+                if (expanded) {
+                    Column(Modifier.width(192.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 8.dp, top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SettingsPage.entries.filter { it != SettingsPage.LOG_VIEW }.forEach { target ->
+                            val selected = page == target || page == SettingsPage.LOG_VIEW && target == SettingsPage.LOGS
+                            Surface(
+                                modifier = Modifier.fillMaxWidth().clickable { page = target },
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                            ) {
+                                Row(Modifier.padding(horizontal = 12.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Icon(when (target) {
+                                        SettingsPage.SERVER -> Icons.Default.Wifi
+                                        SettingsPage.RESULTS -> Icons.Default.Image
+                                        SettingsPage.DRAFTS -> Icons.Default.Save
+                                        SettingsPage.LOGS, SettingsPage.LOG_VIEW -> Icons.Default.Description
+                                        SettingsPage.UPDATE -> Icons.Default.SystemUpdate
+                                        SettingsPage.OVERVIEW -> Icons.Default.Settings
+                                    }, null, Modifier.size(20.dp), tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(if (target == SettingsPage.OVERVIEW) "设置概览" else target.title, style = MaterialTheme.typography.labelLarge, maxLines = 2, color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                                 }
                             }
                         }
-                        SettingsPage.SERVER -> {
-                            item {
-                                SettingsGroup("当前连接") {
-                                    SettingsDetail("状态", serverSummary(state))
-                                    state.activeServer?.let { server ->
-                                        SettingsDivider()
-                                        SettingsDetail("服务器地址", server.baseUrl)
-                                        if (server.lastSeen > 0L) {
+                    }
+                    VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                }
+                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.TopCenter) {
+                    key(page) {
+                        LazyColumn(
+                            modifier = Modifier.widthIn(max = 760.dp).fillMaxSize(),
+                            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 32.dp),
+                            verticalArrangement = Arrangement.spacedBy(20.dp),
+                        ) {
+                            when (page) {
+                                SettingsPage.OVERVIEW -> {
+                                    item {
+                                        SettingsGroup("连接") {
+                                            SettingsLink(Icons.Default.Wifi, "服务器连接", serverSummary(state)) { page = SettingsPage.SERVER }
+                                        }
+                                    }
+                                    item {
+                                        SettingsGroup("本地数据") {
+                                            SettingsLink(
+                                                Icons.Default.Image, "本地作品",
+                                                "${state.localResults.size} 项作品 · ${state.cacheOutputRules.count { it.enabled }} 条保存规则已启用",
+                                            ) { page = SettingsPage.RESULTS }
                                             SettingsDivider()
-                                            SettingsDetail("最后在线", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(server.lastSeen)))
+                                            SettingsLink(
+                                                Icons.Default.Save, "工作流草稿",
+                                                "${if (state.localDraftsEnabled) "已开启" else "已关闭"} · ${state.localDraftCount} 个草稿",
+                                            ) { page = SettingsPage.DRAFTS }
                                         }
                                     }
-                                }
-                            }
-                            state.systemStats?.let { stats ->
-                                item {
-                                    SettingsGroup("服务器信息") {
-                                        SettingsDetail("ComfyUI", stats.comfyVersion.ifBlank { "未知" })
-                                        SettingsDivider()
-                                        SettingsDetail("前端版本", stats.frontendVersion.ifBlank { "未知" })
-                                        stats.devices.forEach { device ->
+                                    item {
+                                        SettingsGroup("应用") {
+                                            SettingsLink(
+                                                Icons.Default.Description, "诊断日志",
+                                                if (state.loggingEnabled) "正在记录运行和闪退日志" else "日志记录已关闭",
+                                            ) { page = SettingsPage.LOGS }
                                             SettingsDivider()
-                                            SettingsDetail(device.name, "显存可用 ${settingsSize(device.vramFree)} / ${settingsSize(device.vramTotal)}")
+                                            SettingsLink(
+                                                Icons.Default.SystemUpdate, "软件更新",
+                                                when {
+                                                    state.updateDownloading -> "正在下载更新"
+                                                    state.updateInfo != null -> "发现新版本 ${state.updateInfo.tag}"
+                                                    else -> "当前版本 ${BuildConfig.VERSION_NAME}"
+                                                },
+                                            ) { page = SettingsPage.UPDATE }
+                                        }
+                                    }
+                                    item {
+                                        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text("ComfyUI Mobile", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            SettingsHint("版本 ${BuildConfig.VERSION_NAME}")
                                         }
                                     }
                                 }
-                            }
-                            item {
-                                if (state.activeServer != null) {
-                                    OutlinedButton(
-                                        onClick = { viewModel.disconnect(); onDismiss() },
-                                        modifier = Modifier.fillMaxWidth(),
-                                    ) {
-                                        Icon(Icons.Default.CloudOff, null, Modifier.size(18.dp))
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("断开连接")
-                                    }
-                                } else {
-                                    SettingsHint("返回连接页可添加服务器或扫描局域网。")
-                                }
-                            }
-                        }
-                        SettingsPage.RESULTS -> {
-                            item {
-                                SettingsGroup("自动保存规则") {
-                                    SettingsDetail("已启用 ${state.cacheOutputRules.count { it.enabled }} / ${state.cacheOutputRules.size} 条", "在参数页长按输出部件，即可加入保存白名单。")
-                                }
-                            }
-                            item {
-                                SettingsHint("规则按服务器和输出部件类型生效，适用于该服务器的所有工作流。仅自动保存本 App 提交或你明确接管且命中白名单的任务输出。")
-                            }
-                            if (state.cacheOutputRules.isEmpty()) {
-                                item {
-                                    SettingsGroup {
-                                        SettingsDetail("尚未添加保存规则", "添加后，符合规则的新作品会自动保存到手机。")
-                                    }
-                                }
-                            }
-                            items(state.cacheOutputRules) { rule ->
-                                SettingsGroup {
-                                    Row(
-                                        Modifier.fillMaxWidth().toggleable(value = rule.enabled, role = Role.Switch, onValueChange = { viewModel.setCacheRuleEnabled(rule, it) }).padding(16.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                    ) {
-                                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                            Text(rule.nodeTitle.ifBlank { rule.nodeType }, style = MaterialTheme.typography.titleSmall)
-                                            SettingsHint(rule.nodeType)
-                                            SettingsHint(rule.serverUrl)
-                                        }
-                                        Switch(rule.enabled, onCheckedChange = null)
-                                    }
-                                    SettingsDivider()
-                                    TextButton(onClick = { viewModel.removeCacheRule(rule) }, modifier = Modifier.align(Alignment.End).padding(end = 8.dp)) {
-                                        Text("移除规则")
-                                    }
-                                }
-                            }
-                            item {
-                                SettingsGroup("存储管理") {
-                                    SettingsDetail("${state.localResults.size} 项本地作品", "删除后无法从手机恢复，电脑端作品和自动保存规则不受影响。")
-                                    SettingsDangerButton("删除全部本地作品", state.localResults.isNotEmpty()) { confirmation = SettingsConfirmation.DELETE_RESULTS }
-                                }
-                            }
-                        }
-                        SettingsPage.DRAFTS -> {
-                            item {
-                                SettingsGroup {
-                                    SettingsToggle("保存本地草稿", "保留工作流未保存的修改，下次打开时继续编辑。", state.localDraftsEnabled, viewModel::setLocalDraftsEnabled)
-                                }
-                            }
-                            item {
-                                SettingsHint("关闭后，打开工作流会直接读取服务器版本，不再保存或恢复未保存修改。图片和文件导入的临时工作流仅在当前会话保留。")
-                            }
-                            item {
-                                SettingsGroup("草稿管理") {
-                                    SettingsDetail("${state.localDraftCount} 个工作流有本地草稿", "清除草稿不影响服务器上已保存的工作流文件。")
-                                    SettingsDangerButton("清除全部本地草稿", state.localDraftCount > 0) { confirmation = SettingsConfirmation.CLEAR_DRAFTS }
-                                }
-                            }
-                        }
-                        SettingsPage.LOGS -> {
-                            item {
-                                SettingsGroup {
-                                    SettingsToggle("记录运行和闪退日志", "用于排查连接、任务和应用异常。", state.loggingEnabled, viewModel::setLoggingEnabled)
-                                }
-                            }
-                            item { SettingsHint("不记录提示词、工作流正文或生成图片。关闭记录后，仍可查看和导出已有日志。") }
-                            item {
-                                SettingsGroup("日志文件") {
-                                    SettingsLink(Icons.Default.Description, "查看日志", "读取当前设备上已有的记录") {
-                                        page = SettingsPage.LOG_VIEW
-                                    }
-                                    SettingsDivider()
-                                    SettingsLink(Icons.Default.Download, "导出日志", "保存为文本文件，便于反馈问题") {
-                                        pendingLogExport = viewModel.diagnosticLog()
-                                        logExportLauncher.launch("ComfyUIMobile-${System.currentTimeMillis()}.log")
-                                    }
-                                }
-                            }
-                            item {
-                                SettingsDangerButton("清空日志") { confirmation = SettingsConfirmation.CLEAR_LOGS }
-                            }
-                        }
-                        SettingsPage.LOG_VIEW -> {
-                            item {
-                                SelectionContainer {
-                                    Text(diagnosticLog.ifBlank { "暂无日志" }, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                                }
-                            }
-                        }
-                        SettingsPage.UPDATE -> {
-                            item {
-                                SettingsGroup {
-                                    Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Icon(Icons.Default.SystemUpdate, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.primary)
-                                        Text("ComfyUI Mobile", style = MaterialTheme.typography.titleLarge)
-                                        SettingsHint("当前版本 ${BuildConfig.VERSION_NAME}")
-                                    }
-                                }
-                            }
-                            item {
-                                OutlinedButton(onClick = { viewModel.checkUpdate() }, modifier = Modifier.fillMaxWidth(), enabled = !state.updateDownloading) {
-                                    Text("检查更新")
-                                }
-                            }
-                            state.updateInfo?.let { info ->
-                                item {
-                                    SettingsGroup("可用更新") {
-                                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                            Text("新版本 ${info.tag}", style = MaterialTheme.typography.titleMedium)
-                                            if (state.updateDownloading) {
-                                                val progress = state.updateDownloadProgress
-                                                if (progress == null) LinearProgressIndicator(Modifier.fillMaxWidth())
-                                                else LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
-                                                SettingsHint("下载中 ${progress?.let { "${(it * 100).toInt()}%" }.orEmpty()} · ${state.updateDownloadSource.orEmpty()}")
-                                            } else {
-                                                Button(onClick = viewModel::downloadUpdate, modifier = Modifier.fillMaxWidth()) {
-                                                    Icon(Icons.Default.Download, null, Modifier.size(18.dp))
-                                                    Spacer(Modifier.width(8.dp))
-                                                    Text("下载并安装")
+                                SettingsPage.SERVER -> {
+                                    item {
+                                        SettingsGroup("当前连接") {
+                                            SettingsDetail("状态", serverSummary(state))
+                                            state.activeServer?.let { server ->
+                                                SettingsDivider()
+                                                SettingsDetail("服务器地址", server.baseUrl)
+                                                if (server.lastSeen > 0L) {
+                                                    SettingsDivider()
+                                                    SettingsDetail("最后在线", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(server.lastSeen)))
                                                 }
                                             }
                                         }
                                     }
+                                    state.systemStats?.let { stats ->
+                                        item {
+                                            SettingsGroup("服务器信息") {
+                                                SettingsDetail("ComfyUI", stats.comfyVersion.ifBlank { "未知" })
+                                                SettingsDivider()
+                                                SettingsDetail("前端版本", stats.frontendVersion.ifBlank { "未知" })
+                                                stats.devices.forEach { device ->
+                                                    SettingsDivider()
+                                                    SettingsDetail(device.name, "显存可用 ${settingsSize(device.vramFree)} / ${settingsSize(device.vramTotal)}")
+                                                }
+                                            }
+                                        }
+                                    }
+                                    item {
+                                        if (state.activeServer != null) {
+                                            OutlinedButton(
+                                                onClick = { viewModel.disconnect(); onDismiss() },
+                                                modifier = Modifier.fillMaxWidth(),
+                                            ) {
+                                                Icon(Icons.Default.CloudOff, null, Modifier.size(18.dp))
+                                                Spacer(Modifier.width(8.dp))
+                                                Text("断开连接")
+                                            }
+                                        } else {
+                                            SettingsHint("返回连接页可添加服务器或扫描局域网。")
+                                        }
+                                    }
+                                }
+                                SettingsPage.RESULTS -> {
+                                    item {
+                                        SettingsGroup("自动保存规则") {
+                                            SettingsDetail("已启用 ${state.cacheOutputRules.count { it.enabled }} / ${state.cacheOutputRules.size} 条", "在参数页长按输出部件，即可加入保存白名单。")
+                                        }
+                                    }
+                                    item {
+                                        SettingsHint("规则按服务器和输出部件类型生效，适用于该服务器的所有工作流。仅自动保存本 App 提交或你明确接管且命中白名单的任务输出。")
+                                    }
+                                    if (state.cacheOutputRules.isEmpty()) {
+                                        item {
+                                            SettingsGroup {
+                                                SettingsDetail("尚未添加保存规则", "添加后，符合规则的新作品会自动保存到手机。")
+                                            }
+                                        }
+                                    }
+                                    items(state.cacheOutputRules) { rule ->
+                                        SettingsGroup {
+                                            Row(
+                                                Modifier.fillMaxWidth().toggleable(value = rule.enabled, role = Role.Switch, onValueChange = { viewModel.setCacheRuleEnabled(rule, it) }).padding(16.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                            ) {
+                                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                    Text(rule.nodeTitle.ifBlank { rule.nodeType }, style = MaterialTheme.typography.titleSmall)
+                                                    SettingsHint(rule.nodeType)
+                                                    SettingsHint(rule.serverUrl)
+                                                }
+                                                Switch(rule.enabled, onCheckedChange = null)
+                                            }
+                                            SettingsDivider()
+                                            TextButton(onClick = { viewModel.removeCacheRule(rule) }, modifier = Modifier.align(Alignment.End).padding(end = 8.dp)) {
+                                                Text("移除规则")
+                                            }
+                                        }
+                                    }
+                                    item {
+                                        SettingsGroup("存储管理") {
+                                            SettingsDetail("${state.localResults.size} 项本地作品", "删除后无法从手机恢复，电脑端作品和自动保存规则不受影响。")
+                                            SettingsDangerButton("删除全部本地作品", state.localResults.isNotEmpty()) { confirmation = SettingsConfirmation.DELETE_RESULTS }
+                                        }
+                                    }
+                                }
+                                SettingsPage.DRAFTS -> {
+                                    item {
+                                        SettingsGroup {
+                                            SettingsToggle("保存本地草稿", "保留工作流未保存的修改，下次打开时继续编辑。", state.localDraftsEnabled, viewModel::setLocalDraftsEnabled)
+                                        }
+                                    }
+                                    item {
+                                        SettingsHint("关闭后，打开工作流会直接读取服务器版本，不再保存或恢复未保存修改。图片和文件导入的临时工作流仅在当前会话保留。")
+                                    }
+                                    item {
+                                        SettingsGroup("草稿管理") {
+                                            SettingsDetail("${state.localDraftCount} 个工作流有本地草稿", "清除草稿不影响服务器上已保存的工作流文件。")
+                                            SettingsDangerButton("清除全部本地草稿", state.localDraftCount > 0) { confirmation = SettingsConfirmation.CLEAR_DRAFTS }
+                                        }
+                                    }
+                                }
+                                SettingsPage.LOGS -> {
+                                    item {
+                                        SettingsGroup {
+                                            SettingsToggle("记录运行和闪退日志", "用于排查连接、任务和应用异常。", state.loggingEnabled, viewModel::setLoggingEnabled)
+                                        }
+                                    }
+                                    item { SettingsHint("不记录提示词、工作流正文或生成图片。关闭记录后，仍可查看和导出已有日志。") }
+                                    item {
+                                        SettingsGroup("日志文件") {
+                                            SettingsLink(Icons.Default.Description, "查看日志", "读取当前设备上已有的记录") {
+                                                page = SettingsPage.LOG_VIEW
+                                            }
+                                            SettingsDivider()
+                                            SettingsLink(Icons.Default.Download, "导出日志", "保存为文本文件，便于反馈问题") {
+                                                pendingLogExport = viewModel.diagnosticLog()
+                                                logExportLauncher.launch("ComfyUIMobile-${System.currentTimeMillis()}.log")
+                                            }
+                                        }
+                                    }
+                                    item {
+                                        SettingsDangerButton("清空日志") { confirmation = SettingsConfirmation.CLEAR_LOGS }
+                                    }
+                                }
+                                SettingsPage.LOG_VIEW -> {
+                                    item {
+                                        SelectionContainer {
+                                            Text(diagnosticLog.ifBlank { "暂无日志" }, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                                        }
+                                    }
+                                }
+                                SettingsPage.UPDATE -> {
+                                    item {
+                                        SettingsGroup {
+                                            Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                Icon(Icons.Default.SystemUpdate, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.primary)
+                                                Text("ComfyUI Mobile", style = MaterialTheme.typography.titleLarge)
+                                                SettingsHint("当前版本 ${BuildConfig.VERSION_NAME}")
+                                            }
+                                        }
+                                    }
+                                    item {
+                                        OutlinedButton(onClick = { viewModel.checkUpdate() }, modifier = Modifier.fillMaxWidth(), enabled = !state.updateDownloading) {
+                                            Text("检查更新")
+                                        }
+                                    }
+                                    state.updateInfo?.let { info ->
+                                        item {
+                                            SettingsGroup("可用更新") {
+                                                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                                    Text("新版本 ${info.tag}", style = MaterialTheme.typography.titleMedium)
+                                                    if (state.updateDownloading) {
+                                                        val progress = state.updateDownloadProgress
+                                                        if (progress == null) LinearProgressIndicator(Modifier.fillMaxWidth())
+                                                        else LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                                                        SettingsHint("下载中 ${progress?.let { "${(it * 100).toInt()}%" }.orEmpty()} · ${state.updateDownloadSource.orEmpty()}")
+                                                    } else {
+                                                        Button(onClick = viewModel::downloadUpdate, modifier = Modifier.fillMaxWidth()) {
+                                                            Icon(Icons.Default.Download, null, Modifier.size(18.dp))
+                                                            Spacer(Modifier.width(8.dp))
+                                                            Text("下载并安装")
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    item { SettingsHint("更新来自 GitHub Release，安装前会校验文件、包名、版本号和签名证书。未连接服务器时也可检查更新。") }
                                 }
                             }
-                            item { SettingsHint("更新来自 GitHub Release，安装前会校验文件、包名、版本号和签名证书。未连接服务器时也可检查更新。") }
                         }
                     }
                 }

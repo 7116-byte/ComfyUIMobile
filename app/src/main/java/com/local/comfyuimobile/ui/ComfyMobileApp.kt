@@ -7,6 +7,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -37,11 +40,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.displayCutout
@@ -49,6 +54,8 @@ import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -83,6 +90,8 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.PhotoAlbum
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MoreHoriz
@@ -131,6 +140,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -145,6 +156,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -156,6 +168,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -166,6 +179,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -210,7 +224,7 @@ private enum class MainPage(val label: String, val icon: ImageVector) {
     WORKFLOWS("工作流", Icons.Default.Folder),
     PARAMETERS("参数", Icons.Default.Tune),
     RESULTS("结果", Icons.Default.Image),
-    TASKS("任务", Icons.AutoMirrored.Filled.List),
+    BACKEND("后台", Icons.Default.Hub),
 }
 
 private enum class ResultLayout { ALL, ALBUMS }
@@ -258,8 +272,22 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
         }
         key(bridge.webView) {
             AndroidView(
-                factory = { bridge.webView },
-                modifier = Modifier.size(1.dp).alpha(0f),
+                factory = { context ->
+                    FrameLayout(context).apply {
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                        descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                        addView(bridge.webView.apply {
+                            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                            isFocusable = false
+                            isFocusableInTouchMode = false
+                        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                    }
+                },
+                modifier = Modifier.size(1.dp).alpha(0f).clearAndSetSemantics { },
+                update = { container ->
+                    container.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                    bridge.webView.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                },
             )
         }
         if (state.loading && state.advancedEditor) {
@@ -343,10 +371,17 @@ internal fun ConnectionProgressCard(state: AppUiState) {
 @Composable
 internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState, onOpenSettings: () -> Unit) {
     val expanded = LocalConfiguration.current.screenWidthDp >= 720
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val topBarScroll = TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
     var page by rememberSaveable { mutableStateOf(MainPage.WORKFLOWS) }
+    val pageStates = rememberSaveableStateHolder()
     var resultSource by rememberSaveable { mutableStateOf(ResultSource.LOCAL) }
     var resultLayout by rememberSaveable { mutableStateOf(ResultLayout.ALBUMS) }
     var resultAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(page) {
+        topBarScroll.state.heightOffset = 0f
+        topBarScroll.state.contentOffset = 0f
+    }
     BackHandler(enabled = page == MainPage.RESULTS && resultAlbumId != null) {
         resultAlbumId = null
     }
@@ -375,46 +410,23 @@ internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar:
         else if (state.results.any { it.jobId == jobId }) resultSource = ResultSource.CLOUD
     }
     Scaffold(
+        modifier = Modifier.imePadding().nestedScroll(topBarScroll.nestedScrollConnection),
         topBar = {
             TopAppBar(
-                title = {
-                    Column {
-                        Text(page.label, style = MaterialTheme.typography.titleLarge)
-                        Text(
-                            state.activeServer?.name.orEmpty() + " · " +
-                            if (state.activeJobId != null && state.generationProgress != 1f &&
-                                state.generationMessage.isNotBlank() && !state.generationMessage.startsWith("生成失败")
-                            ) {
-                                state.generationMessage
-                            } else if (!state.bridgeReady && state.status == ConnectionStatus.ERROR) {
-                                if (state.connectionStep < 3) "服务器连接失败 · 请点重连"
-                                else "工作流前端初始化失败 · 请点重连"
-                            } else if (state.status == ConnectionStatus.RECONNECTING) {
-                                "正在重连"
-                            } else if (state.status == ConnectionStatus.CONNECTING) {
-                                "正在连接服务器"
-                            } else if (!state.bridgeReady) {
-                                "服务器已连接 · 工作流前端初始化中"
-                            } else when (state.status) {
-                                ConnectionStatus.CONNECTED -> "在线 · 队列 ${state.queueRemaining}" + state.systemStats?.comfyVersion?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
-                                ConnectionStatus.RECONNECTING -> "正在重连"
-                                else -> state.connectionMessage
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                },
+                title = { Text(page.label, style = MaterialTheme.typography.titleLarge) },
                 actions = {
-                    IconButton(onClick = viewModel::refreshOrReconnect) { Icon(Icons.Default.Refresh, "重新连接服务器") }
+                    if (page != MainPage.BACKEND && (state.status != ConnectionStatus.CONNECTED || !state.bridgeReady)) {
+                        TextButton(onClick = { page = MainPage.BACKEND }) {
+                            Text(backendConnectionLabel(state), color = MaterialTheme.colorScheme.error)
+                        }
+                    }
                     IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "设置") }
                 },
+                scrollBehavior = topBarScroll,
             )
         },
         bottomBar = {
-            if (!expanded) {
+            if (!expanded && !imeVisible) {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                     MainPage.entries.forEach { target ->
                         NavigationBarItem(
@@ -460,23 +472,25 @@ internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar:
                 VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
             }
             Box(Modifier.weight(1f).fillMaxHeight()) {
-                when (page) {
-                    MainPage.WORKFLOWS -> WorkflowScreen(state, viewModel, onOpenParameters = { page = MainPage.PARAMETERS })
-                    MainPage.PARAMETERS -> ParameterScreen(state, viewModel)
-                    MainPage.RESULTS -> ResultScreen(
-                        state = state,
-                        viewModel = viewModel,
-                        source = resultSource,
-                        onSourceChange = {
-                            resultSource = it
-                            resultAlbumId = null
-                        },
-                        layout = resultLayout,
-                        onLayoutChange = { resultLayout = it },
-                        selectedAlbumId = resultAlbumId,
-                        onSelectedAlbumChange = { resultAlbumId = it },
-                    )
-                    MainPage.TASKS -> TaskScreen(state, viewModel)
+                pageStates.SaveableStateProvider(page.name) {
+                    when (page) {
+                        MainPage.WORKFLOWS -> WorkflowScreen(state, viewModel, onOpenParameters = { page = MainPage.PARAMETERS })
+                        MainPage.PARAMETERS -> ParameterScreen(state, viewModel)
+                        MainPage.RESULTS -> ResultScreen(
+                            state = state,
+                            viewModel = viewModel,
+                            source = resultSource,
+                            onSourceChange = {
+                                resultSource = it
+                                resultAlbumId = null
+                            },
+                            layout = resultLayout,
+                            onLayoutChange = { resultLayout = it },
+                            selectedAlbumId = resultAlbumId,
+                            onSelectedAlbumChange = { resultAlbumId = it },
+                        )
+                        MainPage.BACKEND -> BackendScreen(state, viewModel)
+                    }
                 }
                 if (state.loading || state.generating) {
                     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.22f)), contentAlignment = Alignment.Center) {
@@ -577,46 +591,14 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
             }
         }
     }
-    val listContent: @Composable (Modifier) -> Unit = { modifier ->
-        LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (filtered.isEmpty()) {
-                item {
-                    Column(Modifier.fillMaxWidth().padding(vertical = 40.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Icon(Icons.Default.Folder, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(if (search.isNotBlank()) "没有匹配的工作流" else "这里还没有工作流", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("可从上方导入工作流文件或图片", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
-            items(filtered, key = { it.path }) { entry ->
-                WorkflowRow(
-                    entry = entry,
-                    selected = if (selectedEntryPath != null) selectedEntryPath == entry.path else state.previewWorkflow?.entry?.path == entry.path,
-                    onClick = {
-                        if (entry.isDirectory) { currentFolder = entry.path; search = "" }
-                        else { selectedEntryPath = null; viewModel.selectWorkflow(entry) }
-                    },
-                    onLongClick = if (entry.isDirectory) null else ({ selectedEntryPath = entry.path }),
-                    onDoubleClick = {
-                        if (!entry.isDirectory) {
-                            selectedEntryPath = null
-                            viewModel.selectWorkflow(entry, recordAsOpened = true)
-                            onOpenParameters()
-                        }
-                    },
-                )
-            }
-        }
-    }
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        val wide = maxWidth >= 660.dp
-        Column(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    val browserHeader: @Composable () -> Unit = {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (!state.bridgeReady) {
                 OutlinedCard(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
                             when (state.status) {
-                                ConnectionStatus.ERROR -> "连接出现问题，请点击顶部重连图标"
+                                ConnectionStatus.ERROR -> "连接出现问题，请到后台页重新连接"
                                 ConnectionStatus.RECONNECTING -> "正在重连，当前工作流会尽量保留"
                                 else -> "正在准备工作流，可先浏览列表"
                             },
@@ -653,21 +635,52 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
                     Text("导入")
                 }
             }
-            if (wide) {
-                Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                    listContent(Modifier.weight(1f).fillMaxHeight())
-                    Column(Modifier.width(236.dp).fillMaxHeight().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                        selectionPanel()
-                        Text("点击预览，打开参数后再编辑。保存时才会写入服务器工作流。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+    val listContent: @Composable (Modifier, Boolean) -> Unit = { modifier, includeSelection ->
+        LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item(key = "browser-controls") { browserHeader() }
+            if (includeSelection && actionEntry != null) item(key = "current-selection") { selectionPanel() }
+            if (filtered.isEmpty()) {
+                item {
+                    Column(Modifier.fillMaxWidth().padding(vertical = 40.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Icon(Icons.Default.Folder, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(if (search.isNotBlank()) "没有匹配的工作流" else "这里还没有工作流", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("可从上方导入工作流文件或图片", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-            } else {
-                if (actionEntry != null) selectionPanel()
-                listContent(Modifier.weight(1f).fillMaxWidth())
+            }
+            items(filtered, key = { it.path }) { entry ->
+                WorkflowRow(
+                    entry = entry,
+                    selected = if (selectedEntryPath != null) selectedEntryPath == entry.path else state.previewWorkflow?.entry?.path == entry.path,
+                    onClick = {
+                        if (entry.isDirectory) { currentFolder = entry.path; search = "" }
+                        else { selectedEntryPath = null; viewModel.selectWorkflow(entry) }
+                    },
+                    onLongClick = if (entry.isDirectory) null else ({ selectedEntryPath = entry.path }),
+                    onDoubleClick = {
+                        if (!entry.isDirectory) {
+                            selectedEntryPath = null
+                            viewModel.selectWorkflow(entry, recordAsOpened = true)
+                            onOpenParameters()
+                        }
+                    },
+                )
             }
         }
     }
-
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        if (maxWidth >= 660.dp) {
+            Row(Modifier.fillMaxSize().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                listContent(Modifier.weight(1f).fillMaxHeight(), false)
+                Column(Modifier.width(236.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    selectionPanel()
+                    Text("点击预览，打开参数后再编辑。保存时才会写入服务器工作流。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        } else listContent(Modifier.fillMaxSize().padding(horizontal = 20.dp), true)
+    }
     if (duplicateDialog && actionEntry != null) NameDialog("复制为新工作流", dialogText, { duplicateDialog = false }) {
         viewModel.duplicateWorkflow(actionEntry, it); duplicateDialog = false; selectedEntryPath = null
     }
@@ -795,136 +808,89 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     LaunchedEffect(problemNodeIds) {
         if (problemNodeIds.isNotEmpty()) expandedNodeIds = expandedNodeIds + problemNodeIds
     }
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Box(Modifier.weight(0.72f)) {
-                OutlinedCard(
-                    modifier = Modifier.fillMaxWidth().clickable { recentMenuExpanded = true },
-                    shape = RoundedCornerShape(12.dp),
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(workflow.entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 1)
-                            Text(
-                                "${nodes.size} 个流程部件 · ${state.fields.count { it.visible }} 个参数" +
-                                    when {
-                                        workflow.isTemporary -> " · 临时工作流，尚未保存"
-                                        workflow.hasUnsavedChanges -> " · 本地草稿"
-                                        else -> ""
-                                    },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (workflow.hasUnsavedChanges) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                maxLines = 1,
-                            )
-                        }
-                        Icon(
-                            if (recentMenuExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            "选择最近打开的工作流",
-                        )
-                    }
-                }
-                DropdownMenu(
-                    expanded = recentMenuExpanded,
-                    onDismissRequest = { recentMenuExpanded = false },
-                ) {
-                    if (recentWorkflows.isEmpty()) {
-                        DropdownMenuItem(text = { Text("暂无最近打开的工作流") }, onClick = {}, enabled = false)
-                    } else {
-                        recentWorkflows.forEach { entry ->
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(entry.name, maxLines = 1)
-                                        Text(
-                                            entry.path.substringBeforeLast('/', "workflows"),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                        )
-                                    }
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        if (entry.path == workflow.entry.path) Icons.Default.CheckCircle else Icons.Default.History,
-                                        null,
-                                    )
-                                },
-                                onClick = {
-                                    recentMenuExpanded = false
-                                    if (entry.path != workflow.entry.path) {
-                                        viewModel.selectWorkflow(entry, recordAsOpened = true)
-                                    }
-                                },
-                            )
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.weight(0.28f))
-            TextButton(onClick = { layoutDialog = true }, modifier = Modifier.height(42.dp)) { Text("表单布局") }
-            Surface(
-                modifier = Modifier.width(158.dp).height(42.dp),
-                shape = RoundedCornerShape(21.dp),
-                color = MaterialTheme.colorScheme.secondaryContainer,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier.weight(1f).fillMaxHeight().clickable { viewModel.saveWorkflow() },
-                        contentAlignment = Alignment.Center,
-                    ) { Text("保存", color = MaterialTheme.colorScheme.onSecondaryContainer) }
-                    Box(
-                        Modifier.width(1.dp).fillMaxHeight(0.58f).background(MaterialTheme.colorScheme.outlineVariant),
-                    )
-                    Box(
-                        Modifier.weight(1f).fillMaxHeight().clickable {
-                            saveAsName = workflow.entry.name.substringBeforeLast('.') + "-副本"
-                            saveAsFolder = workflow.entry.path.substringBeforeLast('/', "workflows")
-                            saveAsDialog = true
-                        },
-                        contentAlignment = Alignment.Center,
-                    ) { Text("另存", color = MaterialTheme.colorScheme.onSecondaryContainer) }
-                }
-            }
-        }
-        if (state.generationMessage.isNotBlank()) {
-            OutlinedCard(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
-                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(state.generationMessage, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                        state.activeJobId?.let { Text(it.take(8), style = MaterialTheme.typography.labelSmall) }
-                    }
-                    state.generationProgress?.let { progress ->
-                        LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-                    }
-                }
-            }
-        }
+    var toolbarMenuExpanded by remember(workflow.entry.path) { mutableStateOf(false) }
+    val parameterScroll = rememberScrollState()
+    val parameterScope = rememberCoroutineScope()
+    val nodeRequesters = remember(workflow.entry.path, workflow.nodes) { nodes.associate { it.first.id to BringIntoViewRequester() } }
+    val parameterCards: @Composable (Modifier) -> Unit = { modifier ->
         CompositionLocalProvider(
             LocalBringIntoViewSpec provides parameterBringIntoViewSpec,
         ) {
             Column(
-                Modifier
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                modifier.verticalScroll(parameterScroll).padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Box(Modifier.weight(1f)) {
+                                Row(
+                                    Modifier.fillMaxWidth().clickable { recentMenuExpanded = true },
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text("当前工作流", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(workflow.entry.name.removeSuffix(".json"), style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    Icon(Icons.Default.ExpandMore, "选择最近打开的工作流", Modifier.size(20.dp))
+                                }
+                                DropdownMenu(expanded = recentMenuExpanded, onDismissRequest = { recentMenuExpanded = false }) {
+                                    recentWorkflows.forEach { entry ->
+                                        DropdownMenuItem(
+                                            text = { Text(entry.name.removeSuffix(".json"), maxLines = 2) },
+                                            leadingIcon = { Icon(if (entry.path == workflow.entry.path) Icons.Default.CheckCircle else Icons.Default.History, null) },
+                                            onClick = { recentMenuExpanded = false; if (entry.path != workflow.entry.path) viewModel.selectWorkflow(entry, recordAsOpened = true) },
+                                        )
+                                    }
+                                }
+                            }
+                            FilledTonalButton(
+                                onClick = { viewModel.saveWorkflow() },
+                                enabled = !state.loading && !state.generating,
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                            ) { Text("保存", maxLines = 1) }
+                            Box {
+                                IconButton(onClick = { toolbarMenuExpanded = true }) { Icon(Icons.Default.MoreHoriz, "参数页操作") }
+                                DropdownMenu(expanded = toolbarMenuExpanded, onDismissRequest = { toolbarMenuExpanded = false }) {
+                                    DropdownMenuItem(text = { Text("另存工作流") }, onClick = {
+                                        toolbarMenuExpanded = false
+                                        saveAsName = workflow.entry.name.substringBeforeLast('.') + "-副本"
+                                        saveAsFolder = workflow.entry.path.substringBeforeLast('/', "workflows")
+                                        saveAsDialog = true
+                                    })
+                                    DropdownMenuItem(text = { Text("表单布局") }, onClick = { toolbarMenuExpanded = false; layoutDialog = true })
+                                }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            StudioBadge("${nodes.size} 个部件")
+                            Text("${state.fields.count { it.visible }} 个参数", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (workflow.isTemporary || workflow.hasUnsavedChanges) {
+                            Text(
+                                if (workflow.isTemporary) "临时工作流 · 另存后可长期保留" else "有未保存的修改",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
+                if (state.generationMessage.isNotBlank()) {
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(state.generationMessage, style = MaterialTheme.typography.bodyMedium)
+                            state.generationProgress?.let { progress -> LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth()) }
+                        }
+                    }
+                }
                 nodes.forEach { (node, fields) ->
                     key(node.id) {
                         val nodeId = node.id
                         NodeParameterCard(
+                            modifier = Modifier.bringIntoViewRequester(nodeRequesters.getValue(nodeId)),
                             node = node,
                             fields = fields,
                             expanded = nodeId in expandedNodeIds,
@@ -966,21 +932,49 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
                 }
             }
         }
-        Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(
-                onClick = viewModel::openAdvancedEditor,
-                modifier = Modifier.weight(1f),
-                enabled = state.bridgeReady && !state.loading && !state.generating,
-            ) { Text("高级编辑") }
-            Button(
-                onClick = {
-                    if (hasConfiguredLocalOutput) viewModel.generate()
-                    else confirmGenerateWithoutLocalOutput = true
-                },
-                enabled = !state.generating && !state.loading && state.bridgeReady && localProblems.isEmpty(),
-                modifier = Modifier.weight(1f),
-            ) {
-                Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("生成")
+    }
+    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (LocalConfiguration.current.screenWidthDp >= 720) {
+            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Card(
+                    modifier = Modifier.width(174.dp).fillMaxHeight(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                ) {
+                    Text("流程目录", Modifier.padding(16.dp), style = MaterialTheme.typography.titleSmall)
+                    LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        items(nodes, key = { it.first.id }) { (node, _) ->
+                            val active = state.currentExecutingNodeId == node.id
+                            Row(
+                                Modifier.fillMaxWidth().background(if (active) MaterialTheme.colorScheme.primaryContainer else Color.Transparent, RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        expandedNodeIds = expandedNodeIds + node.id
+                                        parameterScope.launch { kotlinx.coroutines.delay(80); nodeRequesters[node.id]?.bringIntoView() }
+                                    }.padding(horizontal = 10.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text("${node.order + 1}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                                Text(node.title.ifBlank { node.type }, style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+                parameterCards(Modifier.weight(1f).fillMaxHeight())
+            }
+        } else parameterCards(Modifier.weight(1f).fillMaxWidth())
+        if (WindowInsets.ime.getBottom(LocalDensity.current) == 0) Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface) {
+            Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = viewModel::openAdvancedEditor,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    enabled = state.bridgeReady && !state.loading && !state.generating,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                ) { Text("高级编辑", maxLines = 1) }
+                Button(
+                    onClick = { if (hasConfiguredLocalOutput) viewModel.generate() else confirmGenerateWithoutLocalOutput = true },
+                    enabled = !state.generating && !state.loading && state.bridgeReady && localProblems.isEmpty(),
+                    modifier = Modifier.weight(1.3f).heightIn(min = 48.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                ) { Icon(Icons.Default.PlayArrow, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("生成", maxLines = 1) }
             }
         }
         val firstProblem = localProblems.firstOrNull()?.let { problem ->
@@ -993,7 +987,9 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
         if (firstProblem != null) {
             Text(firstProblem, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         }
+        Spacer(Modifier.height(2.dp))
     }
+
     if (state.workflowDraftConflictRequired) {
         WorkflowDraftConflictDialog(
             message = state.workflowDraftConflictReason,
@@ -1072,6 +1068,7 @@ private fun NodeParameterCard(
     onUpload: (ParameterField) -> Unit,
     multilineEditorStates: MutableMap<String, TextFieldValue>,
     onMultilineFocusGained: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val title = node.title.ifBlank { node.type.ifBlank { "未命名节点" } }
     val bringIntoViewRequester = remember(node.id) { BringIntoViewRequester() }
@@ -1088,13 +1085,15 @@ private fun NodeParameterCard(
     val inputMarkerTop = with(density) { ((headerHeightPx - inputMarkerHeightPx).coerceAtLeast(0) / 2f).toDp() }
     val outputMarkerTop = with(density) { ((headerHeightPx - outputMarkerHeightPx).coerceAtLeast(0) / 2f).toDp() }
     Box(
-        Modifier
+        modifier
             .fillMaxWidth()
             .padding(horizontal = 7.dp)
             .bringIntoViewRequester(bringIntoViewRequester),
     ) {
         OutlinedCard(
             modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surface),
             border = BorderStroke(
                 when {
                     problems.isNotEmpty() -> 2.dp
@@ -1114,7 +1113,7 @@ private fun NodeParameterCard(
                         .fillMaxWidth()
                         .onSizeChanged { headerHeightPx = it.height }
                         .combinedClickable(onClick = onToggle, onLongClick = onLongPress)
-                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                        .padding(horizontal = 16.dp, vertical = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     ConnectionMarkerLabels(node.inputMarkers)
@@ -1124,7 +1123,7 @@ private fun NodeParameterCard(
                         Text(
                             buildString {
                                 if (node.type.isNotBlank() && node.type != title) append(node.type).append(" · ")
-                                append(fields.size).append(" 个设置")
+                                append(fields.size).append(" 个参数")
                             },
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -1139,18 +1138,17 @@ private fun NodeParameterCard(
                 }
                 if (expanded) {
                     HorizontalDivider()
-                    Column(Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         problems.forEach { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                         if (fields.isEmpty()) {
                             Text("此部件没有可调整参数。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         if (fields.isNotEmpty()) {
                             Surface(
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
-                                shape = RoundedCornerShape(8.dp),
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.75f)),
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = RoundedCornerShape(12.dp),
                             ) {
-                                Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Column(Modifier.padding(horizontal = 2.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                                     fields.forEachIndexed { index, field ->
                                         ParameterEditor(
                                             field,
@@ -1533,82 +1531,78 @@ private fun ResultScreen(
     LaunchedEffect(media.map(ResultMedia::stableKey)) {
         selectedKeys = selectedKeys.intersect(media.map(ResultMedia::stableKey).toSet())
     }
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (source == ResultSource.LOCAL) FilledTonalButton({ onSourceChange(ResultSource.LOCAL) }, Modifier.weight(1f)) { Text("本地") }
-            else OutlinedButton({ onSourceChange(ResultSource.LOCAL) }, Modifier.weight(1f)) { Text("本地") }
-            if (source == ResultSource.CLOUD) FilledTonalButton({ onSourceChange(ResultSource.CLOUD) }, Modifier.weight(1f)) { Text("云端") }
-            else OutlinedButton({ onSourceChange(ResultSource.CLOUD) }, Modifier.weight(1f)) { Text("云端") }
-        }
-        if (selectionMode) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = { selectedKeys = emptySet() }) { Icon(Icons.Default.Close, "退出多选") }
-                Text("已选 ${selectedItems.size} 项", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                IconButton(onClick = { selectedKeys = media.map(ResultMedia::stableKey).toSet() }) {
-                    Icon(Icons.Default.SelectAll, "全选")
-                }
-                IconButton(onClick = {
-                    viewModel.saveResults(selectedItems)
-                    selectedKeys = emptySet()
-                }) {
-                    Icon(if (source == ResultSource.CLOUD) Icons.Default.Download else Icons.Default.Save, if (source == ResultSource.CLOUD) "一键下载" else "一键保存")
-                }
-                if (source == ResultSource.LOCAL) {
-                    IconButton(onClick = { confirmDeleteSelection = true }) { Icon(Icons.Default.Delete, "删除所选") }
-                }
-            }
-        } else {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+    BackHandler(enabled = selectionMode) { selectedKeys = emptySet() }
+    val resultHeader: @Composable () -> Unit = {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            StudioChoices(
+                labels = listOf("本地作品", "云端作品"),
+                selected = if (source == ResultSource.LOCAL) 0 else 1,
+                onSelect = { onSourceChange(if (it == 0) ResultSource.LOCAL else ResultSource.CLOUD) },
+                modifier = Modifier.padding(top = 12.dp),
+            )
+            if (!selectionMode) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (selectedAlbumId != null) {
-                    TextButton(onClick = { onSelectedAlbumChange(null) }) { Text("‹ 返回相册") }
+                    IconButton(onClick = { onSelectedAlbumChange(null) }) { Icon(Icons.Default.ChevronLeft, "返回全部相册") }
+                    Text("任务相册", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 } else {
-                    Text(
-                        if (source == ResultSource.LOCAL) "手机独立保存的白名单作品" else "ComfyUI 服务器媒体资产",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(onClick = { onLayoutChange(if (layout == ResultLayout.ALL) ResultLayout.ALBUMS else ResultLayout.ALL) }) {
-                        Text(if (layout == ResultLayout.ALL) "任务相册" else "全部平铺")
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(if (layout == ResultLayout.ALL) "全部作品" else "任务相册", style = MaterialTheme.typography.titleMedium)
+                        Text("${media.size} 项作品 · 长按可多选", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = { onLayoutChange(if (layout == ResultLayout.ALL) ResultLayout.ALBUMS else ResultLayout.ALL) }) {
+                        Icon(if (layout == ResultLayout.ALL) Icons.Default.PhotoAlbum else Icons.Default.GridView, if (layout == ResultLayout.ALL) "切换到任务相册" else "切换到全部平铺")
                     }
                 }
-                IconButton(onClick = { if (source == ResultSource.LOCAL) viewModel.refreshLocalResults() else viewModel.refreshResults() }) {
-                    Icon(Icons.Default.Refresh, "刷新")
+                IconButton(onClick = { if (source == ResultSource.LOCAL) viewModel.refreshLocalResults() else viewModel.refreshResults() }) { Icon(Icons.Default.Refresh, "刷新作品") }
+            }
+            selectedAlbum?.let { Text(albumTitle(it), style = MaterialTheme.typography.titleMedium) }
+        }
+    }
+    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (selectionMode) Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.padding(top = 8.dp)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { selectedKeys = emptySet() }) { Icon(Icons.Default.Close, "退出多选") }
+                Text("已选 ${selectedItems.size} 项", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                IconButton(onClick = { selectedKeys = media.map(ResultMedia::stableKey).toSet() }) { Icon(Icons.Default.SelectAll, "全选") }
+                IconButton(onClick = { viewModel.saveResults(selectedItems); selectedKeys = emptySet() }) {
+                    Icon(if (source == ResultSource.CLOUD) Icons.Default.Download else Icons.Default.Save, if (source == ResultSource.CLOUD) "一键下载" else "一键保存")
                 }
+                if (source == ResultSource.LOCAL) IconButton(onClick = { confirmDeleteSelection = true }) { Icon(Icons.Default.Delete, "删除所选") }
             }
         }
         when {
-            selectedAlbum != null -> {
-                Text(albumTitle(selectedAlbum), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
-                ResultMediaGrid(
-                    media = selectedAlbum.media,
-                    selectedKeys = selectedKeys,
-                    selectionMode = selectionMode,
-                    onOpen = { openMedia(it, selectedAlbum.media) },
-                    onToggleSelection = { toggleSelection(listOf(it)) },
-                )
-            }
-            selectedAlbumId != null -> EmptyState(Icons.Default.Image, "正在读取此任务的结果；如果云端也没有，请确认任务已完成并刷新")
-            media.isEmpty() -> EmptyState(
-                Icons.Default.Image,
-                if (source == ResultSource.LOCAL) "暂无本地作品\n请在参数页长按输出部件加入全工作流保存白名单" else "云端暂无图片或视频",
+            selectedAlbum != null -> ResultMediaGrid(
+                media = selectedAlbum.media,
+                selectedKeys = selectedKeys,
+                selectionMode = selectionMode,
+                onOpen = { openMedia(it, selectedAlbum.media) },
+                onToggleSelection = { toggleSelection(listOf(it)) },
+                header = resultHeader,
             )
+            selectedAlbumId != null || media.isEmpty() -> Column(Modifier.fillMaxSize()) {
+                resultHeader()
+                EmptyState(Icons.Default.Image, when {
+                    selectedAlbumId != null -> "正在读取任务结果\n请确认任务已完成，或刷新重试"
+                    source == ResultSource.LOCAL -> "暂无本地作品\n在参数页长按输出部件，添加自动保存规则"
+                    else -> "云端暂无作品\n生成完成后，可在这里查看图片和视频"
+                })
+            }
             layout == ResultLayout.ALL -> ResultMediaGrid(
                 media = media,
                 selectedKeys = selectedKeys,
                 selectionMode = selectionMode,
                 onOpen = { openMedia(it, media) },
                 onToggleSelection = { toggleSelection(listOf(it)) },
+                header = resultHeader,
             )
             else -> LazyVerticalGrid(
-                columns = GridCells.Adaptive(150.dp),
+                columns = GridCells.Adaptive(if (LocalConfiguration.current.screenWidthDp >= 720) 160.dp else 124.dp),
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                item(key = "results-controls", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) { resultHeader() }
                 gridItems(albums, key = { it.jobId }) { album ->
                     val albumKeys = album.media.map(ResultMedia::stableKey).toSet()
                     AlbumTile(
@@ -1623,6 +1617,7 @@ private fun ResultScreen(
             }
         }
     }
+
     selectedMedia?.let { item ->
         AlertDialog(
             onDismissRequest = { selectedMedia = null },
@@ -1686,14 +1681,16 @@ private fun ResultMediaGrid(
     selectionMode: Boolean,
     onOpen: (ResultMedia) -> Unit,
     onToggleSelection: (ResultMedia) -> Unit,
+    header: @Composable () -> Unit = {},
 ) {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(105.dp),
+        columns = GridCells.Adaptive(if (LocalConfiguration.current.screenWidthDp >= 720) 160.dp else 124.dp),
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        item(key = "results-controls", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) { header() }
         gridItems(media, key = { it.stableKey() }) { item ->
             val selected = item.stableKey() in selectedKeys
             Card(
@@ -1701,6 +1698,8 @@ private fun ResultMediaGrid(
                     onClick = { if (selectionMode) onToggleSelection(item) else onOpen(item) },
                     onLongClick = { onToggleSelection(item) },
                 ),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp),
             ) {
                 Box {
                     MediaCover(item, Modifier.fillMaxWidth().aspectRatio(1f))
@@ -1716,7 +1715,7 @@ private fun ResultMediaGrid(
                         )
                     }
                 }
-                Text(item.filename, Modifier.padding(6.dp), maxLines = 1, style = MaterialTheme.typography.labelSmall)
+                Text(item.filename, Modifier.padding(horizontal = 12.dp, vertical = 10.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
             }
         }
     }
@@ -1738,9 +1737,11 @@ private fun AlbumTile(
             onClick = { if (selectionMode) onToggleSelection() else onClick() },
             onLongClick = onToggleSelection,
         ),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(20.dp),
     ) {
         Box {
-            MediaCover(cover, Modifier.fillMaxWidth().aspectRatio(1.15f))
+            MediaCover(cover, Modifier.fillMaxWidth().aspectRatio(1.33f))
             if (selected || partiallySelected) {
                 Box(
                     Modifier.matchParentSize().background(MaterialTheme.colorScheme.primary.copy(alpha = if (selected) 0.24f else 0.12f)),
@@ -1753,11 +1754,11 @@ private fun AlbumTile(
                 )
             }
         }
-        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(albumTitle(album), maxLines = 1, style = MaterialTheme.typography.titleSmall)
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(albumTitle(album), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    album.media.maxOfOrNull(ResultMedia::createdAt)?.takeIf { it > 0L }?.let(::formatTime).orEmpty(),
+                    album.media.maxOfOrNull(ResultMedia::createdAt)?.takeIf { it > 0L }?.let { formatTime(it).substring(5, 16) }.orEmpty(),
                     maxLines = 1,
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.weight(1f),
@@ -1774,7 +1775,7 @@ private fun MediaCover(media: ResultMedia, modifier: Modifier = Modifier) {
         AsyncImage(
             model = previewUrl(media),
             contentDescription = media.filename,
-            modifier = modifier,
+            modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
             contentScale = ContentScale.Crop,
         )
     } else {
@@ -2100,75 +2101,104 @@ private fun VideoPlayer(url: String) {
 }
 
 @Composable
-private fun TaskScreen(state: AppUiState, viewModel: MainViewModel) {
-    var appOnly by remember { mutableStateOf(false) }
+private fun BackendScreen(state: AppUiState, viewModel: MainViewModel) {
+    var appOnly by rememberSaveable { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
     val jobs = if (appOnly) state.jobs.filter { it.submittedByApp } else state.jobs
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("服务器任务", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            Text("仅本 App"); Switch(appOnly, { appOnly = it })
-            IconButton(onClick = viewModel::refreshTasks) { Icon(Icons.Default.Refresh, "刷新") }
+    val pending = state.jobs.count { it.state == JobState.PENDING }
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 20.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item(key = "backend-connection") {
+            Box(Modifier.padding(top = 12.dp)) { BackendConnectionCard(state, viewModel::refreshOrReconnect) }
         }
-        Row(Modifier.padding(horizontal = 12.dp)) {
-            OutlinedButton(onClick = viewModel::clearPendingJobs) { Icon(Icons.Default.Delete, null); Spacer(Modifier.width(4.dp)); Text("清空待执行") }
+        item(key = "task-filter") {
+            StudioChoices(listOf("全部任务", "本 App 任务"), if (appOnly) 1 else 0, { appOnly = it == 1 })
         }
-        if (jobs.isEmpty()) EmptyState(Icons.AutoMirrored.Filled.List, "暂无任务记录")
-        else LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(jobs, key = { it.id }) { job -> JobCard(job, viewModel, tracked = state.activeJobId == job.id) }
+        item(key = "task-toolbar") {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("任务记录", style = MaterialTheme.typography.titleMedium)
+                    Text("运行 ${jobs.count { it.state == JobState.RUNNING }} · 等待 ${jobs.count { it.state == JobState.PENDING }} · 已结束 ${jobs.count { it.state in setOf(JobState.SUCCESS, JobState.ERROR, JobState.CANCELLED) }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                TextButton(onClick = { confirmClear = true }, enabled = pending > 0) { Text("清空等待") }
+                IconButton(onClick = viewModel::refreshTasks) { Icon(Icons.Default.Refresh, "刷新任务") }
+            }
         }
+        if (jobs.isEmpty()) item {
+            Box(Modifier.fillMaxWidth().height(280.dp)) { EmptyState(Icons.AutoMirrored.Filled.List, "暂无任务记录\n提交任务后，可在这里查看进度与状态") }
+        }
+        items(jobs, key = { it.id }) { job -> JobCard(job, viewModel, tracked = state.activeJobId == job.id) }
     }
+    if (confirmClear) ConfirmDialog(
+        title = "清空服务器等待队列？",
+        message = "将移除服务器上全部待执行任务，包括其他客户端的任务；正在运行的任务不会中断。",
+        onDismiss = { confirmClear = false },
+    ) { confirmClear = false; viewModel.clearPendingJobs() }
 }
 
 @Composable
 private fun JobCard(job: JobSummary, viewModel: MainViewModel, tracked: Boolean) {
     val trackable = job.state in setOf(JobState.RUNNING, JobState.PENDING)
-    OutlinedCard(
-        Modifier
-            .fillMaxWidth()
-            .clickable(enabled = trackable) { viewModel.takeoverJob(job) },
+    var confirmCancel by remember(job.id) { mutableStateOf(false) }
+    val statusColor = when (job.state) {
+        JobState.ERROR -> MaterialTheme.colorScheme.error
+        JobState.SUCCESS -> MaterialTheme.colorScheme.secondary
+        JobState.CANCELLED, JobState.UNKNOWN -> MaterialTheme.colorScheme.onSurfaceVariant
+        else -> MaterialTheme.colorScheme.primary
+    }
+    Card(
+        Modifier.fillMaxWidth().clickable(enabled = trackable) { viewModel.takeoverJob(job) },
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = if (tracked) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)) else null,
     ) {
-        Column(Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(job.id.take(12), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                Text(
-                    when (job.state) {
-                        JobState.RUNNING -> "运行中"
-                        JobState.PENDING -> "等待中"
-                        JobState.SUCCESS -> "成功"
-                        JobState.ERROR -> "失败"
-                        JobState.CANCELLED -> "已取消"
-                        JobState.UNKNOWN -> "历史"
-                    },
-                    color = if (job.state == JobState.ERROR) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                )
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text(job.workflowName.ifBlank { "服务器任务" }.removeSuffix(".json"), style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text("任务 ${job.id.take(8)}${if (job.submittedByApp) " · 本 App 提交" else ""}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                StudioBadge(when (job.state) {
+                    JobState.RUNNING -> "运行中"
+                    JobState.PENDING -> "等待中"
+                    JobState.SUCCESS -> "已完成"
+                    JobState.ERROR -> "失败"
+                    JobState.CANCELLED -> "已取消"
+                    JobState.UNKNOWN -> "历史"
+                }, color = statusColor)
             }
-            if (tracked) {
-                Text("正在跟踪中 · 点击可查看参数", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-            } else if (trackable) {
-                Text("点击接管此任务并打开对应工作流", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-            }
-            job.workflowName.takeIf { it.isNotBlank() }?.let {
-                Text(it, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-            }
-            job.durationMillis?.takeIf { it > 0 }?.let {
-                Text("耗时：${formatDuration(it)}", style = MaterialTheme.typography.labelSmall)
-            }
-            if (job.submittedByApp) Text("本 App 提交", style = MaterialTheme.typography.labelSmall)
-            job.currentNode?.let { Text("节点：$it", style = MaterialTheme.typography.bodySmall) }
-            job.progress?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) }
-            if (trackable) {
-                TextButton(onClick = { viewModel.cancelJob(job) }, modifier = Modifier.align(Alignment.End)) { Text("取消任务") }
+            job.progress?.let { LinearProgressIndicator(progress = { it.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth()) }
+            if (tracked || trackable) Text(
+                if (tracked) "正在跟踪 · 点击查看参数" else "点击接管并查看对应工作流",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary,
+            )
+            job.currentNode?.let { Text("执行部件：$it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            if (trackable || (job.durationMillis ?: 0L) > 0L) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(job.durationMillis?.takeIf { it > 0 }?.let { "耗时 ${formatDuration(it)}" }.orEmpty(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                if (trackable) TextButton(onClick = { confirmCancel = true }) { Text("取消任务", color = MaterialTheme.colorScheme.error) }
             }
         }
     }
+    if (confirmCancel && trackable) ConfirmDialog(
+        title = "取消此任务？",
+        message = "将取消任务 ${job.id.take(8)}。已经保存的作品不受影响。",
+        onDismiss = { confirmCancel = false },
+    ) { confirmCancel = false; viewModel.cancelJob(job) }
 }
 
 @Composable
 private fun EmptyState(icon: ImageVector, message: String) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Icon(icon, null, Modifier.size(54.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(message, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+        Column(Modifier.widthIn(max = 440.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Box(Modifier.size(68.dp).background(MaterialTheme.colorScheme.surface, RoundedCornerShape(22.dp)), contentAlignment = Alignment.Center) {
+                Icon(icon, null, Modifier.size(30.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+            Text(message.substringBefore('\n'), style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+            message.substringAfter('\n', "").takeIf { it.isNotBlank() }?.let {
+                Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+            }
         }
     }
 }

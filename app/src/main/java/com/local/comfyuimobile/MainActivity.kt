@@ -16,15 +16,20 @@ import androidx.activity.viewModels
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.local.comfyuimobile.bridge.ComfyBridge
+import com.local.comfyuimobile.data.AppLogger
 import com.local.comfyuimobile.service.JobMonitorService
 import com.local.comfyuimobile.ui.ComfyMobileApp
 import com.local.comfyuimobile.ui.ComfyMobileTheme
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        private const val STATE_CONNECTED_SERVER = "connected_server_url"
+    }
     private val viewModel: MainViewModel by viewModels()
     private lateinit var bridge: ComfyBridge
     private var localResultsReceiverRegistered = false
     private var networkCallbackRegistered = false
+    private var ignoredLauncherDuplicate = false
     @Volatile private var currentDefaultNetwork: Network? = null
     @Volatile private var hasObservedDefaultNetwork = false
     @Volatile private var defaultNetworkWasLost = false
@@ -62,6 +67,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Some launchers create another MAIN activity above the existing task,
+        // especially when the first entry was a notification or an adb launch.
+        // Keep the existing activity and its ViewModel/working copy in that case.
+        if (!isTaskRoot && intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER)) {
+            ignoredLauncherDuplicate = true
+            AppLogger.info("复用现有应用任务，关闭重复的桌面入口：task=$taskId")
+            finish()
+            return
+        }
+        AppLogger.info("主页面创建：task=$taskId，root=$isTaskRoot，恢复=${savedInstanceState != null}")
         bridge = ComfyBridge(this).also { it.configure() }
         viewModel.attachBridge(bridge)
         requestRuntimePermissions()
@@ -72,19 +87,41 @@ class MainActivity : ComponentActivity() {
                 ComfyMobileApp(viewModel, bridge)
             }
         }
-        handleJobNotification(intent)
+        if (intent.action == JobMonitorService.ACTION_OPEN_JOB) {
+            handleJobNotification(intent)
+        } else {
+            // Rebuilding an Activity also rebuilds its WebView. Reattach the
+            // retained working copy, or restore only the saved connection after
+            // process recreation. A fresh launch still opens the connection page.
+            val previousServer = viewModel.state.value.activeServer?.baseUrl
+                ?: savedInstanceState?.getString(STATE_CONNECTED_SERVER)
+            if (!previousServer.isNullOrBlank()) viewModel.connect(previousServer)
+        }
         viewModel.checkUpdate(manual = false)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        if (::bridge.isInitialized && !ignoredLauncherDuplicate) {
+            outState.putString(STATE_CONNECTED_SERVER, viewModel.state.value.activeServer?.baseUrl)
+        }
+        super.onSaveInstanceState(outState)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        AppLogger.info("主页面复用：task=$taskId，action=${intent.action.orEmpty()}")
         setIntent(intent)
         handleJobNotification(intent)
     }
 
     override fun onStop() {
-        viewModel.persistCurrentWorkflowDraft()
+        if (!ignoredLauncherDuplicate) viewModel.persistCurrentWorkflowDraft()
         super.onStop()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::bridge.isInitialized && !ignoredLauncherDuplicate) viewModel.onAppForegrounded()
     }
 
     override fun onDestroy() {
@@ -93,7 +130,7 @@ class MainActivity : ComponentActivity() {
             runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback) }
             networkCallbackRegistered = false
         }
-        bridge.destroy()
+        if (::bridge.isInitialized) bridge.destroy()
         super.onDestroy()
     }
 
