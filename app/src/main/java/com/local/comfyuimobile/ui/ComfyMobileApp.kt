@@ -50,6 +50,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -138,9 +139,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -167,7 +165,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -371,16 +368,11 @@ internal fun ConnectionProgressCard(state: AppUiState) {
 internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState, onOpenSettings: () -> Unit) {
     val expanded = LocalConfiguration.current.screenWidthDp >= 720
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
-    val topBarScroll = TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
     var page by rememberSaveable { mutableStateOf(MainPage.WORKFLOWS) }
     val pageStates = rememberSaveableStateHolder()
     var resultSource by rememberSaveable { mutableStateOf(ResultSource.LOCAL) }
     var resultLayout by rememberSaveable { mutableStateOf(ResultLayout.ALBUMS) }
     var resultAlbumId by rememberSaveable { mutableStateOf<String?>(null) }
-    LaunchedEffect(page) {
-        topBarScroll.state.heightOffset = 0f
-        topBarScroll.state.contentOffset = 0f
-    }
     BackHandler(enabled = page == MainPage.RESULTS && resultAlbumId != null) {
         resultAlbumId = null
     }
@@ -408,21 +400,20 @@ internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar:
         if (state.localResults.any { it.jobId == jobId }) resultSource = ResultSource.LOCAL
         else if (state.results.any { it.jobId == jobId }) resultSource = ResultSource.CLOUD
     }
+    val toolbar: @Composable (Modifier) -> Unit = { modifier ->
+        StudioToolbar(
+            title = page.label,
+            parameterState = state.takeIf { page == MainPage.PARAMETERS && it.selectedWorkflow != null },
+            snackbar = snackbar,
+            connectionLabel = if (page != MainPage.BACKEND && (state.status != ConnectionStatus.CONNECTED || !state.bridgeReady)) backendConnectionLabel(state) else null,
+            onOpenBackend = { page = MainPage.BACKEND }, onOpenSettings = onOpenSettings,
+            modifier = modifier,
+        )
+    }
     Scaffold(
-        modifier = Modifier.imePadding().nestedScroll(topBarScroll.nestedScrollConnection),
+        modifier = Modifier.imePadding(),
         topBar = {
-            TopAppBar(
-                title = { Text(page.label, style = MaterialTheme.typography.titleLarge) },
-                actions = {
-                    if (page != MainPage.BACKEND && (state.status != ConnectionStatus.CONNECTED || !state.bridgeReady)) {
-                        TextButton(onClick = { page = MainPage.BACKEND }) {
-                            Text(backendConnectionLabel(state), color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                    IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "设置") }
-                },
-                scrollBehavior = topBarScroll,
-            )
+            toolbar(Modifier.windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top)))
         },
         bottomBar = {
             if (!expanded && !imeVisible) {
@@ -476,7 +467,7 @@ internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar:
                 pageStates.SaveableStateProvider(page.name) {
                     when (page) {
                         MainPage.WORKFLOWS -> WorkflowScreen(state, viewModel, onOpenParameters = { page = MainPage.PARAMETERS })
-                        MainPage.PARAMETERS -> ParameterScreen(state, viewModel, snackbar)
+                        MainPage.PARAMETERS -> ParameterScreen(state, viewModel)
                         MainPage.RESULTS -> ResultScreen(
                             state = state,
                             viewModel = viewModel,
@@ -738,7 +729,7 @@ private fun WorkflowRow(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState) {
+private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel) {
     val workflow = state.selectedWorkflow
     if (workflow == null) {
         ParameterHistoryScreen(state, viewModel)
@@ -791,13 +782,6 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel, snackba
     val localProblems = FieldValidator.detailedProblems(state.fields)
     val localProblemsByNode = localProblems.groupBy { it.nodeId }.mapValues { (_, items) -> items.map { it.message } }
     val problemNodeIds = localProblemsByNode.keys + state.nodeProblems.keys
-    val firstProblem = localProblems.firstOrNull()?.let { problem ->
-        val title = workflow.nodes.firstOrNull { it.id == problem.nodeId }?.title ?: "节点 ${problem.nodeId}"
-        "$title：${problem.message}"
-    } ?: state.nodeProblems.entries.firstOrNull()?.let { (nodeId, messages) ->
-        val title = workflow.nodes.firstOrNull { it.id == nodeId }?.title ?: "节点 $nodeId"
-        "$title：${messages.firstOrNull().orEmpty()}"
-    }
     val showActions = WindowInsets.ime.getBottom(LocalDensity.current) == 0
     val recentWorkflows = RecentWorkflows.resolveEntries(state.recentWorkflowPaths, state.workflows)
         .let { entries -> listOf(workflow.entry) + entries.filterNot { it.path == workflow.entry.path } }
@@ -884,21 +868,6 @@ private fun ParameterScreen(state: AppUiState, viewModel: MainViewModel, snackba
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                             )
-                        }
-                        if (firstProblem != null || state.generationMessage.isNotBlank() || snackbar.currentSnackbarData != null) {
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        }
-                        firstProblem?.let { ParameterFeedback(it, isError = true) }
-                        if (state.generationMessage.isNotBlank()) ParameterFeedback(
-                            message = state.generationMessage,
-                            isError = state.generationMessage.contains("失败"),
-                            completed = state.generationProgress == 1f && !state.generationMessage.contains("正在确认"),
-                            progress = state.generationProgress,
-                        )
-                        if (snackbar.currentSnackbarData != null) SnackbarHost(snackbar) { data ->
-                            if (data.visuals.message != state.generationMessage && data.visuals.message != firstProblem) {
-                                ParameterFeedback(data.visuals.message, isError = state.error != null, onDismiss = data::dismiss)
-                            }
                         }
                     }
                 }

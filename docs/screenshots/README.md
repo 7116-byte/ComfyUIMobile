@@ -3,7 +3,8 @@
 v0.1.72 参数页开发预览（测试数据）：
 
 - [手机悬浮操作槽](parameters-v0.1.72-phone.png)
-- [小屏错误和完成提示](parameters-v0.1.72-feedback.png)
+- [小屏顶栏错误和完成提示](parameters-v0.1.72-feedback.png)
+- [平板透明顶栏与提示](parameters-v0.1.72-toolbar-tablet.png)
 
 v0.1.71 自适应界面预览（测试数据）：
 

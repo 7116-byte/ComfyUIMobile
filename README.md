@@ -6,7 +6,7 @@ ComfyUI Mobile 是一个连接自有 ComfyUI 服务器的原生 Android 客户�
 
 正式版可从“设置 → 软件更新”检查、下载并安装更新；也可在 Release 页面下载正式 APK。独立包名的预览版与正式版并存，不能相互覆盖。布局及验证记录见 [自适应界面说明](docs/design/adaptive-interface.md)。
 
-开发中的 [v0.1.72 参数页预览](docs/design/parameter-actions.md) 将提示集中到白色摘要区，并提供悬浮的高级编辑和生成操作槽。
+开发中的 [v0.1.72 参数页预览](docs/design/parameter-actions.md) 将提示移至透明常驻的“参数”标题栏，并提供悬浮的高级编辑和生成操作槽。
 
 ## 功能
 

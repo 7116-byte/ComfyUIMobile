@@ -1,6 +1,7 @@
 package com.local.comfyuimobile.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -32,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -41,6 +43,8 @@ internal fun ParameterFeedback(
     completed: Boolean = false,
     progress: Float? = null,
     onDismiss: (() -> Unit)? = null,
+    maxLines: Int = 2,
+    onDetails: (() -> Unit)? = null,
 ) {
     val color = when {
         isError -> MaterialTheme.colorScheme.error
@@ -48,14 +52,18 @@ internal fun ParameterFeedback(
         else -> MaterialTheme.colorScheme.primary
     }
     Column(Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite }, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(
+        Row(
+            if (onDetails != null) Modifier.clickable(onClickLabel = "查看完整提示", onClick = onDetails) else Modifier,
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            FloatingToolbarIcon(
                 when { isError -> Icons.Default.ErrorOutline; completed -> Icons.Default.CheckCircle; else -> Icons.Default.Info },
-                null, Modifier.padding(top = 2.dp).size(18.dp), tint = color,
+                null, Modifier.size(18.dp), tint = color,
             )
-            Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = color)
+            Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall.copy(shadow = toolbarTextShadow()), color = color,
+                maxLines = maxLines, overflow = TextOverflow.Ellipsis)
             if (onDismiss != null) IconButton(onClick = onDismiss, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Default.Close, "关闭提示", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                FloatingToolbarIcon(Icons.Default.Close, "关闭提示", Modifier.size(18.dp))
             }
         }
         if (progress != null && !isError && !completed) {

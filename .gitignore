@@ -11,3 +11,4 @@ captures/
 *.properties.local
 *.log
 .local/
+.codex-remote-attachments/

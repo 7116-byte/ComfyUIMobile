@@ -115,7 +115,7 @@ class AdaptiveInterfaceTest {
     fun tabletLandscapeDarkUsesAvailableWidth() { checkLayouts("tablet-landscape-dark", true) }
 
     @Test @Config(qualifiers = "w320dp-h740dp-mdpi")
-    fun parameterFeedbackStaysInSummaryAndDockClearsLastCardOnSmallPhone() {
+    fun parameterFeedbackStaysInPinnedToolbarAndDockClearsLastCardOnSmallPhone() {
         RuntimeEnvironment.setFontScale(1.3f)
         show(true, longContent = true) { state -> state.copy(
             nodeProblems = mapOf("1" to listOf("输入参数不完整")),
@@ -124,10 +124,15 @@ class AdaptiveInterfaceTest {
         click("参数")
         val error = text("创作提示词：输入参数不完整")
         val complete = text("生成完成，已保存 2 张作品")
-        assertTrue(error.boundsInRoot.top > text("当前工作流").boundsInRoot.bottom)
-        assertTrue(complete.boundsInRoot.bottom < text("创作提示词").boundsInRoot.top)
+        assertTrue(error.boundsInRoot.bottom < text("当前工作流").boundsInRoot.top)
+        assertTrue(complete.boundsInRoot.bottom < text("当前工作流").boundsInRoot.top)
+        val toolbarBounds = tagged("studio-toolbar").boundsInRoot
         screenshot("phone-320-parameter-feedback")
         scrollToEnd()
+        assertTrue(isVisible("创作提示词：输入参数不完整"))
+        assertTrue(isVisible("生成完成，已保存 2 张作品"))
+        assertEquals(toolbarBounds, tagged("studio-toolbar").boundsInRoot)
+        assertFalse(isVisible("当前工作流"))
         val lastNode = text("预览部件 24")
         val advanced = text("高级编辑", clickable = true)
         assertTrue(lastNode.boundsInRoot.height > 1f)
@@ -136,17 +141,41 @@ class AdaptiveInterfaceTest {
         screenshot("phone-320-parameter-floating-end")
     }
 
-    @Test fun parameterActionErrorsUseSummaryAndCanBeDismissed() {
+    @Test fun parameterActionErrorsUseToolbarAndCanBeDismissed() {
         show(true) { it.copy(error = "保存失败，请检查连接") }
         click("参数")
         activity.lifecycleScope.launch { snackbar.showSnackbar("保存失败，请检查连接") }
         settle()
         val message = text("保存失败，请检查连接")
-        assertTrue(message.boundsInRoot.top > text("当前工作流").boundsInRoot.bottom)
-        assertTrue(message.boundsInRoot.bottom < text("创作提示词").boundsInRoot.top)
+        assertTrue(message.boundsInRoot.bottom < text("当前工作流").boundsInRoot.top)
         screenshot("phone-393-parameter-action-error")
         clickDescription("关闭提示")
         assertNull(snackbar.currentSnackbarData)
+    }
+
+    @Test @Config(qualifiers = "w776dp-h1163dp-mdpi")
+    fun tabletShowsValidationInToolbarAboveWorkflowSummary() {
+        RuntimeEnvironment.setFontScale(1.25f)
+        show(true) { it.copy(nodeProblems = mapOf("1" to listOf("模型选项已经失效"))) }
+        click("参数")
+        val warning = text("创作提示词：模型选项已经失效")
+        assertTrue(warning.boundsInRoot.bottom < text("当前工作流").boundsInRoot.top)
+        assertTrue(warning.boundsInRoot.width > 200f)
+        screenshot("tablet-portrait-parameter-toolbar-error")
+    }
+
+    @Test fun clippedToolbarMessageCanOpenFullDetails() {
+        val message = "生成失败：" + "连接中断，请检查服务器状态。".repeat(12)
+        show(true) { it.copy(generationMessage = message) }
+        click("参数")
+        click(message)
+        val dialog = ShadowDialog.getLatestDialog() ?: error("Feedback details missing")
+        assertTrue(dialog.isShowing)
+        val dialogRoot = findRoot(dialog.window!!.decorView) ?: error("Dialog root missing")
+        assertTrue(nodes(dialogRoot.semanticsOwner.rootSemanticsNode).any {
+            it.config.getOrNull(SemanticsProperties.Text)?.any { value -> value.text == message } == true
+        })
+        dismissDialog("关闭")
     }
 
     @Test fun floatingGenerateRetainsLocalOutputConfirmation() {
@@ -249,11 +278,13 @@ class AdaptiveInterfaceTest {
         clickDescription("关闭设置")
     }
 
-    private fun dismissConfirmation() {
+    private fun dismissConfirmation() = dismissDialog("取消")
+
+    private fun dismissDialog(button: String) {
         val dialog = ShadowDialog.getLatestDialog() ?: error("Confirmation missing")
         val dialogRoot = findRoot(dialog.window!!.decorView) ?: error("Dialog Compose root missing")
         val cancel = nodes(dialogRoot.semanticsOwner.rootSemanticsNode).first {
-            it.config.getOrNull(SemanticsProperties.Text)?.any { value -> value.text == "取消" } == true
+            it.config.getOrNull(SemanticsProperties.Text)?.any { value -> value.text == button } == true
         }
         assertTrue(cancel.config[SemanticsActions.OnClick].action!!.invoke())
         settle()
@@ -355,6 +386,7 @@ class AdaptiveInterfaceTest {
     }
 
     private fun nodes(node: SemanticsNode = root.semanticsOwner.rootSemanticsNode): List<SemanticsNode> = listOf(node) + node.children.flatMap { nodes(it) }
+    private fun tagged(value: String): SemanticsNode = nodes().first { it.config.getOrNull(SemanticsProperties.TestTag) == value }
     private fun text(value: String, clickable: Boolean = false): SemanticsNode = nodes().firstOrNull {
         it.config.getOrNull(SemanticsProperties.Text)?.any { text -> text.text == value } == true && (!clickable || it.config.contains(SemanticsActions.OnClick))
     } ?: error("Text missing: $value")
