@@ -28,6 +28,7 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -81,6 +82,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MoreHoriz
@@ -114,6 +116,10 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
@@ -125,6 +131,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -153,10 +160,12 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -275,67 +284,14 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState, onOpenSettings: () -> Unit) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {},
-                actions = {
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, "设置")
-                    }
-                },
-            )
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-    ) { padding ->
-        Column(
-            Modifier.fillMaxSize().padding(padding).padding(20.dp).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Icon(Icons.Default.Wifi, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
-            Text("ComfyUI 手机端", style = MaterialTheme.typography.headlineMedium)
-            Text("连接你信任的 ComfyUI 服务器。支持局域网、VPN 和手动填写的其他 HTTP 地址。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            OutlinedTextField(
-                value = state.serverInput,
-                onValueChange = viewModel::setServerInput,
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("ComfyUI 地址") },
-                placeholder = { Text("http://192.168.10.109:8188") },
-                singleLine = true,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { viewModel.connect() }, enabled = !state.loading) {
-                    if (state.loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    else Icon(Icons.Default.Wifi, null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("连接")
-                }
-                OutlinedButton(onClick = viewModel::scanLan, enabled = !state.scanning) {
-                    if (state.scanning) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    else Icon(Icons.Default.Search, null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("扫描局域网")
-                }
-            }
-            if (state.status == ConnectionStatus.CONNECTING || state.status == ConnectionStatus.ERROR) {
-                ConnectionProgressCard(state)
-            }
-            if (state.savedServers.isNotEmpty()) {
-                Text("已保存", style = MaterialTheme.typography.titleMedium)
-                state.savedServers.forEach { profile ->
-                    ServerCard(profile, onClick = { viewModel.setServerInput(profile.baseUrl); viewModel.connect(profile.baseUrl) }, onDelete = { viewModel.removeServer(profile.baseUrl) })
-                }
-            }
-            if (state.discoveredServers.isNotEmpty()) {
-                Text("扫描结果", style = MaterialTheme.typography.titleMedium)
-                state.discoveredServers.forEach { profile -> ServerCard(profile, onClick = { viewModel.setServerInput(profile.baseUrl); viewModel.connect(profile.baseUrl) }) }
-            }
-            Text("电脑端需要使用 --listen 0.0.0.0 启动，并允许 Windows 防火墙放行 8188 端口。", style = MaterialTheme.typography.bodySmall)
-        }
-    }
+    ConnectionScreen(
+        state = state, snackbar = snackbar, onOpenSettings = onOpenSettings,
+        onServerInput = viewModel::setServerInput,
+        onConnect = { address -> viewModel.setServerInput(address); viewModel.connect(address) },
+        onScan = viewModel::scanLan, onRemoveServer = viewModel::removeServer,
+    )
 }
 
 private val connectionStepNames = listOf(
@@ -348,7 +304,7 @@ private val connectionStepNames = listOf(
 )
 
 @Composable
-private fun ConnectionProgressCard(state: AppUiState) {
+internal fun ConnectionProgressCard(state: AppUiState) {
     val current = state.connectionStep.coerceIn(1, state.connectionTotalSteps)
     val failed = state.status == ConnectionStatus.ERROR
     OutlinedCard(Modifier.fillMaxWidth()) {
@@ -383,25 +339,10 @@ private fun ConnectionProgressCard(state: AppUiState) {
     }
 }
 
-@Composable
-private fun ServerCard(profile: ServerProfile, onClick: () -> Unit, onDelete: (() -> Unit)? = null) {
-    OutlinedCard(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.CheckCircle, null, tint = MaterialTheme.colorScheme.secondary)
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(profile.name, style = MaterialTheme.typography.titleSmall)
-                Text(profile.baseUrl, style = MaterialTheme.typography.bodySmall)
-            }
-            Text(profile.comfyVersion, style = MaterialTheme.typography.labelSmall)
-            if (onDelete != null) IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "删除服务器") }
-        }
-    }
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState, onOpenSettings: () -> Unit) {
+internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState, onOpenSettings: () -> Unit) {
+    val expanded = LocalConfiguration.current.screenWidthDp >= 720
     var page by rememberSaveable { mutableStateOf(MainPage.WORKFLOWS) }
     var resultSource by rememberSaveable { mutableStateOf(ResultSource.LOCAL) }
     var resultLayout by rememberSaveable { mutableStateOf(ResultLayout.ALBUMS) }
@@ -438,8 +379,9 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
             TopAppBar(
                 title = {
                     Column {
-                        Text(state.activeServer?.name.orEmpty(), style = MaterialTheme.typography.titleMedium)
+                        Text(page.label, style = MaterialTheme.typography.titleLarge)
                         Text(
+                            state.activeServer?.name.orEmpty() + " · " +
                             if (state.activeJobId != null && state.generationProgress != 1f &&
                                 state.generationMessage.isNotBlank() && !state.generationMessage.startsWith("生成失败")
                             ) {
@@ -454,61 +396,92 @@ private fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar: 
                             } else if (!state.bridgeReady) {
                                 "服务器已连接 · 工作流前端初始化中"
                             } else when (state.status) {
-                                ConnectionStatus.CONNECTED -> "在线 · 队列 ${state.queueRemaining} · ${state.systemStats?.comfyVersion.orEmpty()}"
+                                ConnectionStatus.CONNECTED -> "在线 · 队列 ${state.queueRemaining}" + state.systemStats?.comfyVersion?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
                                 ConnectionStatus.RECONNECTING -> "正在重连"
                                 else -> state.connectionMessage
                             },
                             style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 },
-                navigationIcon = { Icon(Icons.Default.Wifi, null, Modifier.padding(start = 12.dp), tint = MaterialTheme.colorScheme.secondary) },
                 actions = {
-                    TextButton(onClick = viewModel::refreshOrReconnect) {
-                        Icon(Icons.Default.Refresh, null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("重连")
-                    }
+                    IconButton(onClick = viewModel::refreshOrReconnect) { Icon(Icons.Default.Refresh, "重新连接服务器") }
                     IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "设置") }
                 },
             )
         },
         bottomBar = {
-            NavigationBar {
-                MainPage.entries.forEach { target ->
-                    NavigationBarItem(
-                        selected = page == target,
-                        onClick = { page = target },
-                        icon = { Icon(target.icon, null) },
-                        label = { Text(target.label) },
-                    )
+            if (!expanded) {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                    MainPage.entries.forEach { target ->
+                        NavigationBarItem(
+                            selected = page == target,
+                            onClick = { page = target },
+                            icon = { Icon(target.icon, null) },
+                            label = { Text(target.label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            ),
+                        )
+                    }
                 }
             }
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize()) {
-            when (page) {
-                MainPage.WORKFLOWS -> WorkflowScreen(state, viewModel, onOpenParameters = { page = MainPage.PARAMETERS })
-                MainPage.PARAMETERS -> ParameterScreen(state, viewModel)
-                MainPage.RESULTS -> ResultScreen(
-                    state = state,
-                    viewModel = viewModel,
-                    source = resultSource,
-                    onSourceChange = {
-                        resultSource = it
-                        resultAlbumId = null
-                    },
-                    layout = resultLayout,
-                    onLayoutChange = { resultLayout = it },
-                    selectedAlbumId = resultAlbumId,
-                    onSelectedAlbumChange = { resultAlbumId = it },
-                )
-                MainPage.TASKS -> TaskScreen(state, viewModel)
+        Row(Modifier.padding(padding).fillMaxSize()) {
+            if (expanded) {
+                NavigationRail(containerColor = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxHeight()) {
+                    Spacer(Modifier.height(16.dp))
+                    MainPage.entries.forEach { target ->
+                        NavigationRailItem(
+                            selected = page == target,
+                            onClick = { page = target },
+                            icon = { Icon(target.icon, null) },
+                            label = { Text(target.label) },
+                            modifier = Modifier.padding(vertical = 6.dp),
+                            colors = NavigationRailItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            ),
+                        )
+                    }
+                }
+                VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
             }
-            if (state.loading || state.generating) {
-                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.22f)), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                when (page) {
+                    MainPage.WORKFLOWS -> WorkflowScreen(state, viewModel, onOpenParameters = { page = MainPage.PARAMETERS })
+                    MainPage.PARAMETERS -> ParameterScreen(state, viewModel)
+                    MainPage.RESULTS -> ResultScreen(
+                        state = state,
+                        viewModel = viewModel,
+                        source = resultSource,
+                        onSourceChange = {
+                            resultSource = it
+                            resultAlbumId = null
+                        },
+                        layout = resultLayout,
+                        onLayoutChange = { resultLayout = it },
+                        selectedAlbumId = resultAlbumId,
+                        onSelectedAlbumChange = { resultAlbumId = it },
+                    )
+                    MainPage.TASKS -> TaskScreen(state, viewModel)
+                }
+                if (state.loading || state.generating) {
+                    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.22f)), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
                 }
             }
         }
@@ -556,110 +529,72 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
     val actionFolders = remember(state.workflows, actionEntry?.path) {
         actionEntry?.let { WorkflowPath.availableFolders(state.workflows, it.path) }.orEmpty()
     }
-    Column(Modifier.fillMaxSize()) {
-        if (!state.bridgeReady) {
-            OutlinedCard(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        when (state.status) {
-                            ConnectionStatus.ERROR -> if (state.connectionStep < 3) {
-                                "服务器连接失败，请点右上角重连"
-                            } else {
-                                "工作流前端初始化失败，请点右上角重连"
+    var actionMenuExpanded by remember(actionEntry?.path) { mutableStateOf(false) }
+    val filtered = WorkflowBrowser.entries(state.workflows, currentFolder, search)
+    val selectionPanel: @Composable () -> Unit = {
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                if (actionEntry != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                            Text("当前选择", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                            Text(actionEntry.name.removeSuffix(".json"), style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        Box {
+                            IconButton(onClick = { actionMenuExpanded = true }) { Icon(Icons.Default.MoreHoriz, "工作流操作") }
+                            DropdownMenu(expanded = actionMenuExpanded, onDismissRequest = { actionMenuExpanded = false }) {
+                                DropdownMenuItem(text = { Text("新建副本") }, onClick = { actionMenuExpanded = false; dialogText = actionEntry.name.substringBeforeLast('.'); duplicateDialog = true })
+                                DropdownMenuItem(text = { Text("改名") }, onClick = { actionMenuExpanded = false; dialogText = actionEntry.name.substringBeforeLast('.'); renameDialog = true })
+                                DropdownMenuItem(text = { Text("移动") }, onClick = { actionMenuExpanded = false; moveDialog = true })
+                                DropdownMenuItem(text = { Text("导出") }, onClick = {
+                                    actionMenuExpanded = false
+                                    viewModel.exportWorkflow(actionEntry) { name, raw -> exportRaw = raw; exportLauncher.launch(name) }
+                                })
+                                HorizontalDivider()
+                                DropdownMenuItem(text = { Text("删除工作流", color = MaterialTheme.colorScheme.error) }, onClick = { actionMenuExpanded = false; deleteDialog = true })
                             }
-                            ConnectionStatus.RECONNECTING -> "连接中断，正在重连；当前工作流会尽量保留"
-                            ConnectionStatus.CONNECTING -> "正在连接服务器；连接完成后会自动读取工作流"
-                            else -> "服务器已连接，可先浏览工作流；参数编辑会等待前端就绪"
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            if (state.previewWorkflow?.entry?.path == actionEntry.path) viewModel.openPreviewedWorkflow()
+                            else viewModel.selectWorkflow(actionEntry, recordAsOpened = true)
+                            selectedEntryPath = null
+                            onOpenParameters()
                         },
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    if (state.status != ConnectionStatus.ERROR) LinearProgressIndicator(Modifier.fillMaxWidth())
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Icon(Icons.Default.Tune, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("打开参数")
+                    }
+                } else {
+                    Icon(Icons.Default.Hub, null, Modifier.size(32.dp), tint = MaterialTheme.colorScheme.primary)
+                    Text("准备好开始创作", style = MaterialTheme.typography.titleMedium)
+                    Text("选择左侧工作流，再打开参数。双击工作流也可直接打开。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
-        OutlinedTextField(
-            value = search,
-            onValueChange = { search = it },
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            label = { Text("搜索工作流") },
-            leadingIcon = { Icon(Icons.Default.Search, null) },
-            singleLine = true,
-        )
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (currentFolder != WorkflowBrowser.ROOT && search.isBlank()) {
-                OutlinedButton(onClick = { currentFolder = WorkflowBrowser.up(currentFolder) }) { Text("上一级") }
-            }
-            Text(
-                if (search.isBlank()) currentFolder.removePrefix("workflows/").ifBlank { "全部分类" } else "搜索全部分类",
-                style = MaterialTheme.typography.titleSmall,
-            )
-        }
-        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilledTonalButton(onClick = {
-                importLauncher.launch(arrayOf("application/json", "text/plain", "image/*"))
-            }) {
-                Icon(Icons.Default.UploadFile, null); Spacer(Modifier.width(4.dp)); Text("打开工作流文件")
-            }
-        }
-        Text(
-            "单击工作流只预读取参数，不会跳转；双击或点击上方“打开参数”才进入参数页",
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (actionEntry != null) {
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Button(onClick = {
-                    if (state.previewWorkflow?.entry?.path == actionEntry.path) {
-                        viewModel.openPreviewedWorkflow()
-                    } else {
-                        viewModel.selectWorkflow(actionEntry, recordAsOpened = true)
+    }
+    val listContent: @Composable (Modifier) -> Unit = { modifier ->
+        LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (filtered.isEmpty()) {
+                item {
+                    Column(Modifier.fillMaxWidth().padding(vertical = 40.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Icon(Icons.Default.Folder, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(if (search.isNotBlank()) "没有匹配的工作流" else "这里还没有工作流", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("可从上方导入工作流文件或图片", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    selectedEntryPath = null
-                    onOpenParameters()
-                }) { Text("打开参数") }
-                OutlinedButton(onClick = {
-                    dialogText = actionEntry.name.substringBeforeLast('.')
-                    duplicateDialog = true
-                }) { Text("新建副本") }
-                OutlinedButton(onClick = {
-                    dialogText = actionEntry.name.substringBeforeLast('.')
-                    renameDialog = true
-                }) { Text("改名") }
-                OutlinedButton(onClick = {
-                    moveDialog = true
-                }) { Text("移动") }
-                OutlinedButton(onClick = {
-                    viewModel.exportWorkflow(actionEntry) { name, raw -> exportRaw = raw; exportLauncher.launch(name) }
-                }) { Text("导出") }
-                OutlinedButton(onClick = { deleteDialog = true }) { Text("删除") }
+                }
             }
-        }
-        val filtered = WorkflowBrowser.entries(state.workflows, currentFolder, search)
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(filtered, key = { it.path }) { entry ->
                 WorkflowRow(
                     entry = entry,
-                    selected = if (selectedEntryPath != null) {
-                        selectedEntryPath == entry.path
-                    } else {
-                        state.previewWorkflow?.entry?.path == entry.path
-                    },
+                    selected = if (selectedEntryPath != null) selectedEntryPath == entry.path else state.previewWorkflow?.entry?.path == entry.path,
                     onClick = {
-                        if (entry.isDirectory) {
-                            currentFolder = entry.path
-                            search = ""
-                        } else {
-                            selectedEntryPath = null
-                            viewModel.selectWorkflow(entry)
-                        }
+                        if (entry.isDirectory) { currentFolder = entry.path; search = "" }
+                        else { selectedEntryPath = null; viewModel.selectWorkflow(entry) }
                     },
                     onLongClick = if (entry.isDirectory) null else ({ selectedEntryPath = entry.path }),
                     onDoubleClick = {
@@ -673,6 +608,66 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
             }
         }
     }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val wide = maxWidth >= 660.dp
+        Column(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (!state.bridgeReady) {
+                OutlinedCard(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            when (state.status) {
+                                ConnectionStatus.ERROR -> "连接出现问题，请点击顶部重连图标"
+                                ConnectionStatus.RECONNECTING -> "正在重连，当前工作流会尽量保留"
+                                else -> "正在准备工作流，可先浏览列表"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        if (state.status != ConnectionStatus.ERROR) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    }
+                }
+            }
+            OutlinedTextField(
+                value = search,
+                onValueChange = { search = it },
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                placeholder = { Text("搜索工作流") },
+                leadingIcon = { Icon(Icons.Default.Search, null) },
+                singleLine = true,
+                shape = RoundedCornerShape(16.dp),
+            )
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (currentFolder != WorkflowBrowser.ROOT && search.isBlank()) {
+                    IconButton(onClick = { currentFolder = WorkflowBrowser.up(currentFolder) }) { Icon(Icons.Default.ChevronLeft, "上一级") }
+                }
+                Text(
+                    if (search.isNotBlank()) "搜索结果" else if (currentFolder == WorkflowBrowser.ROOT) "全部工作流" else currentFolder.substringAfterLast('/'),
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text("${filtered.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TextButton(onClick = { importLauncher.launch(arrayOf("application/json", "text/plain", "image/*")) }) {
+                    Icon(Icons.Default.UploadFile, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("导入")
+                }
+            }
+            if (wide) {
+                Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                    listContent(Modifier.weight(1f).fillMaxHeight())
+                    Column(Modifier.width(236.dp).fillMaxHeight().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        selectionPanel()
+                        Text("点击预览，打开参数后再编辑。保存时才会写入服务器工作流。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            } else {
+                if (actionEntry != null) selectionPanel()
+                listContent(Modifier.weight(1f).fillMaxWidth())
+            }
+        }
+    }
+
     if (duplicateDialog && actionEntry != null) NameDialog("复制为新工作流", dialogText, { duplicateDialog = false }) {
         viewModel.duplicateWorkflow(actionEntry, it); duplicateDialog = false; selectedEntryPath = null
     }
@@ -708,16 +703,21 @@ private fun WorkflowRow(
             onLongClick = onLongClick,
             onDoubleClick = onDoubleClick,
         ),
-        colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant),
+        colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
     ) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(if (entry.isDirectory) Icons.Default.Folder else Icons.Default.FileOpen, null)
+            Box(Modifier.size(42.dp).background(if (selected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(13.dp)), contentAlignment = Alignment.Center) {
+                Icon(if (entry.isDirectory) Icons.Default.Folder else Icons.Default.Hub, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
+            }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(entry.name, style = MaterialTheme.typography.titleSmall)
-                Text(entry.path, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                Text(entry.name.removeSuffix(".json"), style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(if (entry.isDirectory) "文件夹" else "工作流 · ${formatSize(entry.size)}", style = MaterialTheme.typography.bodySmall, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (!entry.isDirectory) Text(formatSize(entry.size), style = MaterialTheme.typography.labelSmall)
+            if (selected) Icon(Icons.Default.CheckCircle, "已选择", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+            else if (entry.isDirectory) Icon(Icons.Default.ChevronRight, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
