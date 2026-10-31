@@ -38,24 +38,24 @@ class UpdateManager(private val context: Context) {
         .readTimeout(45, TimeUnit.SECONDS)
         .build()
 
+    private data class CheckedRelease(val info: UpdateInfo?)
+
     suspend fun checkLatest(): UpdateInfo? = withContext(Dispatchers.IO) {
         val apiBase = "https://api.github.com/repos/${BuildConfig.GITHUB_REPOSITORY}/releases/latest"
-        val root = fastestSuccessful(UpdateMirrors.apiCandidates(apiBase)) { url ->
-            runCatching {
-                client.newCall(
-                    Request.Builder()
-                        .url(url)
-                        .header("Accept", "application/vnd.github+json")
-                        .get()
-                        .build(),
-                ).execute().use { response ->
-                    if (!response.isSuccessful) throw IllegalStateException("检查失败：HTTP ${response.code}")
-                    JSONObject(response.body?.string().orEmpty())
+        val candidates = buildList<suspend () -> CheckedRelease> {
+            for (url in UpdateMirrors.apiCandidates(apiBase)) add {
+                executeCancellable(Request.Builder().url(url).header("Accept", "application/vnd.github+json").get().build()) { response ->
+                    if (!response.isSuccessful) throw IOException("检查失败：HTTP ${response.code}")
+                    CheckedRelease(ReleaseUpdateParser.parse(JSONObject(response.body?.string().orEmpty()), BuildConfig.VERSION_NAME))
                 }
-            }.onFailure { if (it is CancellationException) throw it }.getOrNull()
+            }
+            add { CheckedRelease(checkPublishedReleasePage()) }
         }
-        if (root != null) ReleaseUpdateParser.parse(root, BuildConfig.VERSION_NAME)
-        else checkPublishedReleasePage()
+        try {
+            kotlinx.coroutines.withTimeout(12_000L) { UpdateRace.firstSuccessful(candidates).info }
+        } catch (error: kotlinx.coroutines.TimeoutCancellationException) {
+            throw IOException("更新检查超时，请稍后重试", error)
+        }
     }
 
     private suspend fun checkPublishedReleasePage(): UpdateInfo? {
@@ -218,20 +218,6 @@ class UpdateManager(private val context: Context) {
                 MirrorProbe(candidate, (System.nanoTime() - start) / 1_000_000, expectedSha)
             }.getOrNull()
         }
-
-    private suspend fun <T> fastestSuccessful(
-        urls: List<String>,
-        load: suspend (String) -> T?,
-    ): T? = coroutineScope {
-        urls.map { url ->
-            async {
-                val start = System.nanoTime()
-                load(url)?.let { (System.nanoTime() - start) to it }
-            }
-        }.mapNotNull { it.await() }
-            .minByOrNull { it.first }
-            ?.second
-    }
 
     private fun launchInstaller(file: File) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)

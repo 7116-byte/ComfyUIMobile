@@ -9,6 +9,8 @@ object LanAddress {
         val withScheme = if (trimmed.contains("://")) trimmed else "http://$trimmed"
         val uri = URI(withScheme)
         require(uri.scheme.equals("http", ignoreCase = true)) { "当前只支持 HTTP 地址" }
+        require(uri.rawUserInfo == null && uri.rawQuery == null) { "当前不支持账号或令牌链接，请使用无需网页登录的 ComfyUI HTTP 根地址；连接页可查看使用指南" }
+        require(uri.rawPath.isNullOrEmpty() || uri.rawPath == "/") { "当前不支持带路径的代理链接，请填写 ComfyUI HTTP 根地址；连接页可查看使用指南" }
         val host = uri.host ?: throw IllegalArgumentException("地址格式不正确")
         val port = if (uri.port == -1) 8188 else uri.port
         require(port in 1..65535) { "端口无效" }

@@ -98,6 +98,7 @@ internal fun SettingsScreen(
     state: AppUiState,
     viewModel: MainViewModel,
     snackbar: SnackbarHostState,
+    onOpenGuide: () -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -197,6 +198,8 @@ internal fun SettingsScreen(
                                     }
                                     item {
                                         SettingsGroup("应用") {
+                                            SettingsLink(Icons.Default.Description, "新手引导", "连接、工作流、作品保存与常见问题", onOpenGuide)
+                                            SettingsDivider()
                                             SettingsLink(
                                                 Icons.Default.Description, "诊断日志",
                                                 if (state.loggingEnabled) "正在记录运行和闪退日志" else "日志记录已关闭",
@@ -361,10 +364,12 @@ internal fun SettingsScreen(
                                         }
                                     }
                                     item {
-                                        OutlinedButton(onClick = { viewModel.checkUpdate() }, modifier = Modifier.fillMaxWidth(), enabled = !state.updateDownloading) {
-                                            Text("检查更新")
+                                        OutlinedButton(onClick = { viewModel.checkUpdate() }, modifier = Modifier.fillMaxWidth(), enabled = !state.updateDownloading && !state.updateChecking) {
+                                            Text(if (state.updateChecking) "正在检查更新…" else "检查更新")
                                         }
                                     }
+                                    if (state.updateChecking) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+                                    state.updateCheckMessage?.let { message -> item { SettingsHint(message) } }
                                     state.updateInfo?.let { info ->
                                         item {
                                             SettingsGroup("可用更新") {

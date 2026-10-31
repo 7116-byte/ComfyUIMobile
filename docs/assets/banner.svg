@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="440" viewBox="0 0 1280 440" role="img" aria-labelledby="title desc">
+  <title id="title">ComfyUI Mobile</title><desc id="desc">把工作站，带到手边。Native Android companion for your ComfyUI.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#121B31"/><stop offset="1" stop-color="#263655"/></linearGradient>
+    <linearGradient id="accent" x2="1" y2="1"><stop stop-color="#B9B5FF"/><stop offset="1" stop-color="#89E0CE"/></linearGradient>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="#AEB9D1" opacity=".12"/></pattern>
+  </defs>
+  <rect width="1280" height="440" rx="28" fill="url(#bg)"/><rect width="1280" height="440" rx="28" fill="url(#dots)"/>
+  <g font-family="Segoe UI,Microsoft YaHei,sans-serif">
+    <text x="64" y="88" fill="#A6DBCE" font-size="15" letter-spacing="4">YOUR WORKFLOWS. YOUR WORKSTATION.</text>
+    <text x="60" y="170" fill="#F5F6FF" font-size="62" font-weight="700">ComfyUI Mobile</text>
+    <text x="64" y="235" fill="#F5F6FF" font-size="33" font-weight="600">把工作站，带到手边。</text>
+    <text x="64" y="283" fill="#B9C6DE" font-size="21">为手机和平板设计的原生 ComfyUI 客户端</text>
+    <g font-size="15" fill="#DAE5FA"><rect x="64" y="329" width="110" height="36" rx="18" fill="#384B6B"/><text x="87" y="353">ANDROID</text><rect x="186" y="329" width="134" height="36" rx="18" fill="#384B6B"/><text x="206" y="353">开源 · 自托管</text></g>
+  </g>
+  <g transform="translate(835 55)">
+    <rect x="60" width="195" height="330" rx="32" fill="#0F172B" stroke="#7789B5" stroke-width="2"/>
+    <rect x="70" y="10" width="175" height="310" rx="24" fill="#EFF1FA"/>
+    <rect x="130" y="18" width="55" height="5" rx="3" fill="#A6AEC3"/>
+    <g fill="none" stroke="url(#accent)" stroke-width="4"><path d="M-32 86H22Q42 86 42 108V164H102"/><path d="M204 175H274Q290 175 290 202V238H320"/></g>
+    <g fill="#B6B2FF"><circle cx="-32" cy="86" r="9"/><circle cx="320" cy="238" r="9"/></g>
+    <text x="87" y="60" fill="#3B4870" font-family="Segoe UI,Microsoft YaHei,sans-serif" font-size="17" font-weight="600">创作参数</text>
+    <rect x="84" y="81" width="147" height="57" rx="12" fill="#DCE1F6"/><rect x="98" y="96" width="82" height="5" rx="2.5" fill="#7180AC"/><rect x="98" y="109" width="115" height="5" rx="2.5" fill="#A7B4D3"/>
+    <rect x="84" y="151" width="147" height="88" rx="12" fill="white"/>
+    <path d="M99 171H215M99 188H182M99 205H200M99 222H154" stroke="#B8C1D8" stroke-width="5" stroke-linecap="round"/>
+    <rect x="111" y="257" width="94" height="34" rx="17" fill="#5263CB"/>
+    <path d="m146 267 12 7-12 7Z" fill="white"/><path d="M169 270H186M169 278H180" stroke="white" stroke-width="3" stroke-linecap="round"/>
+  </g>
+</svg>

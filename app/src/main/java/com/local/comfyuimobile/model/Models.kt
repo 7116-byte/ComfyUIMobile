@@ -170,11 +170,13 @@ data class UpdateInfo(
 )
 
 data class AppUiState(
+    val preferencesLoaded: Boolean = false,
+    val onboardingCompleted: Boolean = false,
     val status: ConnectionStatus = ConnectionStatus.DISCONNECTED,
     val connectionMessage: String = "尚未连接",
     val connectionStep: Int = 0,
     val connectionTotalSteps: Int = 6,
-    val serverInput: String = "http://192.168.10.109:8188",
+    val serverInput: String = "",
     val activeServer: ServerProfile? = null,
     val savedServers: List<ServerProfile> = emptyList(),
     val discoveredServers: List<ServerProfile> = emptyList(),
@@ -215,6 +217,8 @@ data class AppUiState(
     val error: String? = null,
     val notice: String? = null,
     val updateInfo: UpdateInfo? = null,
+    val updateChecking: Boolean = false,
+    val updateCheckMessage: String? = null,
     val updateDownloading: Boolean = false,
     val updateDownloadProgress: Float? = null,
     val updateDownloadSource: String? = null,

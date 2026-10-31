@@ -154,6 +154,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update {
                     it.copy(
                         savedServers = stored.profiles,
+                        preferencesLoaded = true,
+                        onboardingCompleted = stored.onboardingCompleted,
                         promptHistory = stored.promptHistory,
                         submittedJobIds = stored.submittedJobs,
                         autoSaveResults = stored.autoSaveResults,
@@ -2055,20 +2057,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .onFailure { _state.update { state -> state.copy(error = "无法打开原文件：${it.message}") } }
     }
 
+    fun completeOnboarding() {
+        viewModelScope.launch {
+            runOperation("保存引导状态失败") { preferences.completeOnboarding() }
+        }
+    }
+
     fun checkUpdate(manual: Boolean = true) {
+        if (_state.value.updateChecking) return
         val now = System.currentTimeMillis()
         if (!manual && now - lastUpdateCheck < 24 * 60 * 60 * 1_000L) return
+        _state.update { it.copy(updateChecking = true, updateCheckMessage = null) }
         viewModelScope.launch {
-            runOperation("检查更新失败") {
-                val info = updates.checkLatest()
-                preferences.setLastUpdateCheck(now)
-                lastUpdateCheck = now
-                _state.update {
-                    it.copy(
-                        updateInfo = info,
-                        notice = if (info == null && manual) "已是最新版本" else if (info != null) "发现新版本 ${info.tag}" else it.notice,
-                    )
+            try {
+                runOperation("检查更新失败") {
+                    try {
+                        val info = updates.checkLatest()
+                        preferences.setLastUpdateCheck(now)
+                        lastUpdateCheck = now
+                        _state.update {
+                            it.copy(
+                                updateInfo = info,
+                                updateCheckMessage = if (info == null) "已是最新版本" else "发现新版本 ${info.tag}",
+                                notice = if (info == null && manual) "已是最新版本" else if (info != null) "发现新版本 ${info.tag}" else it.notice,
+                            )
+                        }
+                    } catch (error: Exception) {
+                        if (error is CancellationException) throw error
+                        _state.update { it.copy(updateCheckMessage = "检查失败：${error.message.orEmpty()}") }
+                        throw error
+                    }
                 }
+            } finally {
+                _state.update { it.copy(updateChecking = false) }
             }
         }
     }

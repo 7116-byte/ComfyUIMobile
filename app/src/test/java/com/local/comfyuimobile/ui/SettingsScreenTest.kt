@@ -48,6 +48,7 @@ class SettingsScreenTest {
     private lateinit var activity: ComponentActivity
     private lateinit var root: ViewRootForTest
     private var dismissed = false
+    private var guideOpened = false
 
     @After fun tearDown() {
         if (::controller.isInitialized) {
@@ -79,6 +80,19 @@ class SettingsScreenTest {
         assertTrue(hasText("尚未添加保存规则"))
         assertTrue(nodeWithText("删除全部本地作品").config.contains(SemanticsProperties.Disabled))
         screenshot("settings-local-results")
+    }
+
+    @Test fun updateResultRemainsOnUpdatePage() {
+        show(AppUiState(updateCheckMessage = "已是最新版本"))
+        click("软件更新")
+        assertTrue(hasText("已是最新版本"))
+    }
+
+    @Test fun onboardingCanBeReopenedWithoutLeavingSettings() {
+        show(AppUiState())
+        click("新手引导")
+        assertTrue(guideOpened)
+        assertFalse(dismissed)
     }
 
     @Test fun deletingLocalResultsRequiresConfirmationAndCancelKeepsPage() {
@@ -133,7 +147,7 @@ class SettingsScreenTest {
         val viewModel = ViewModelProvider(activity)[MainViewModel::class.java]
         activity.setContent {
             ComfyMobileTheme {
-                SettingsScreen(state, viewModel, SnackbarHostState()) { dismissed = true }
+                SettingsScreen(state, viewModel, SnackbarHostState(), onOpenGuide = { guideOpened = true }) { dismissed = true }
             }
         }
         settle()

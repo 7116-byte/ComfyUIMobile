@@ -68,6 +68,7 @@ internal fun ConnectionScreen(
     onConnect: (String) -> Unit,
     onScan: () -> Unit,
     onRemoveServer: (String) -> Unit,
+    onOpenGuide: () -> Unit = {},
 ) {
     Scaffold(
         modifier = Modifier.imePadding(),
@@ -79,7 +80,10 @@ internal fun ConnectionScreen(
                         Text("ComfyUI Mobile", style = MaterialTheme.typography.titleMedium)
                     }
                 },
-                actions = { IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "设置") } },
+                actions = {
+                    TextButton(onClick = onOpenGuide) { Text("使用指南") }
+                    IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "设置") }
+                },
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },

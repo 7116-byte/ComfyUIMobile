@@ -13,12 +13,14 @@ import com.local.comfyuimobile.model.ServerProfile
 import com.local.comfyuimobile.model.CacheOutputRule
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import org.json.JSONArray
 import org.json.JSONObject
 
 private val Context.dataStore by preferencesDataStore(name = "comfy_mobile")
 
 data class StoredSettings(
+    val onboardingCompleted: Boolean = false,
     val profiles: List<ServerProfile> = emptyList(),
     val activeServerUrl: String = "",
     val promptHistory: List<String> = emptyList(),
@@ -35,6 +37,7 @@ data class StoredSettings(
 
 class AppPreferences(context: Context, private val store: DataStore<Preferences> = context.dataStore) {
     private object Keys {
+        val onboardingCompleted = booleanPreferencesKey("onboarding_completed_v1")
         val profiles = stringPreferencesKey("profiles")
         val activeServerUrl = stringPreferencesKey("active_server_url")
         val promptHistory = stringPreferencesKey("prompt_history")
@@ -50,8 +53,19 @@ class AppPreferences(context: Context, private val store: DataStore<Preferences>
         val favoriteResultKeys = stringPreferencesKey("favorite_result_keys")
     }
 
-    val settings: Flow<StoredSettings> = store.data.map { preferences ->
+    val settings: Flow<StoredSettings> = store.data.onStart {
+        // Persist the migration once, so deleting the last old server later cannot
+        // unexpectedly turn an established install back into a first launch.
+        store.edit { preferences ->
+            if (preferences[Keys.onboardingCompleted] == null) {
+                preferences[Keys.onboardingCompleted] = decodeProfiles(preferences[Keys.profiles].orEmpty()).isNotEmpty()
+                    || !preferences[Keys.recentWorkflow].isNullOrBlank()
+                    || !preferences[Keys.recentWorkflows].isNullOrBlank()
+            }
+        }
+    }.map { preferences ->
         StoredSettings(
+            onboardingCompleted = preferences[Keys.onboardingCompleted] ?: false,
             profiles = decodeProfiles(preferences[Keys.profiles].orEmpty()),
             activeServerUrl = preferences[Keys.activeServerUrl].orEmpty(),
             promptHistory = decodeStrings(preferences[Keys.promptHistory].orEmpty()).take(PromptHistory.MAX_SIZE),
@@ -76,6 +90,10 @@ class AppPreferences(context: Context, private val store: DataStore<Preferences>
             preferences[Keys.profiles] = encodeProfiles(merged.take(12))
             preferences[Keys.activeServerUrl] = profile.baseUrl
         }
+    }
+
+    suspend fun completeOnboarding() {
+        store.edit { it[Keys.onboardingCompleted] = true }
     }
 
     /** Commit an explicit connection choice before network work can fail or be cancelled. */

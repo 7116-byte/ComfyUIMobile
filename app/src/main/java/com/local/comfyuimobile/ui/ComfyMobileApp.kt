@@ -231,6 +231,8 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showGuide by rememberSaveable { mutableStateOf(false) }
+    val needsGuide = state.preferencesLoaded && !state.onboardingCompleted
     val context = LocalContext.current
     val advancedEditorLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         viewModel.finishAdvancedEditor(result.resultCode == Activity.RESULT_OK)
@@ -259,9 +261,9 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
     }
 
     Box(Modifier.fillMaxSize()) {
-        Box(if (showSettings) Modifier.clearAndSetSemantics { } else Modifier) {
+        Box(if (showSettings || showGuide || needsGuide || !state.preferencesLoaded) Modifier.clearAndSetSemantics { } else Modifier) {
             if (state.activeServer == null) {
-                ConnectionPage(state, viewModel, snackbar, onOpenSettings = { showSettings = true })
+                ConnectionPage(state, viewModel, snackbar, onOpenSettings = { showSettings = true }, onOpenGuide = { showGuide = true })
             } else {
                 ConnectedApp(state, viewModel, snackbar, onOpenSettings = { showSettings = true })
             }
@@ -303,18 +305,29 @@ fun ComfyMobileApp(viewModel: MainViewModel, bridge: ComfyBridge) {
             }
         }
         if (showSettings) {
-            SettingsScreen(state, viewModel, snackbar) { showSettings = false }
+            Box(if (showGuide) Modifier.clearAndSetSemantics { } else Modifier) {
+                SettingsScreen(state, viewModel, snackbar, onOpenGuide = { showGuide = true }) { showSettings = false }
+            }
+        }
+        if (!state.preferencesLoaded) {
+            Surface(Modifier.fillMaxSize()) { }
+        } else if (showGuide || needsGuide) {
+            OnboardingScreen(onFinish = {
+                if (needsGuide) viewModel.completeOnboarding()
+                showGuide = false
+            })
         }
     }
 }
 
 @Composable
-private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState, onOpenSettings: () -> Unit) {
+private fun ConnectionPage(state: AppUiState, viewModel: MainViewModel, snackbar: SnackbarHostState, onOpenSettings: () -> Unit, onOpenGuide: () -> Unit) {
     ConnectionScreen(
         state = state, snackbar = snackbar, onOpenSettings = onOpenSettings,
         onServerInput = viewModel::setServerInput,
         onConnect = { address -> viewModel.setServerInput(address); viewModel.connect(address) },
         onScan = viewModel::scanLan, onRemoveServer = viewModel::removeServer,
+        onOpenGuide = onOpenGuide,
     )
 }
 

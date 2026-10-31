@@ -34,4 +34,11 @@ class LanAddressTest {
         assertEquals("192.168.7.1", addresses.first())
         assertEquals("192.168.7.254", addresses.last())
     }
+
+    @Test fun rejectsProxyPathsAndCredentialsInsteadOfSilentlyDroppingThem() {
+        listOf("http://example.org:80/comfy", "http://example.org:80/?token=secret", "http://user:password@example.org:80").forEach { address ->
+            assertTrue(runCatching { LanAddress.normalize(address) }.isFailure)
+        }
+        assertEquals("http://example.org:80", LanAddress.normalize("http://example.org:80/"))
+    }
 }

@@ -1,98 +1,103 @@
-# ComfyUI Mobile
+<div align="center">
 
-ComfyUI Mobile 是一个连接自有 ComfyUI 服务器的原生 Android 客户端。它把 ComfyUI 工作流转换成手机友好的纵向参数表单，不在主界面显示节点画布。
+<img src="docs/assets/banner.svg" alt="ComfyUI Mobile — 把工作站，带到手边" width="960" />
 
-> 当前版本：[v0.1.72](https://github.com/7116-byte/ComfyUIMobile/releases/tag/v0.1.72)。修复更新检查误报与 API 限流回退，增加常驻顶栏提示和悬浮操作槽，提前保存连接记录。
+**连接自己的 ComfyUI，用手机和平板继续创作。**
 
-正式版可从“设置 → 软件更新”检查、下载并安装更新；也可在 Release 页面下载正式 APK。独立包名的预览版与正式版并存，不能相互覆盖。布局及验证记录见 [自适应界面说明](docs/design/adaptive-interface.md)。
+A native Android companion for your own ComfyUI — workflows, parameters, and original results.
 
-若 0.1.69–0.1.71 检查不到更新，可直接从 Release 下载正式包覆盖安装；旧检查逻辑可能把接口限流误报为最新。v0.1.72 已加入官方发布页备用检查，详见 [更新检查说明](docs/update-checks.md)。
+[![Release](https://img.shields.io/github/v/release/7116-byte/ComfyUIMobile?label=Release&color=5263CB)](https://github.com/7116-byte/ComfyUIMobile/releases/latest) [![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)](#下载安装) [![Compose](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4)](#界面预览) [![License](https://img.shields.io/github/license/7116-byte/ComfyUIMobile?color=688078)](LICENSE)
 
-[v0.1.72 界面说明](docs/design/parameter-actions.md) 记录顶栏提示、悬浮操作和验证边界。
+[**下载 APK**](https://github.com/7116-byte/ComfyUIMobile/releases/latest) · [连接教程](docs/connection-guide.md) · [使用指南](docs/user-guide.md) · [English](README.en.md)
 
-## 功能
+</div>
 
-- 保存、切换和自动扫描局域网 ComfyUI（默认端口 8188）
-- 连接时显示六个阶段、当前进度和具体失败步骤
-- 显示 ComfyUI/前端版本、GPU、显存、队列、运行节点和进度
-- 工作流搜索、文件夹读取、导入、导出、复制、改名、移动、删除和冲突保护
-- 已保存的服务器工作流可分别保留手机本地草稿；App 闪退、切到后台或 ComfyUI 重启后可恢复，服务器版本变化时提供继续草稿、读取服务器版和另存选择。图片/文件临时工作流仅保留在当前 App 会话中，需手动保存才能长期保留
-- 可直接通过系统文件选择器打开带 ComfyUI 工作流信息的 PNG、WebP、AVIF 图片；PNG 元数据由 App 原生读取
-- 隐藏 WebView 调用服务器自己的 ComfyUI 前端，使用真实节点定义执行 `loadGraphData()` 和 `graphToPrompt()`
-- 单击工作流只选择并预读取参数，明确点击“打开参数”后才进入参数页；参数按真实执行链顺序组成可展开部件卡片
-- 只保留连接到有效输出的执行链；“绕过”节点按 ComfyUI 官方解析结果透传，不会连带隐藏其上游正常节点，同时排除“永不执行”和未连线分支；支持 rgthree 整组开关
-- 参数部件两侧显示与网页端类型一致的彩色连接点和数字；一个输出分叉时使用 `4a/4b/4c` 标记下游输入
-- 生成时显示当前部件进度，正在执行的部件以绿色边框跟随跳转，完成或失败后明确提示
-- 原生参数控件：提示词、文本、精确数字输入、开关、下拉、单图、有序多图和视频上传；多图可从系统相册一次选择、追加、排序和移除，常用参数自动显示中文名称
-- 每个工作流可保存参数名称、顺序、可见性及“主要/更多”分组
-- 全局提示词历史最多 50 条，去重、搜索、复用、单删和清空
-- 结果页分为“本地/云端”和“全部平铺/任务相册”；每次生成任务是一个独立相册，最新任务在最前
-- 全屏图片查看支持双指缩放、放大后拖动，以及左右滑动切换同一列表或任务相册中的图片
-- 图片“更多 → 查看参数”可只读查看和复制该图内嵌记录或匹配任务历史中的生成参数，优先显示实际运行种子；不会切换或保存当前工作流
-- 可长按输出部件加入本地保存白名单；仅保存本 App 提交或用户明确接管且命中白名单的输出，不自动保存其他浏览器任务，云端删除不会影响已保存的本地作品
-- 节点参数错误会标红并自动展开对应部件；视频采用流式播放和流式保存
-- App 自己提交的未完成任务使用前台通知显示进度
-- GitHub Release 更新检查、SHA-256、包名、版本号和签名证书校验
-- 未连接时也能从右上角设置检查和安装更新
+## 在手机上，专注创作
 
-## 使用
+工作流和模型留在你的工作站，手机负责选择工作流、调整参数、提交任务和查看作品。日常操作使用原生触控界面；需要遮罩、画板等复杂控件时，再进入服务器的高级编辑。
 
-1. 在电脑上以 `--listen 0.0.0.0` 启动 ComfyUI，并允许 Windows 防火墙放行 8188 端口。
-2. 确认手机能通过局域网、VPN 或其他可信网络访问电脑。
-3. 在 App 输入 `http://服务器地址:端口`，局域网环境也可点击“扫描局域网”。
-4. 选择工作流，在“参数”页调整后生成。
+| 从哪里开始 | 可以做什么 |
+| --- | --- |
+| **工作流** | 搜索与文件夹浏览，导入文件或带工作流的图片，点选后打开参数 |
+| **参数** | 提示词、种子、模型、单图与有序多图；悬浮生成操作，错误定位到部件 |
+| **结果** | 本地 / 云端分开查看，任务相册、图片缩放、原图保存、生成参数查看 |
+| **后台** | 队列、任务状态、工作站与 GPU 信息，跟踪本 App 提交或明确接管的任务 |
 
-工作流列表中单击只选择并预读取参数，点击上方“打开”才进入参数页；工作流保存和另存均在参数页顶部操作。
+手机使用底部导航，平板使用侧栏和分栏；深浅主题跟随系统。首次打开有可跳过的引导，之后可从连接页或设置重新查看。
 
-复杂画板、遮罩、曲线等控件会保留原值并标记为特殊控件，可进入“高级编辑”使用服务器原始前端。参数页、高级编辑和生成共用同一份手机工作副本；关闭高级编辑时会读取当前节点、连线和参数并同步回参数页及生成环境，只有明确点击“保存/另存”才写入服务器。
+## 界面预览
 
-## 连接安全
+<div align="center">
+<img src="docs/screenshots/guide-v0.1.73-phone.png" alt="首次连接指南" width="30%" />
+<img src="docs/screenshots/workflows-v0.1.73-phone.png" alt="工作流与悬浮打开参数" width="30%" />
+<img src="docs/screenshots/parameters-v0.1.73-phone.png" alt="原生参数与悬浮生成" width="30%" />
+<br />
+<sub>连接指南 · 工作流 · 参数</sub>
+<br /><br />
+<img src="docs/screenshots/parameters-v0.1.73-tablet.png" alt="平板深色分栏参数界面" width="94%" />
+</div>
 
-手动连接不再限制 IP 网段，可使用局域网、VPN、共享地址、公网 IP 和域名，但当前仍只支持 HTTP，不支持反向代理登录。ComfyUI 默认没有账号鉴权；放开 App 的地址校验不等于服务器已经安全，请只连接你本人控制且已通过 VPN、防火墙或其他方式保护的服务器，绝不要直接把无认证的 8188 端口暴露到公网。
+截图为真实 Compose 界面的测试数据渲染，不含用户工作流或作品。更多预览与来源见 [截图说明](docs/screenshots/README.md)。
 
-隐藏 WebView 没有注册 Android JavaScript 接口。自定义节点前端脚本只能在 WebView 的普通网页权限内运行，不能直接调用原生对象。
+## 下载安装
 
-## 构建
+1. 打开 [最新正式版 Release](https://github.com/7116-byte/ComfyUIMobile/releases/latest)，下载 APK。
+2. 在 Android 8.0 或以上设备安装，按系统提示允许此次安装。
+3. 已装正式版可直接覆盖更新；也可从 App 的 **设置 → 软件更新** 检查、下载和安装。
 
-本机恢复后的开发入口为根目录 `dev.ps1`，默认离线完成回归、构建和正式签名校验，详见 [本地开发](docs/development.md) 和 [迁移记录](docs/recovery-2026-10-30.md)。
+Release 同时提供 APK 的 SHA-256 校验文件。正式版延续原包名与签名；独立的预览版与正式版数据互不相通。旧版检查不到更新时，请从 Release 下载覆盖，详见 [更新检查说明](docs/update-checks.md)。重要作品请另行备份，避免卸载重装。
 
-原图下载支持大文件 2–4 路 HTTP Range 并发、完整性校验和不支持时自动回退，覆盖手动保存及后台自动下载，不压缩原图。详细行为见 [原图分段下载](docs/original-downloads.md)。
+## 三步开始
 
-要求 JDK 17、Android SDK 36：
+**① 准备工作站**
 
-```powershell
-.\gradlew.bat testDebugUnitTest assembleDebug
-```
+先让 ComfyUI 工作流在电脑网页正常运行，再开启局域网监听。已有启动命令追加 `--listen 0.0.0.0`；启动器用户在设置里开启局域网访问或添加监听参数，然后重启 ComfyUI。
 
-Release 签名配置必须保存在未跟踪的私密位置。本机使用 Git 忽略目录：
+**② 连接手机**
 
-```text
-.local/android/signing/ComfyUIMobile-signing.properties
-```
+手机与电脑接入同一局域网，填写 `http://电脑的局域网IP:实际端口`，例如 `http://192.168.1.20:8188`。先用手机浏览器打开这个地址确认可达，再回 App 连接。同网段也可尝试扫描。
 
-配置格式：
+**③ 打开工作流**
 
-```properties
-storeFile=C:/absolute/path/ComfyUIMobile-release.jks
-storePassword=...
-keyAlias=comfyuimobile
-keyPassword=...
-```
+点选工作流 → **打开参数** → 调整参数 → **生成**。完成后在“结果”查看；要自动保存到手机，需设置输出白名单并开启自动保存。
 
-可通过环境变量 `COMFY_SIGNING_PROPERTIES` 指定仓库外的配置文件，并兼容旧目录 `../app/tools/signing/ComfyUIMobile-signing.properties`。缺少配置时，任何 Release 任务都会直接失败。密钥和密码不得提交到 Git。
+**第一次配置？** [完整连接教程](docs/connection-guide.md) 包含启动器、便携版 `.bat`、手动 Python 启动、IP 查找、防火墙和排错步骤。
 
-## 截图
+## 我能连接什么？
 
-截图预留位置见 [`docs/screenshots`](docs/screenshots/README.md)。
+| 连接方式 | 当前支持情况 |
+| --- | --- |
+| 自有电脑，同一局域网 | 支持，需开放监听及相应端口 |
+| 已互通的 VPN / 虚拟局域网 | 支持使用可达的 HTTP 根地址；App 不负责建立 VPN |
+| 云 GPU 上的完整 ComfyUI 实例 | 条件支持：须提供可直达的 HTTP 根地址、原生接口、前端和 WebSocket，需实测 |
+| HTTPS 分享页、平台登录 / Cookie / API Key、带路径或令牌的链接 | 目前不支持 |
+| 纯 API、Serverless、部署后的单工作流接口、Comfy Cloud API | 目前不支持直接接入 |
 
-## 已知边界
+“浏览器能打开一个网页”不等于完整兼容。App 需要服务器自己的前端、节点定义、工作流读写、上传和任务接口；它不提供算力、模型或平台账号。ComfyUI 通常没有默认访问认证，请在可信网络或 VPN 内使用，不要直接公开无认证端口。更多判断方法见 [云平台兼容说明](docs/connection-guide.md#云平台给的纯链接能用吗)。
 
-- 仅 Android、简体中文优先；支持手动连接任意有效 HTTP 主机，安全责任由服务器所有者控制。
-- 不提供原生节点画布；高级编辑仅作为特殊控件备用入口。
-- 连接时依赖目标服务器自己的前端能力；不兼容或缺失节点时会停止生成并显示原因。
-- 音频及其他输出首版只显示任务元数据，不提供专用播放器。
-- ComfyUI 原生 WebSocket 只向提交任务的客户端推送节点进度。本 App 提交的任务可实时恢复；其他客户端提交的任务可接管快照、跟踪队列/完成/保存状态，但原生服务器不提供跨客户端实时节点进度，不会抢占浏览器的会话来伪装支持。
+## 保存规则，先说清楚
 
-## 许可
+- **服务器工作流**：点“保存 / 另存”才写回服务器，日常修改先留在手机工作副本。
+- **本地草稿**：在设置中开启后，可恢复已保存服务器工作流的未保存修改；临时导入需手动保存才能长期保留。
+- **本地作品**：云端可见不代表已下载。自动保存需命中输出白名单，只处理本 App 提交或明确接管的任务；也可手动保存原图。
 
-[MIT License](LICENSE)
+复杂自定义节点可能需要高级编辑，缺少节点或模型需在电脑端处理。音频等输出暂以任务元数据展示；其他客户端任务的实时节点进度受 ComfyUI 服务端能力限制。详见 [使用指南](docs/user-guide.md)。
+
+## 参与项目
+
+遇到问题请 [提交 Issue](https://github.com/7116-byte/ComfyUIMobile/issues/new/choose)，注明 App / ComfyUI 版本、连接类型与复现步骤；请遮盖地址、令牌、提示词和个人作品。欢迎改进兼容性、无障碍、小屏体验及文档，也欢迎分享实际使用反馈。
+
+| 文档 | 内容 |
+| --- | --- |
+| [使用指南](docs/user-guide.md) / [连接教程](docs/connection-guide.md) | 从第一次连接到保存作品 |
+| [贡献指南](CONTRIBUTING.md) | 构建 Debug、反馈问题和提交修改 |
+| [更新记录](RELEASE_NOTES.md) | 各版本变化 |
+| [开发文档](docs/development.md) / [文档索引](docs/README.md) | 工具链、测试、设计与技术记录 |
+
+如果这个项目帮你把 ComfyUI 用得更顺手，欢迎点一颗 Star，让更多创作者找到它。
+
+## 致谢与许可
+
+基于 [ComfyUI](https://github.com/Comfy-Org/ComfyUI) 的服务端与前端能力，使用 Kotlin、Jetpack Compose、OkHttp、Coil 和 AndroidX Media3 构建。此项目为独立客户端，与 Comfy 组织无隶属关系。
+
+[MIT License](LICENSE) · Copyright © 2026 7116-byte
