@@ -59,7 +59,7 @@ internal fun parameterProblemMessage(state: AppUiState): String? {
 @Composable
 internal fun StudioToolbar(
     title: String,
-    parameterState: AppUiState?,
+    state: AppUiState?,
     snackbar: SnackbarHostState,
     connectionLabel: String?,
     onOpenBackend: () -> Unit,
@@ -74,9 +74,9 @@ internal fun StudioToolbar(
     ) {
         Text(title, style = MaterialTheme.typography.titleLarge.copy(shadow = toolbarTextShadow()), maxLines = 1)
         Column(Modifier.weight(1f).testTag("toolbar-feedback"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            if (parameterState != null) {
-                val problem = parameterProblemMessage(parameterState)
-                val generation = parameterState.generationMessage
+            if (state != null) {
+                val problem = parameterProblemMessage(state)
+                val generation = state.generationMessage
                 val transient = snackbar.currentSnackbarData?.visuals?.message
                 val count = listOfNotNull(problem, generation.takeIf { it.isNotBlank() }, transient?.takeIf { it != problem && it != generation }).size
                 val maxLines = if (count > 1) 1 else 2
@@ -86,14 +86,14 @@ internal fun StudioToolbar(
                 if (generation.isNotBlank()) ParameterFeedback(
                     generation,
                     isError = generation.contains("失败"),
-                    completed = parameterState.generationProgress == 1f && !generation.contains("正在确认"),
-                    progress = parameterState.generationProgress,
+                    completed = state.generationProgress == 1f && !generation.contains("正在确认"),
+                    progress = state.generationProgress,
                     maxLines = maxLines,
                     onDetails = { details = generation },
                 )
                 if (snackbar.currentSnackbarData != null) SnackbarHost(snackbar) { data ->
                     if (data.visuals.message != problem && data.visuals.message != generation) {
-                        ParameterFeedback(data.visuals.message, isError = parameterState.error != null,
+                        ParameterFeedback(data.visuals.message, isError = state.error != null,
                             maxLines = maxLines, onDetails = { details = data.visuals.message }, onDismiss = data::dismiss)
                     }
                 }
@@ -107,7 +107,7 @@ internal fun StudioToolbar(
     details?.let { message ->
         AlertDialog(
             onDismissRequest = { details = null },
-            title = { Text("参数提示") },
+            title = { Text("运行提示") },
             text = { androidx.compose.foundation.text.selection.SelectionContainer { Text(message) } },
             confirmButton = { TextButton(onClick = { details = null }) { Text("关闭") } },
         )

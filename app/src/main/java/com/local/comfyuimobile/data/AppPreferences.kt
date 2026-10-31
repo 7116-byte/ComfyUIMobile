@@ -6,6 +6,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import com.local.comfyuimobile.network.LanAddress
 import com.local.comfyuimobile.model.ServerProfile
 import com.local.comfyuimobile.model.CacheOutputRule
 import kotlinx.coroutines.flow.Flow
@@ -30,7 +33,7 @@ data class StoredSettings(
     val favoriteResultKeys: Set<String> = emptySet(),
 )
 
-class AppPreferences(private val context: Context) {
+class AppPreferences(context: Context, private val store: DataStore<Preferences> = context.dataStore) {
     private object Keys {
         val profiles = stringPreferencesKey("profiles")
         val activeServerUrl = stringPreferencesKey("active_server_url")
@@ -47,7 +50,7 @@ class AppPreferences(private val context: Context) {
         val favoriteResultKeys = stringPreferencesKey("favorite_result_keys")
     }
 
-    val settings: Flow<StoredSettings> = context.dataStore.data.map { preferences ->
+    val settings: Flow<StoredSettings> = store.data.map { preferences ->
         StoredSettings(
             profiles = decodeProfiles(preferences[Keys.profiles].orEmpty()),
             activeServerUrl = preferences[Keys.activeServerUrl].orEmpty(),
@@ -67,7 +70,7 @@ class AppPreferences(private val context: Context) {
     }
 
     suspend fun saveServer(profile: ServerProfile) {
-        context.dataStore.edit { preferences ->
+        store.edit { preferences ->
             val current = decodeProfiles(preferences[Keys.profiles].orEmpty())
             val merged = listOf(profile) + current.filterNot { it.baseUrl == profile.baseUrl }
             preferences[Keys.profiles] = encodeProfiles(merged.take(12))
@@ -75,8 +78,21 @@ class AppPreferences(private val context: Context) {
         }
     }
 
+    /** Commit an explicit connection choice before network work can fail or be cancelled. */
+    suspend fun rememberServerAddress(address: String) {
+        val normalized = LanAddress.normalize(address)
+        store.edit { preferences ->
+            val current = decodeProfiles(preferences[Keys.profiles].orEmpty())
+            val profile = current.firstOrNull { it.baseUrl == normalized }
+                ?: ServerProfile(java.util.UUID.nameUUIDFromBytes(normalized.toByteArray()).toString(),
+                    normalized.removePrefix("http://").substringBefore(':'), normalized)
+            preferences[Keys.profiles] = encodeProfiles((listOf(profile) + current.filterNot { it.baseUrl == normalized }).take(12))
+            preferences[Keys.activeServerUrl] = normalized
+        }
+    }
+
     suspend fun removeServer(baseUrl: String) {
-        context.dataStore.edit { preferences ->
+        store.edit { preferences ->
             val remaining = decodeProfiles(preferences[Keys.profiles].orEmpty()).filterNot { it.baseUrl == baseUrl }
             preferences[Keys.profiles] = encodeProfiles(remaining)
             if (preferences[Keys.activeServerUrl] == baseUrl) preferences.remove(Keys.activeServerUrl)
@@ -84,35 +100,35 @@ class AppPreferences(private val context: Context) {
     }
 
     suspend fun savePromptHistory(history: List<String>) {
-        context.dataStore.edit { it[Keys.promptHistory] = encodeStrings(history.take(PromptHistory.MAX_SIZE)) }
+        store.edit { it[Keys.promptHistory] = encodeStrings(history.take(PromptHistory.MAX_SIZE)) }
     }
 
     suspend fun saveSubmittedJobs(ids: Set<String>) {
-        context.dataStore.edit { it[Keys.submittedJobs] = encodeStrings(ids.toList().takeLast(200)) }
+        store.edit { it[Keys.submittedJobs] = encodeStrings(ids.toList().takeLast(200)) }
     }
 
     suspend fun setTaskTracked(server: String, id: String, tracked: Boolean) {
         val key = com.local.comfyuimobile.network.TaskLifecycle.key(server, id)
-        context.dataStore.edit { values ->
+        store.edit { values ->
             val current = decodeStrings(values[Keys.trackedJobs].orEmpty()).toSet()
             values[Keys.trackedJobs] = encodeStrings(if (tracked) current + key else current - key)
         }
     }
 
     suspend fun setAutoSaveResults(enabled: Boolean) {
-        context.dataStore.edit { it[Keys.autoSaveResults] = enabled }
+        store.edit { it[Keys.autoSaveResults] = enabled }
     }
 
     suspend fun setLocalDraftsEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[Keys.localDraftsEnabled] = enabled }
+        store.edit { it[Keys.localDraftsEnabled] = enabled }
     }
 
     suspend fun setLastUpdateCheck(timestamp: Long) {
-        context.dataStore.edit { it[Keys.lastUpdateCheck] = timestamp }
+        store.edit { it[Keys.lastUpdateCheck] = timestamp }
     }
 
     suspend fun setRecentWorkflow(path: String, replacedPath: String? = null) {
-        context.dataStore.edit { preferences ->
+        store.edit { preferences ->
             val current = decodeStrings(preferences[Keys.recentWorkflows].orEmpty())
                 .ifEmpty { listOfNotNull(preferences[Keys.recentWorkflow]?.takeIf(String::isNotBlank)) }
             val updated = RecentWorkflows.add(current, path, replacedPath)
@@ -122,7 +138,7 @@ class AppPreferences(private val context: Context) {
     }
 
     suspend fun removeRecentWorkflow(path: String) {
-        context.dataStore.edit { preferences ->
+        store.edit { preferences ->
             val updated = RecentWorkflows.remove(
                 decodeStrings(preferences[Keys.recentWorkflows].orEmpty()),
                 path,
@@ -136,7 +152,7 @@ class AppPreferences(private val context: Context) {
     }
 
     suspend fun saveCacheOutputRules(rules: List<CacheOutputRule>) {
-        context.dataStore.edit { preferences ->
+        store.edit { preferences ->
             preferences[Keys.cacheOutputRules] = JSONArray().apply {
                 rules.forEach { rule ->
                     put(
@@ -155,11 +171,11 @@ class AppPreferences(private val context: Context) {
     }
 
     suspend fun setCacheClearedAt(timestamp: Long) {
-        context.dataStore.edit { it[Keys.cacheClearedAt] = timestamp }
+        store.edit { it[Keys.cacheClearedAt] = timestamp }
     }
 
     suspend fun saveFavoriteResultKeys(keys: Set<String>) {
-        context.dataStore.edit { it[Keys.favoriteResultKeys] = encodeStrings(keys.take(1_000)) }
+        store.edit { it[Keys.favoriteResultKeys] = encodeStrings(keys.take(1_000)) }
     }
 
     private fun decodeProfiles(raw: String): List<ServerProfile> = runCatching {

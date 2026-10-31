@@ -12,3 +12,4 @@ captures/
 *.log
 .local/
 .codex-remote-attachments/
+.codex-attachments/

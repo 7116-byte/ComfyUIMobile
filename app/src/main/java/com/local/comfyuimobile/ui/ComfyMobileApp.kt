@@ -403,7 +403,7 @@ internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar:
     val toolbar: @Composable (Modifier) -> Unit = { modifier ->
         StudioToolbar(
             title = page.label,
-            parameterState = state.takeIf { page == MainPage.PARAMETERS && it.selectedWorkflow != null },
+            state = state,
             snackbar = snackbar,
             connectionLabel = if (page != MainPage.BACKEND && (state.status != ConnectionStatus.CONNECTED || !state.bridgeReady)) backendConnectionLabel(state) else null,
             onOpenBackend = { page = MainPage.BACKEND }, onOpenSettings = onOpenSettings,
@@ -436,9 +436,7 @@ internal fun ConnectedApp(state: AppUiState, viewModel: MainViewModel, snackbar:
                 }
             }
         },
-        snackbarHost = {
-            if (page != MainPage.PARAMETERS || state.selectedWorkflow == null) SnackbarHost(snackbar)
-        },
+        snackbarHost = {},
     ) { padding ->
         Row(Modifier.padding(padding).fillMaxSize()) {
             if (expanded) {
@@ -537,6 +535,14 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
     }
     var actionMenuExpanded by remember(actionEntry?.path) { mutableStateOf(false) }
     val filtered = WorkflowBrowser.entries(state.workflows, currentFolder, search)
+    val openSelectedParameters: () -> Unit = {
+        if (actionEntry != null) {
+            if (state.previewWorkflow?.entry?.path == actionEntry.path) viewModel.openPreviewedWorkflow()
+            else viewModel.selectWorkflow(actionEntry, recordAsOpened = true)
+            selectedEntryPath = null
+            onOpenParameters()
+        }
+    }
     val selectionPanel: @Composable () -> Unit = {
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -561,20 +567,7 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
                             }
                         }
                     }
-                    Button(
-                        onClick = {
-                            if (state.previewWorkflow?.entry?.path == actionEntry.path) viewModel.openPreviewedWorkflow()
-                            else viewModel.selectWorkflow(actionEntry, recordAsOpened = true)
-                            selectedEntryPath = null
-                            onOpenParameters()
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                    ) {
-                        Icon(Icons.Default.Tune, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("打开参数")
-                    }
+
                 } else {
                     Icon(Icons.Default.Hub, null, Modifier.size(32.dp), tint = MaterialTheme.colorScheme.primary)
                     Text("准备好开始创作", style = MaterialTheme.typography.titleMedium)
@@ -630,7 +623,7 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
         }
     }
     val listContent: @Composable (Modifier, Boolean) -> Unit = { modifier, includeSelection ->
-        LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        LazyColumn(modifier, contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = if (actionEntry != null) 104.dp else 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item(key = "browser-controls") { browserHeader() }
             if (includeSelection && actionEntry != null) item(key = "current-selection") { selectionPanel() }
             if (filtered.isEmpty()) {
@@ -666,12 +659,29 @@ private fun WorkflowScreen(state: AppUiState, viewModel: MainViewModel, onOpenPa
         if (maxWidth >= 660.dp) {
             Row(Modifier.fillMaxSize().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                 listContent(Modifier.weight(1f).fillMaxHeight(), false)
-                Column(Modifier.width(236.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column(Modifier.width(236.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(top = 12.dp, bottom = 104.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     selectionPanel()
                     Text("点击预览，打开参数后再编辑。保存时才会写入服务器工作流。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         } else listContent(Modifier.fillMaxSize().padding(horizontal = 20.dp), true)
+        if (actionEntry != null && WindowInsets.ime.getBottom(LocalDensity.current) == 0) Surface(
+            modifier = Modifier.align(if (maxWidth >= 660.dp) Alignment.BottomEnd else Alignment.BottomCenter)
+                .padding(horizontal = 20.dp, vertical = 16.dp).widthIn(max = 320.dp),
+            shape = CircleShape, color = MaterialTheme.colorScheme.surface, shadowElevation = 8.dp,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
+            Box(Modifier.padding(6.dp)) {
+                Button(onClick = openSelectedParameters, shape = CircleShape) {
+                    Icon(Icons.Default.Tune, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text("打开参数")
+                        Text(actionEntry.name.removeSuffix(".json"), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
     }
     if (duplicateDialog && actionEntry != null) NameDialog("复制为新工作流", dialogText, { duplicateDialog = false }) {
         viewModel.duplicateWorkflow(actionEntry, it); duplicateDialog = false; selectedEntryPath = null

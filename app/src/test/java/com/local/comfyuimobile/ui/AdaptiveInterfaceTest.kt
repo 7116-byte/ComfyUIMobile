@@ -186,6 +186,27 @@ class AdaptiveInterfaceTest {
         assertNull(viewModel.state.value.error)
     }
 
+    @Test fun openParametersRemainsVisibleAfterWorkflowScrollAndFeedbackSurvivesTabChanges() {
+        show(true, longContent = true) { it.copy(
+            nodeProblems = mapOf("1" to listOf("模型选项已经失效")),
+            generationMessage = "生成完成", generationProgress = 1f,
+        ) }
+        scrollToEnd()
+        assertTrue(isVisible("打开参数"))
+        assertTrue(isVisible("预览流程 024"))
+        assertTrue(text("预览流程 024").boundsInRoot.bottom < text("打开参数", clickable = true).boundsInRoot.top)
+        assertTrue(isVisible("创作提示词：模型选项已经失效"))
+        click("结果")
+        assertTrue(isVisible("生成完成"))
+        assertTrue(isVisible("创作提示词：模型选项已经失效"))
+        click("后台")
+        assertTrue(isVisible("生成完成"))
+        screenshot("phone-393-global-feedback")
+        click("工作流")
+        assertTrue(isVisible("打开参数"))
+        screenshot("phone-393-workflow-floating-open")
+    }
+
     @Test fun longPagesScrollPastControlsAndReachLastContent() {
         show(true, longContent = true)
         assertTrue(isVisible("搜索工作流"))

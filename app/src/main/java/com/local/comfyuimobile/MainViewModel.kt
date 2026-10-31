@@ -325,6 +325,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val normalized = LanAddress.normalize(address)
                 _state.update { it.copy(serverInput = normalized) }
+                preferences.rememberServerAddress(normalized)
+                val remembered = preferences.settings.first()
+                _state.update { it.copy(savedServers = remembered.profiles) }
                 client.setServer(normalized)
 
                 setConnectionStep(2, "地址检查通过，正在读取服务器版本和显卡信息")
