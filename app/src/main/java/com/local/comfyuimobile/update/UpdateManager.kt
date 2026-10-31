@@ -17,6 +17,7 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
@@ -51,25 +52,29 @@ class UpdateManager(private val context: Context) {
                     if (!response.isSuccessful) throw IllegalStateException("检查失败：HTTP ${response.code}")
                     JSONObject(response.body?.string().orEmpty())
                 }
-            }.getOrNull()
-        } ?: return@withContext null
-        if (root.optBoolean("draft") || root.optBoolean("prerelease")) return@withContext null
-        val tag = root.optString("tag_name")
-        if (tag.isBlank() || VersionComparator.compare(tag, BuildConfig.VERSION_NAME) <= 0) return@withContext null
-        val expectedApkName = "ComfyUIMobile-$tag-release.apk"
-        val expectedShaName = "$expectedApkName.sha256"
-        val assets = root.optJSONArray("assets") ?: return@withContext null
-        var apkUrl = ""
-        var shaUrl: String? = null
-        repeat(assets.length()) { index ->
-            val asset = assets.getJSONObject(index)
-            val name = asset.optString("name")
-            val url = asset.optString("browser_download_url")
-            if (name.equals(expectedApkName, true)) apkUrl = url
-            if (name.equals(expectedShaName, true)) shaUrl = url
+            }.onFailure { if (it is CancellationException) throw it }.getOrNull()
         }
-        if (apkUrl.isBlank() || shaUrl.isNullOrBlank()) return@withContext null
-        UpdateInfo(tag, apkUrl, shaUrl, root.optString("html_url"))
+        if (root != null) ReleaseUpdateParser.parse(root, BuildConfig.VERSION_NAME)
+        else checkPublishedReleasePage()
+    }
+
+    private suspend fun checkPublishedReleasePage(): UpdateInfo? {
+        val repository = BuildConfig.GITHUB_REPOSITORY
+        val url = "https://github.com/$repository/releases/latest"
+        val info = executeCancellable(Request.Builder().url(url).get().build()) { response ->
+            if (!response.isSuccessful) throw IOException("更新检查失败：GitHub API 与发布页均不可用（HTTP ${response.code}）")
+            ReleaseUpdateParser.fromReleasePage(response.request.url.toString(), repository, BuildConfig.VERSION_NAME)
+        } ?: return null
+        // A redirect alone does not establish that both install assets exist.
+        executeCancellable(Request.Builder().url(requireNotNull(info.sha256Url)).get().build()) { response ->
+            if (!response.isSuccessful) throw IOException("新版本校验文件不可用：HTTP ${response.code}")
+            val checksum = response.body?.string().orEmpty().trim().substringBefore(' ')
+            if (!checksum.matches(Regex("[0-9a-fA-F]{64}"))) throw IOException("新版本 SHA-256 格式无效")
+        }
+        executeCancellable(Request.Builder().url(info.apkUrl).head().build()) { response ->
+            if (!response.isSuccessful) throw IOException("新版本正式安装包不可用：HTTP ${response.code}")
+        }
+        return info
     }
 
     /** Downloads inside this App, validates the APK, then opens Android's package installer. */
@@ -363,4 +368,42 @@ object UpdateMirrors {
     }
 
     fun pickFastest(probes: List<MirrorProbe>): MirrorProbe? = probes.minByOrNull { it.latencyMillis }
+}
+
+internal object ReleaseUpdateParser {
+    fun fromReleasePage(url: String, repository: String, installedVersion: String): UpdateInfo? {
+        val parsed = okhttp3.HttpUrl.Companion.run { url.toHttpUrl() }
+        val prefix = repository.split('/') + listOf("releases", "tag")
+        val parts = parsed.pathSegments
+        require(parsed.scheme == "https" && parsed.host == "github.com" && parts.size == prefix.size + 1 && parts.take(prefix.size) == prefix) {
+            "GitHub 未返回有效的正式发布页"
+        }
+        val tag = parts.last()
+        require(tag.matches(Regex("v?[0-9]+\\.[0-9]+\\.[0-9]+"))) { "发布页版本格式无效" }
+        if (VersionComparator.compare(tag, installedVersion) <= 0) return null
+        val apk = "https://github.com/$repository/releases/download/$tag/ComfyUIMobile-$tag-release.apk"
+        return UpdateInfo(tag, apk, "$apk.sha256", url)
+    }
+
+    fun parse(response: JSONObject?, installedVersion: String): UpdateInfo? {
+        val root = response ?: throw IOException("无法读取更新信息，GitHub 或镜像可能限流；请稍后重试或从 GitHub Release 手动下载")
+        if (root.optBoolean("draft") || root.optBoolean("prerelease")) return null
+        val tag = root.optString("tag_name")
+        require(tag.isNotBlank()) { "更新信息缺少版本号" }
+        if (VersionComparator.compare(tag, installedVersion) <= 0) return null
+        val expectedApkName = "ComfyUIMobile-$tag-release.apk"
+        val expectedShaName = "$expectedApkName.sha256"
+        val assets = root.optJSONArray("assets") ?: throw IOException("新版本缺少安装附件")
+        var apkUrl = ""
+        var shaUrl: String? = null
+        repeat(assets.length()) { index ->
+            val asset = assets.getJSONObject(index)
+            val name = asset.optString("name")
+            val url = asset.optString("browser_download_url")
+            if (name.equals(expectedApkName, true)) apkUrl = url
+            if (name.equals(expectedShaName, true)) shaUrl = url
+        }
+        if (apkUrl.isBlank() || shaUrl.isNullOrBlank()) throw IOException("新版本缺少正式 APK 或 SHA-256 校验文件")
+        return UpdateInfo(tag, apkUrl, shaUrl, root.optString("html_url"))
+    }
 }
