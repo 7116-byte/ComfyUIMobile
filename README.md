@@ -2,13 +2,13 @@
 
 ComfyUI Mobile 是一个连接自有 ComfyUI 服务器的原生 Android 客户端。它把 ComfyUI 工作流转换成手机友好的纵向参数表单，不在主界面显示节点画布。
 
-> 当前版本：[v0.1.71](https://github.com/7116-byte/ComfyUIMobile/releases/tag/v0.1.71)。统一手机和平板界面，将服务器信息与任务整合为“后台”，改善滚动浏览、键盘避让及桌面返回。
+> 当前版本：[v0.1.72](https://github.com/7116-byte/ComfyUIMobile/releases/tag/v0.1.72)。修复更新检查误报与 API 限流回退，增加常驻顶栏提示和悬浮操作槽，提前保存连接记录。
 
 正式版可从“设置 → 软件更新”检查、下载并安装更新；也可在 Release 页面下载正式 APK。独立包名的预览版与正式版并存，不能相互覆盖。布局及验证记录见 [自适应界面说明](docs/design/adaptive-interface.md)。
 
-若 0.1.69–0.1.71 检查不到更新，可直接从 Release 下载正式包覆盖安装；旧检查逻辑可能把接口限流误报为最新。开发分支已加入官方发布页备用检查，详见 [更新检查说明](docs/update-checks.md)。
+若 0.1.69–0.1.71 检查不到更新，可直接从 Release 下载正式包覆盖安装；旧检查逻辑可能把接口限流误报为最新。v0.1.72 已加入官方发布页备用检查，详见 [更新检查说明](docs/update-checks.md)。
 
-开发中的 [v0.1.72 参数页预览](docs/design/parameter-actions.md) 将提示移至透明常驻的“参数”标题栏，并提供悬浮的高级编辑和生成操作槽。
+[v0.1.72 界面说明](docs/design/parameter-actions.md) 记录顶栏提示、悬浮操作和验证边界。
 
 ## 功能
 
