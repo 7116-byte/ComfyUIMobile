@@ -40,9 +40,9 @@ The first-use guide can be skipped and reopened from the connection screen or se
 
 ## Connection compatibility
 
-The current app accepts **HTTP root addresses** on a trusted LAN or an already reachable VPN. It needs a complete ComfyUI instance: the real frontend, node definitions, userdata workflows, upload, task / result APIs, and WebSocket.
+Starting with v0.1.74, the app accepts **HTTP / HTTPS root addresses**, with secure WebSocket for HTTPS instances. HTTPS uses port 443 when omitted; nonstandard ports are preserved. Existing HTTP addresses retain the default ComfyUI port 8188. It needs a complete ComfyUI instance: the real frontend, node definitions, userdata workflows, upload, task / result APIs, and WebSocket.
 
-HTTPS URLs, path-prefix proxies, platform logins, cookies, API keys, token-bearing URLs, serverless endpoints, and Comfy Cloud / deployed workflow APIs are **not currently supported**. A cloud GPU instance may work only if it exposes a compatible full HTTP service; no cloud vendor compatibility is claimed. Do not replace an HTTPS URL with HTTP or expose an unauthenticated instance publicly.
+Path-prefix proxies, platform logins, cookies, API keys, token-bearing URLs, app sharing pages, serverless endpoints, and Comfy Cloud / deployed workflow APIs are **not currently supported**. Cloud GPU instances require a directly reachable full HTTP / HTTPS service; no cloud vendor acceptance is claimed. Invalid TLS certificates are rejected. Do not replace an HTTPS URL with HTTP or expose an unauthenticated instance publicly. Settings include a direct link to this GitHub project.
 
 ## Data and limits
 

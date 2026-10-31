@@ -208,7 +208,7 @@ private fun ConnectionControls(
             state.discoveredServers.forEach { profile -> ConnectionServerTile(profile, { onConnect(profile.baseUrl) }) }
         }
     }
-    Text("使用工作站的 HTTP 地址，支持局域网或 VPN。电脑端请开启局域网访问，并放行对应端口。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Text("支持局域网 / VPN 的 HTTP 地址，以及云端完整 ComfyUI 实例的 HTTPS 根地址。云端链接按平台原样粘贴；需要平台登录或 API Key 的服务暂不支持。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
@@ -232,7 +232,7 @@ private fun ConnectionServerTile(profile: ServerProfile, onClick: () -> Unit, on
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(profile.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(profile.baseUrl.removePrefix("http://"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(profile.baseUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             if (onDelete != null) IconButton(onClick = onDelete) { Icon(Icons.Default.DeleteOutline, "删除服务器 ${profile.name}", Modifier.size(20.dp)) }
         }

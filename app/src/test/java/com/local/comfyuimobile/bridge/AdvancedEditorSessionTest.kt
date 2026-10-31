@@ -80,4 +80,13 @@ class AdvancedEditorSessionTest {
         )
     }
 
+    @Test fun httpsBridgeOnlyRunsOnExactCompletedOrigin() {
+        fun ready(url: String) = ComfyBridge.isPageReadyForScripts(url, "https://comfy.example.com", 100, 4, 4, true)
+        assertTrue(ready("https://comfy.example.com/"))
+        assertTrue(ready("https://comfy.example.com:443/index.html"))
+        assertFalse(ready("https://comfy.example.com.evil.test/"))
+        assertFalse(ready("https://comfy.example.com:8443/"))
+        assertFalse(ready("http://comfy.example.com/"))
+    }
+
 }

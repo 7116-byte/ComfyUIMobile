@@ -23,8 +23,8 @@ android {
         applicationId = "com.local.comfyuimobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 173
-        versionName = "0.1.73"
+        versionCode = 174
+        versionName = "0.1.74"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"7116-byte/ComfyUIMobile\"")
@@ -69,6 +69,9 @@ android {
 
     testOptions {
         unitTests.isIncludeAndroidResources = true
+        // Robolectric installs Conscrypt; its JDK 17 socket implementation reflects
+        // InetAddress when TLS tests run after Android tests in the same worker.
+        unitTests.all { it.jvmArgs("--add-opens=java.base/java.net=ALL-UNNAMED") }
     }
 }
 

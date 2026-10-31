@@ -19,6 +19,26 @@ import org.robolectric.annotation.Config
 class ServerHistoryTest {
     @get:Rule val folder = TemporaryFolder()
 
+    @Test fun httpsCloudHistorySurvivesRestartAlongsideExistingLanServer() = runBlocking {
+        val file = folder.newFolder().resolve("cloud.preferences_pb")
+        val context = RuntimeEnvironment.getApplication()
+        val firstJob = SupervisorJob()
+        val first = AppPreferences(context, PreferenceDataStoreFactory.create(scope = CoroutineScope(Dispatchers.IO + firstJob), produceFile = { file }))
+        try {
+            first.rememberServerAddress("http://192.168.10.7:8188")
+            first.rememberServerAddress("https://abc-8188.proxy.runpod.net:443/")
+            first.rememberServerAddress("https://abc-8188.proxy.runpod.net")
+        } finally { firstJob.cancelAndJoin() }
+        val secondJob = SupervisorJob()
+        try {
+            val restored = AppPreferences(context, PreferenceDataStoreFactory.create(scope = CoroutineScope(Dispatchers.IO + secondJob), produceFile = { file })).settings.first()
+            assertEquals("https://abc-8188.proxy.runpod.net", restored.activeServerUrl)
+            assertEquals(2, restored.profiles.size)
+            assertEquals("abc-8188.proxy.runpod.net", restored.profiles.first().name)
+            assertEquals("http://192.168.10.7:8188", restored.profiles.last().baseUrl)
+        } finally { secondJob.cancelAndJoin() }
+    }
+
     @Test fun completedGuideSurvivesRestartWithoutChangingConnectionOrSavingRules() = runBlocking {
         val file = folder.newFolder().resolve("guide.preferences_pb")
         val context = RuntimeEnvironment.getApplication()

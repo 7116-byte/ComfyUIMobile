@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -65,6 +66,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -72,6 +74,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -84,6 +87,7 @@ import com.local.comfyuimobile.model.ConnectionStatus
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 private enum class SettingsPage(val title: String) {
     OVERVIEW("设置"), SERVER("服务器连接"), RESULTS("本地作品"),
@@ -102,6 +106,8 @@ internal fun SettingsScreen(
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val scope = rememberCoroutineScope()
     var page by rememberSaveable { mutableStateOf(SettingsPage.OVERVIEW) }
     val expanded = LocalConfiguration.current.screenWidthDp >= 720
     var confirmation by remember { mutableStateOf<SettingsConfirmation?>(null) }
@@ -213,6 +219,11 @@ internal fun SettingsScreen(
                                                     else -> "当前版本 ${BuildConfig.VERSION_NAME}"
                                                 },
                                             ) { page = SettingsPage.UPDATE }
+                                            SettingsDivider()
+                                            SettingsLink(Icons.Default.OpenInNew, "GitHub 项目", "源码、版本与问题反馈") {
+                                                runCatching { uriHandler.openUri("https://github.com/${BuildConfig.GITHUB_REPOSITORY}") }
+                                                    .onFailure { scope.launch { snackbar.showSnackbar("无法打开浏览器，请稍后重试") } }
+                                            }
                                         }
                                     }
                                     item {

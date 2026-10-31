@@ -38,14 +38,15 @@ class PromptSubmissionException(
 
 class ComfyClient(
     downloadDirectory: File = File(System.getProperty("java.io.tmpdir") ?: ".", "comfy-original-downloads"),
-) {
-    private val jsonMedia = "application/json; charset=utf-8".toMediaType()
-    private val client = OkHttpClient.Builder()
+    private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(4, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
-        .build()
+        .build(),
+) {
+    private val jsonMedia = "application/json; charset=utf-8".toMediaType()
+    private val apiClient = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
 
     private val originalDownloader = OriginalFileDownloader(client, downloadDirectory)
 
@@ -63,7 +64,7 @@ class ComfyClient(
         val normalized = LanAddress.normalize(url)
         val root = executeJson(Request.Builder().url("$normalized/system_stats").get().build())
         val stats = parseSystemStats(root)
-        val host = normalized.removePrefix("http://").substringBefore(':')
+        val host = LanAddress.serverHost(normalized)
         stats to ServerProfile(
             id = UUID.nameUUIDFromBytes(normalized.toByteArray()).toString(),
             name = host,
@@ -198,7 +199,7 @@ class ComfyClient(
                     ),
             )
         val request = Request.Builder().url("$baseUrl/prompt").post(body.toString().toRequestBody(jsonMedia)).build()
-        client.newCall(request).execute().use { httpResponse ->
+        apiClient.newCall(request).execute().use { httpResponse ->
             val responseBody = httpResponse.body?.string().orEmpty()
             val response = runCatching { JSONObject(responseBody) }.getOrElse { JSONObject() }
             if (!httpResponse.isSuccessful) {
@@ -252,7 +253,7 @@ class ComfyClient(
         } else {
             val specific = Request.Builder().url("$baseUrl/api/jobs/${encode(job.id)}/cancel")
                 .post(ByteArray(0).toRequestBody()).build()
-            client.newCall(specific).execute().use { response ->
+            apiClient.newCall(specific).execute().use { response ->
                 if (response.code == 404 || response.code == 405) {
                     error("此服务器不支持按任务安全取消；未发送会影响其他任务的全局中断，请在服务器端取消")
                 }
@@ -269,8 +270,8 @@ class ComfyClient(
     fun openWebSocket(clientId: String, onMessage: (JSONObject) -> Unit, onFailure: (Throwable) -> Unit, onOpen: () -> Unit) {
         closeWebSocket()
         val epoch = socketEpoch.get()
-        val request = Request.Builder().url(baseUrl.replaceFirst("http://", "ws://") + "/ws?clientId=${encode(clientId)}").build()
-        socket = client.newWebSocket(request, object : WebSocketListener() {
+        val request = Request.Builder().url(LanAddress.webSocketUrl(baseUrl, clientId)).build()
+        socket = apiClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) { if (epoch == socketEpoch.get()) onOpen() }
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (epoch == socketEpoch.get()) runCatching { onMessage(JSONObject(text)) }
@@ -301,8 +302,21 @@ class ComfyClient(
     private fun executeArray(request: Request): JSONArray = JSONArray(executeText(request))
 
     private fun executeText(request: Request, allowedCodes: Set<Int> = setOf(200)): String {
-        client.newCall(request).execute().use { response ->
+        apiClient.newCall(request).execute().use { response ->
+            require(LanAddress.sameOrigin(response.request.url.toString(), request.url.toString())) {
+                "服务跳转到了其他站点，请填写最终 ComfyUI 实例地址；当前不支持平台登录"
+            }
             val body = response.body?.string().orEmpty()
+            if (response.code in setOf(301, 302, 303, 307, 308)) {
+                throw IllegalStateException("服务要求跳转，请直接填写最终的 HTTPS / HTTP 实例地址")
+            }
+            if (response.code == 401 || response.code == 403) {
+                throw IllegalStateException("HTTP ${response.code}：访问被拒绝，可能需要平台登录、访问授权或被代理拦截；当前仅支持可直接访问的完整 ComfyUI 实例")
+            }
+            if (response.header("Content-Type").orEmpty().contains("text/html", true) ||
+                body.trimStart().startsWith("<!doctype html", true) || body.trimStart().startsWith("<html", true)) {
+                throw IllegalStateException("该地址返回了网页或登录页，而非 ComfyUI 接口；请使用实例直连地址，不是平台控制台、分享页或纯 API 链接")
+            }
             if (response.code !in allowedCodes) {
                 val message = runCatching {
                     val error = JSONObject(body).optJSONObject("error")

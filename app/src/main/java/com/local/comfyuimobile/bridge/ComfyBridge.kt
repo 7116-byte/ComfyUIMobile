@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.net.http.SslError
 import android.os.SystemClock
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -14,6 +15,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import android.webkit.WebChromeClient
 import android.webkit.WebViewClient
+import android.webkit.SslErrorHandler
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -27,6 +29,7 @@ import com.local.comfyuimobile.model.ParameterSection
 import com.local.comfyuimobile.model.WorkflowConnectionMarker
 import com.local.comfyuimobile.model.WorkflowManifest
 import com.local.comfyuimobile.model.WorkflowNode
+import com.local.comfyuimobile.network.LanAddress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -160,9 +163,18 @@ class ComfyBridge(private val activity: Activity) {
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val target = request.url.toString()
-                if (target.startsWith(allowedOrigin)) return false
-                runCatching { activity.startActivity(Intent(Intent.ACTION_VIEW, request.url)) }
+                if (LanAddress.sameOrigin(target, allowedOrigin)) return false
+                if (request.hasGesture() && request.url.scheme in setOf("http", "https")) {
+                    runCatching { activity.startActivity(Intent(Intent.ACTION_VIEW, request.url)) }
+                } else if (request.isForMainFrame) {
+                    pageLoadError = "网页跳转到了其他站点，当前仅支持无需平台登录的完整 ComfyUI 实例"
+                }
                 return true
+            }
+
+            override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
+                handler.cancel()
+                pageLoadError = "HTTPS 证书校验失败，请检查实例证书或设备时间；不会忽略证书错误"
             }
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
@@ -232,7 +244,7 @@ class ComfyBridge(private val activity: Activity) {
             pageLoadError = null
             webView.onResume()
             webView.resumeTimers()
-            if (webView.url.orEmpty().startsWith(origin)) webView.reload() else webView.loadUrl("$origin/")
+            if (LanAddress.sameOrigin(webView.url.orEmpty(), origin)) webView.reload() else webView.loadUrl("$origin/")
         }
 
         val deadline = System.currentTimeMillis() + timeoutMillis
@@ -1818,7 +1830,7 @@ class ComfyBridge(private val activity: Activity) {
             attached: Boolean,
         ): Boolean =
             allowedOrigin.isNotBlank() && currentUrl != "about:blank" &&
-                currentUrl.startsWith(allowedOrigin) && progress >= 100 &&
+                LanAddress.sameOrigin(currentUrl, allowedOrigin) && progress >= 100 &&
                 pageEpoch == finishedPageEpoch && attached
 
         private val REUSE_SCRIPT = """

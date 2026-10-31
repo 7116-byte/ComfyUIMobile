@@ -103,7 +103,7 @@ class AppPreferences(context: Context, private val store: DataStore<Preferences>
             val current = decodeProfiles(preferences[Keys.profiles].orEmpty())
             val profile = current.firstOrNull { it.baseUrl == normalized }
                 ?: ServerProfile(java.util.UUID.nameUUIDFromBytes(normalized.toByteArray()).toString(),
-                    normalized.removePrefix("http://").substringBefore(':'), normalized)
+                    LanAddress.serverHost(normalized), normalized)
             preferences[Keys.profiles] = encodeProfiles((listOf(profile) + current.filterNot { it.baseUrl == normalized }).take(12))
             preferences[Keys.activeServerUrl] = normalized
         }

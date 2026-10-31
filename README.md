@@ -14,6 +14,8 @@ A native Android companion for your own ComfyUI — workflows, parameters, and o
 
 ## 在手机上，专注创作
 
+当前正式版：[v0.1.74](https://github.com/7116-byte/ComfyUIMobile/releases/tag/v0.1.74) · 支持完整实例的 HTTPS / WSS 连接，设置内可直达项目仓库。
+
 工作流和模型留在你的工作站，手机负责选择工作流、调整参数、提交任务和查看作品。日常操作使用原生触控界面；需要遮罩、画板等复杂控件时，再进入服务器的高级编辑。
 
 | 从哪里开始 | 可以做什么 |
@@ -69,11 +71,13 @@ Release 同时提供 APK 的 SHA-256 校验文件。正式版延续原包名与�
 | --- | --- |
 | 自有电脑，同一局域网 | 支持，需开放监听及相应端口 |
 | 已互通的 VPN / 虚拟局域网 | 支持使用可达的 HTTP 根地址；App 不负责建立 VPN |
-| 云 GPU 上的完整 ComfyUI 实例 | 条件支持：须提供可直达的 HTTP 根地址、原生接口、前端和 WebSocket，需实测 |
-| HTTPS 分享页、平台登录 / Cookie / API Key、带路径或令牌的链接 | 目前不支持 |
+| 云 GPU 上的完整 ComfyUI 实例 | v0.1.74 起支持 HTTP / HTTPS 根地址与安全 WebSocket；须提供原生接口和完整前端，具体平台需实测 |
+| 仅应用分享页、平台登录 / Cookie / API Key、带路径或令牌的链接 | 目前不支持 |
 | 纯 API、Serverless、部署后的单工作流接口、Comfy Cloud API | 目前不支持直接接入 |
 
 “浏览器能打开一个网页”不等于完整兼容。App 需要服务器自己的前端、节点定义、工作流读写、上传和任务接口；它不提供算力、模型或平台账号。ComfyUI 通常没有默认访问认证，请在可信网络或 VPN 内使用，不要直接公开无认证端口。更多判断方法见 [云平台兼容说明](docs/connection-guide.md#云平台给的纯链接能用吗)。
+
+HTTPS 实例链接请按原样粘贴，例如 `https://实例域名`；省略端口时使用 443，自定义端口原样保留。证书无效会拒绝连接。设置中的“GitHub 项目”可直接打开本仓库。
 
 ## 保存规则，先说清楚
 

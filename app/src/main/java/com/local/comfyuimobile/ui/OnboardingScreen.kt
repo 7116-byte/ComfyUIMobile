@@ -29,8 +29,8 @@ private val guideSteps = listOf(
         listOf(
             "先准备电脑" to "需要你自己的 ComfyUI，且工作流已能在电脑网页正常生成。App 不附带模型，也不提供算力或云服务账号。",
             "让手机访问电脑" to "同一 Wi-Fi 下，在电脑启动 ComfyUI 时添加 --listen 0.0.0.0，并允许防火墙放行使用的端口（默认 8188）。启动器用户可在启动器里开启局域网访问。",
-            "填入工作站地址" to "例如 http://192.168.1.20:8188；使用电脑的局域网 IP，不是手机的 IP 或 127.0.0.1。同网段也可尝试“扫描局域网”。",
-        ), "先用手机浏览器打开同一地址；网页能访问，再回 App 连接。目前支持 HTTP，远程访问请使用可信 VPN，不要直接公开无认证端口。"),
+            "填入工作站地址" to "局域网例如 http://192.168.1.20:8188，填写电脑 IP，不是手机 IP 或 127.0.0.1；云端完整实例可直接粘贴 https:// 开头的服务根地址。同网段也可扫描默认端口。",
+        ), "先用手机浏览器打开同一地址，再回 App 连接。支持 HTTP / HTTPS，HTTPS 自动使用安全进度连接；证书错误会停止连接。远程访问请使用可信网络，不要直接公开无认证端口。"),
     GuideStep("打开工作流", "熟悉的工作流，更顺手。", "从节点画布，走进适合触控的参数表单。", Icons.Default.Tune,
         listOf(
             "选择已有工作流" to "连接后进入“工作流”，浏览文件夹或搜索；点选一项，再点悬浮的“打开参数”。电脑端需已保存工作流，也可从文件或带工作流信息的图片导入。",
@@ -163,7 +163,8 @@ private fun ConnectionGuideDetails() {
         }
         HorizontalDivider()
         Text("哪些连接可以用？", style = MaterialTheme.typography.titleMedium)
-        Text("支持：同一局域网、已互通的 VPN / 虚拟局域网，以及可信网络内的 HTTP 根地址直连。App 不负责创建 VPN 或隧道。", style = MaterialTheme.typography.bodyMedium)
-        Text("云平台：只有提供完整 ComfyUI 实例、可直接访问 HTTP 根地址并透传原生接口及 WebSocket 时，才可能兼容，仍需实测。HTTPS 分享页、需要平台登录 / Cookie / API Key 的链接、带路径前缀或令牌参数的链接、纯 API / Serverless 服务，目前不支持。不要把 https 改成 http 来绕过。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("支持：局域网 / 已互通 VPN 的 HTTP 地址，以及云端完整实例的 HTTPS 根地址，例如 https://你的实例域名。HTTPS 未写端口时使用 443，不会添加 8188；平台给了端口时原样保留。App 不负责创建 VPN 或隧道。", style = MaterialTheme.typography.bodyMedium)
+        Text("云端连接：复制服务入口的完整外部地址，例如 https://实例域名:8443。实例内 ComfyUI 需监听该入口映射的内部端口；手机保留平台给出的外部协议、域名和端口，不要替换成内部端口。具体实例仍需验证接口、前端和 WebSocket。", style = MaterialTheme.typography.bodyMedium)
+        Text("云端需提供完整 ComfyUI 前端、原生接口和 WebSocket，例如云 GPU 平台的实例服务入口。仅有 HTTPS 不代表兼容：需要平台登录 / Cookie / API Key、带路径前缀或令牌参数的链接、应用分享页及纯 API / Serverless 服务仍不支持。请粘贴最终实例根地址，不要改写成 HTTP，也不要忽略证书错误。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
